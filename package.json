@@ -8,9 +8,14 @@
     "dev": "node server.js"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
+    "@distube/ytdl-core": "^4.16.12",
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.13.2",
+    "cheerio": "^1.1.2",
     "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "dotenv": "^16.3.1"
+    "youtube-transcript": "^1.2.1",
+    "ytdl-core": "^4.11.5"
   }
 }

@@ -1,6 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+const axios = require('axios');
+const cheerio = require('cheerio');
+const { YoutubeTranscript } = require('youtube-transcript');
 require('dotenv').config();
 
 const app = express();
@@ -25,10 +29,151 @@ const getModel = () => {
     });
 };
 
+// Helper: Sleep function for delays
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper: Fetch Website Content
+const fetchWebsiteContent = async (url) => {
+    try {
+        const { data } = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+        });
+        const $ = cheerio.load(data);
+
+        // Remove scripts, styles, and ads
+        $('script').remove();
+        $('style').remove();
+        $('nav').remove();
+        $('footer').remove();
+        $('.ads').remove();
+
+        // Extract meaningful text
+        let content = '';
+        $('h1, h2, h3, p, li').each((i, el) => {
+            const text = $(el).text().trim();
+            if (text.length > 20) {
+                content += text + '\n';
+            }
+        });
+
+        return content.substring(0, 20000); // Limit context window
+    } catch (error) {
+        if (error.response && error.response.status === 403) {
+            throw new Error('WEB_ACCESS_BLOCKED: This website blocks automated access. Please copy/paste content manually.');
+        }
+        throw new Error(`Failed to fetch website: ${error.message}`);
+    }
+};
+
+// Helper: Manual Transcript Fetch (Fallback)
+const fetchManualTranscript = async (videoId) => {
+    try {
+        const { data } = await axios.get(`https://www.youtube.com/watch?v=${videoId}`, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+        });
+
+        const regex = /"captionTracks":(\[.*?\])/;
+        const match = regex.exec(data);
+        if (!match) return null;
+
+        const tracks = JSON.parse(match[1]);
+        // Prefer English, fallback to first available
+        const track = tracks.find(t => t.languageCode === 'en') || tracks[0];
+
+        if (!track) return null;
+
+        const { data: transcriptXml } = await axios.get(track.baseUrl);
+        const $ = cheerio.load(transcriptXml, { xmlMode: true });
+
+        let text = '';
+        $('text').each((i, el) => {
+            text += $(el).text() + ' ';
+        });
+
+        // Clean up HTML entities
+        return text.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').trim();
+    } catch (error) {
+        console.error('Manual scraping failed:', error.message);
+        return null;
+    }
+};
+
+// Helper: Fetch YouTube Transcript
+const fetchYouTubeTranscript = async (url) => {
+    console.log(`[DEBUG] Fetching transcript for URL: ${url}`);
+    try {
+        let videoId = url;
+
+        // Extract ID from Shorts, standard URLs, or share links
+        if (url.includes('shorts/')) {
+            const match = url.match(/shorts\/([a-zA-Z0-9_-]+)/);
+            if (match) videoId = match[1];
+        } else if (url.includes('v=')) {
+            const match = url.match(/[?&]v=([a-zA-Z0-9_-]+)/);
+            if (match) videoId = match[1];
+        } else if (url.includes('youtu.be/')) {
+            const match = url.match(/youtu\.be\/([a-zA-Z0-9_-]+)/);
+            if (match) videoId = match[1];
+        }
+
+        console.log(`[DEBUG] Extracted Video ID: ${videoId}`);
+
+        let transcript = '';
+        try {
+            const transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
+            if (transcriptItems && transcriptItems.length > 0) {
+                transcript = transcriptItems.map(item => item.text).join(' ');
+            }
+        } catch (libError) {
+            console.log(`[DEBUG] Library failed, trying manual fallback: ${libError.message}`);
+        }
+
+        // Fallback to manual scraping if library failed
+        if (!transcript || transcript.trim().length === 0) {
+            console.log('[DEBUG] Trying manual fallback...');
+            const manualTranscript = await fetchManualTranscript(videoId);
+            if (manualTranscript) {
+                transcript = manualTranscript;
+            }
+        }
+
+        if (!transcript || transcript.trim().length === 0) {
+            throw new Error('YOUTUBE_BLOCK: Automated access blocked by YouTube. Please copy/paste transcript manually.');
+        }
+
+        return transcript.substring(0, 25000); // Limit context window
+    } catch (error) {
+        if (error.message.includes('YOUTUBE_BLOCK')) throw error;
+        throw new Error(`Failed to fetch YouTube transcript: ${error.message}`);
+    }
+};
+
+// Helper: API Call with Retry Logic (Exponential Backoff)
+const generateWithRetry = async (model, content, retries = 3, delay = 2000) => {
+    try {
+        return await model.generateContent(content);
+    } catch (error) {
+        const isRateLimit = error.message.includes('429') || error.message.includes('Too Many Requests');
+        const isServiceUnavailable = error.message.includes('503') || error.message.includes('Overloaded');
+
+        if (retries > 0 && (isRateLimit || isServiceUnavailable)) {
+            console.log(`⚠️ API Busy (Rate Limit). Retrying in ${delay / 1000}s... (${retries} attempts left)`);
+            await sleep(delay);
+            return generateWithRetry(model, content, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+};
+
 // ==================== NOTES ENDPOINT ====================
 app.post('/api/notes', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard' } = req.body;
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english' } = req.body;
 
         if (!content) {
             return res.status(400).json({ error: 'Content is required' });
@@ -43,6 +188,31 @@ app.post('/api/notes', async (req, res) => {
 
         const lengthInstruction = lengthGuides[noteLength] || lengthGuides.standard;
 
+        // Format instructions
+        const formatGuides = {
+            bullet: 'Use standard bullet points with clear hierarchy.',
+            meeting: 'Format as meeting minutes: structured with Attendees, Agenda, Discussion Points, Decisions made, and Action Items.',
+            study: 'Format as a study guide: Definitions, Key Concepts, Summaries, and Review Questions.',
+            todo: 'Format as a To-Do list: prioritized tasks, clear checkboxes, and deadlines/timeframes if implied.',
+            summary: 'Format as an executive summary: High-level overview, key findings, and strategic recommendations. Paragraph form.',
+            blog: 'Format as a structured blog post skeleton: Catchy Title, Introduction, clearly headed Body Paragraphs, and Conclusion.',
+        };
+        const formatInstruction = formatGuides[format] || formatGuides.bullet;
+
+        // Tone instructions
+        const toneGuides = {
+            professional: 'Use professional, business-appropriate language.',
+            academic: 'Use formal, academic language suitable for research or study.',
+            casual: 'Use relaxed, easy-to-understand language.',
+            creative: 'Use engaging, descriptive, and creative language.',
+        };
+        const toneInstruction = toneGuides[tone] || toneGuides.professional;
+
+        // Language instruction
+        const languageInstruction = language && language.toLowerCase() !== 'english'
+            ? `IMPORTANT: Generate ALL content in ${language}. Provide the SAME level of detail and number of points as you would in English. Do NOT shorten or summarize when translating. Use natural ${language} phrasing.`
+            : 'Keep the output in English.';
+
         let prompt = '';
         let result;
 
@@ -56,6 +226,9 @@ ${content}
 """
 
 LENGTH REQUIREMENT: ${lengthInstruction}
+FORMAT REQUIREMENT: ${formatInstruction}
+TONE REQUIREMENT: ${toneInstruction}
+LANGUAGE REQUIREMENT: ${languageInstruction}
 
 INSTRUCTIONS:
 1. Create a clear, hierarchical structure with sections
@@ -79,17 +252,23 @@ FORMAT YOUR RESPONSE AS:
 Generate the notes now:`;
 
                 const textModel = getModel();
-                result = await textModel.generateContent(prompt);
+                result = await generateWithRetry(textModel, prompt);
                 break;
 
             case 'image':
                 prompt = `You are an expert at analyzing images and extracting information. Analyze this image thoroughly and create comprehensive notes.
+
+LENGTH REQUIREMENT: ${lengthInstruction}
+FORMAT REQUIREMENT: ${formatInstruction}
+TONE REQUIREMENT: ${toneInstruction}
+LANGUAGE REQUIREMENT: ${languageInstruction}
 
 INSTRUCTIONS:
 1. If it contains text/handwriting: Transcribe it accurately and organize it
 2. If it's a diagram/chart: Explain what it shows and extract all data
 3. If it's a photo of notes/whiteboard: Clean up and organize the content
 4. If it's any other image: Describe it and note key observations
+5. Apply the requested Tone, Format, and Language settings.
 
 FORMAT YOUR RESPONSE AS:
 📷 **Image Analysis Notes**
@@ -103,10 +282,10 @@ FORMAT YOUR RESPONSE AS:
 📌 **Key Points**
 • [Important observations]
 
-Generate the notes now:`;
+Generate the notes now following all requirements:`;
 
                 const visionModel = getModel();
-                result = await visionModel.generateContent([
+                result = await generateWithRetry(visionModel, [
                     prompt,
                     {
                         inlineData: {
@@ -120,12 +299,18 @@ Generate the notes now:`;
             case 'voice':
                 prompt = `You are an expert transcriber and note-taker. Transcribe this audio and convert it into organized, professional notes.
 
+LENGTH REQUIREMENT: ${lengthInstruction}
+FORMAT REQUIREMENT: ${formatInstruction}
+TONE REQUIREMENT: ${toneInstruction}
+LANGUAGE REQUIREMENT: ${languageInstruction}
+
 INSTRUCTIONS:
 1. First, transcribe the spoken content accurately
 2. Clean up filler words (um, uh, like, you know)
 3. Organize by topics/themes mentioned
 4. Extract action items if any are mentioned
 5. Highlight important names, dates, numbers
+6. Apply the requested Tone, Format, and Language settings.
 
 FORMAT YOUR RESPONSE AS:
 🎙️ **Audio Notes**
@@ -139,7 +324,7 @@ FORMAT YOUR RESPONSE AS:
 📌 **Key Points & Action Items**
 • [Important takeaways]
 
-Generate the notes now:`;
+Generate the notes now following all requirements:`;
 
                 const audioModel = getModel();
 
@@ -151,7 +336,7 @@ Generate the notes now:`;
                 const supportedMimeTypes = ['audio/mp4', 'audio/m4a', 'audio/mpeg', 'audio/wav'];
 
                 try {
-                    result = await audioModel.generateContent([
+                    result = await generateWithRetry(audioModel, [
                         prompt,
                         {
                             inlineData: {
@@ -191,7 +376,7 @@ Any other observations
 ---
 Tip: Try recording in a quieter environment for better results!`;
 
-                    result = await audioModel.generateContent(fallbackPrompt);
+                    result = await generateWithRetry(audioModel, fallbackPrompt);
                 }
                 break;
 
@@ -199,6 +384,13 @@ Tip: Try recording in a quieter environment for better results!`;
                 prompt = `The user has uploaded a PDF file named: "${content}"
 
 Since I cannot read the PDF content directly, provide a professional note-taking template they can use.
+
+LENGTH REQUIREMENT: ${lengthInstruction}
+FORMAT REQUIREMENT: ${formatInstruction}
+TONE REQUIREMENT: ${toneInstruction}
+LANGUAGE REQUIREMENT: ${languageInstruction}
+
+INSTRUCTIONS:
 
 📄 **Notes Template for: ${content}**
 
@@ -230,10 +422,109 @@ Section 2: Topic
 Space for extra observations
 
 ---
-Fill in this template as you review your PDF!`;
+Fill in this template as you review your PDF!
+(Note: Since I cannot read the PDF directly, I have provided a template. If you can copy the text from the PDF and paste it as text input, I can generate specific notes for you!)`;
 
                 const pdfModel = getModel();
-                result = await pdfModel.generateContent(prompt);
+                result = await generateWithRetry(pdfModel, prompt);
+                break;
+
+            case 'website':
+                const websiteText = await fetchWebsiteContent(content);
+                prompt = `You are an expert web researcher. Summarize the following website content into clear, organized notes.
+
+URL: ${content}
+
+WEBSITE CONTENT:
+"""
+${websiteText}
+"""
+
+LENGTH REQUIREMENT: ${lengthInstruction}
+FORMAT REQUIREMENT: ${formatInstruction}
+TONE REQUIREMENT: ${toneInstruction}
+LANGUAGE REQUIREMENT: ${languageInstruction}
+
+INSTRUCTIONS:
+1. Identify the main topic and key arguments/points
+2. Extract important data, dates, or quotes
+3. Ignore navigation elements or footer text if any slipped through
+4. Organize logical sections with headers
+
+FORMAT YOUR RESPONSE AS:
+🌐 **Website Summary**
+
+**Source:** [${content}](${content})
+
+# Title of Article/Page
+
+**Overview**
+[Brief summary of what this page is about]
+
+**Key Notes**
+• Point 1
+• Point 2
+• Point 3
+
+**Important Details**
+• Detail A
+• Detail B
+
+Generate the notes now:`;
+
+                const webModel = getModel();
+                result = await generateWithRetry(webModel, prompt);
+                break;
+
+            case 'youtube':
+                const transcript = await fetchYouTubeTranscript(content);
+                prompt = `You are an expert video summarizer. Create detailed notes from this YouTube video transcript.
+
+VIDEO URL: ${content}
+
+TRANSCRIPT:
+"""
+${transcript}
+"""
+
+LENGTH REQUIREMENT: ${lengthInstruction}
+FORMAT REQUIREMENT: ${formatInstruction}
+TONE REQUIREMENT: ${toneInstruction}
+LANGUAGE REQUIREMENT: ${languageInstruction}
+
+INSTRUCTIONS:
+1. Reconstruct the logical flow of the video
+2. Group related points into sections with timestamps if possible (guess based on flow, or just use logical sections)
+3. Capture the core message and all supporting details
+4. Ignore filler speech ("um", "guys", "welcome back")
+
+FORMAT YOUR RESPONSE AS:
+📺 **Video Notes**
+
+**Source:** [Watch Video](${content})
+
+# Video Title / Topic
+
+**Executive Summary**
+[Concise summary of the video]
+
+**Key Topics**
+## Topic 1
+• Detail
+• Detail
+
+## Topic 2
+• Detail
+• Detail
+
+**Key Takeaways**
+• Takeaway 1
+• Takeaway 2
+
+Generate the notes now:`;
+
+                const ytModel = getModel();
+                result = await generateWithRetry(ytModel, prompt);
                 break;
 
             default:
@@ -345,7 +636,7 @@ IMPORTANT RULES:
 Generate 3 replies now:`;
 
         const model = getModel();
-        const result = await model.generateContent(prompt);
+        const result = await generateWithRetry(model, prompt);
         const responseText = result.response.text();
 
         // Split the response into separate replies
@@ -389,6 +680,7 @@ app.get('/api/health', (req, res) => {
 // Start server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`✨ SERVER VERSION: v2.2 (With Web Block Handling)`);
     console.log(`📝 Notes endpoint: POST /api/notes`);
     console.log(`💬 Reply endpoint: POST /api/reply`);
 });
