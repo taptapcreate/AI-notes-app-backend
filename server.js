@@ -672,6 +672,76 @@ Generate 3 replies now:`;
     }
 });
 
+// ==================== FOLLOW-UP ENDPOINT ====================
+app.post('/api/followup', async (req, res) => {
+    try {
+        const { context, question, type = 'note' } = req.body;
+
+        if (!context || !question) {
+            return res.status(400).json({ error: 'Context and question are required' });
+        }
+
+        let prompt;
+        if (type === 'reply') {
+            prompt = `You are an AI assistant helping to refine and improve message replies.
+
+ORIGINAL REPLY:
+"""
+${context}
+"""
+
+USER'S REQUEST:
+"""
+${question}
+"""
+
+INSTRUCTIONS:
+1. Modify the original reply according to the user's request
+2. Keep the overall structure unless asked to change it
+3. Maintain appropriate tone and formatting
+4. Return ONLY the refined reply, no explanations
+
+Generate the refined reply now:`;
+        } else {
+            prompt = `You are an AI assistant helping to expand on and clarify notes.
+
+ORIGINAL NOTES:
+"""
+${context}
+"""
+
+USER'S FOLLOW-UP QUESTION:
+"""
+${question}
+"""
+
+INSTRUCTIONS:
+1. Provide a clear, detailed answer to the user's question
+2. Reference the original notes when relevant
+3. Use bullet points and formatting for clarity
+4. If asked to expand a section, provide comprehensive additional information
+5. Keep the same professional tone as the original notes
+
+FORMAT YOUR RESPONSE AS:
+## Follow-up Answer
+
+[Your detailed response here with bullet points where appropriate]
+
+Generate the follow-up response now:`;
+        }
+
+        const model = getModel();
+        const result = await generateWithRetry(model, prompt);
+        const response = result.response.text();
+
+        res.json({ response });
+
+    } catch (error) {
+        console.error('Follow-up generation error:', error);
+        res.status(500).json({ error: 'Failed to generate follow-up', details: error.message });
+    }
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'AI App Backend is running', version: '1.0.0' });
