@@ -1,14 +1,23 @@
 const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const mongoose = require('mongoose');
 
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { YoutubeTranscript } = require('youtube-transcript');
 require('dotenv').config();
 
+// Import User model
+const User = require('./models/User');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => console.log('✅ Connected to MongoDB Atlas'))
+    .catch(err => console.error('❌ MongoDB connection error:', err));
 
 // Middleware
 app.use(cors());
@@ -742,15 +751,242 @@ Generate the follow-up response now:`;
     }
 });
 
+// ==================== CREDITS SYSTEM ENDPOINTS ====================
+
+// Register new user - Generate recovery code
+app.post('/api/credits/register', async (req, res) => {
+    try {
+        // Generate unique recovery code
+        let recoveryCode;
+        let isUnique = false;
+
+        while (!isUnique) {
+            recoveryCode = User.generateRecoveryCode();
+            const existing = await User.findOne({ recoveryCode });
+            if (!existing) isUnique = true;
+        }
+
+        // Create new user
+        const user = new User({
+            recoveryCode,
+            credits: 0,
+            freeCreditsRemaining: 5,
+        });
+
+        await user.save();
+
+        res.json({
+            success: true,
+            recoveryCode,
+            credits: user.credits,
+            freeCreditsRemaining: user.freeCreditsRemaining,
+        });
+    } catch (error) {
+        console.error('Register error:', error);
+        res.status(500).json({ error: 'Failed to register', details: error.message });
+    }
+});
+
+// Get balance by recovery code
+app.get('/api/credits/balance/:code', async (req, res) => {
+    try {
+        const { code } = req.params;
+        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Reset daily free credits if needed
+        const wasReset = user.resetDailyCreditsIfNeeded();
+        if (wasReset) {
+            await user.save();
+        }
+
+        // Update last active
+        user.lastActive = new Date();
+        await user.save();
+
+        res.json({
+            success: true,
+            credits: user.credits,
+            freeCreditsRemaining: user.freeCreditsRemaining,
+            totalAvailable: user.credits + user.freeCreditsRemaining,
+        });
+    } catch (error) {
+        console.error('Balance error:', error);
+        res.status(500).json({ error: 'Failed to get balance', details: error.message });
+    }
+});
+
+// Add credits (after purchase) - with transaction tracking to prevent abuse
+app.post('/api/credits/add', async (req, res) => {
+    try {
+        const { code, credits, transactionId } = req.body;
+
+        if (!code || !credits || !transactionId) {
+            return res.status(400).json({ error: 'Code, credits, and transactionId are required' });
+        }
+
+        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Check if transaction already processed (prevent restore abuse)
+        if (user.hasProcessedTransaction(transactionId)) {
+            return res.json({
+                success: false,
+                message: 'Transaction already processed',
+                credits: user.credits,
+                alreadyProcessed: true,
+            });
+        }
+
+        // Add credits and record transaction
+        user.credits += credits;
+        user.processedTransactions.push({
+            transactionId,
+            credits,
+            processedAt: new Date(),
+        });
+
+        await user.save();
+
+        res.json({
+            success: true,
+            creditsAdded: credits,
+            newBalance: user.credits,
+            transactionId,
+        });
+    } catch (error) {
+        console.error('Add credits error:', error);
+        res.status(500).json({ error: 'Failed to add credits', details: error.message });
+    }
+});
+
+// Use credits
+app.post('/api/credits/use', async (req, res) => {
+    try {
+        const { code, amount } = req.body;
+
+        if (!code || !amount) {
+            return res.status(400).json({ error: 'Code and amount are required' });
+        }
+
+        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Reset daily free credits if needed
+        user.resetDailyCreditsIfNeeded();
+
+        const totalAvailable = user.credits + user.freeCreditsRemaining;
+
+        if (totalAvailable < amount) {
+            return res.status(400).json({
+                error: 'Insufficient credits',
+                available: totalAvailable,
+                required: amount,
+            });
+        }
+
+        // Use free credits first, then purchased credits
+        let remaining = amount;
+        if (user.freeCreditsRemaining >= remaining) {
+            user.freeCreditsRemaining -= remaining;
+        } else {
+            remaining -= user.freeCreditsRemaining;
+            user.freeCreditsRemaining = 0;
+            user.credits -= remaining;
+        }
+
+        user.lastActive = new Date();
+        await user.save();
+
+        res.json({
+            success: true,
+            creditsUsed: amount,
+            remainingCredits: user.credits,
+            remainingFreeCredits: user.freeCreditsRemaining,
+            totalAvailable: user.credits + user.freeCreditsRemaining,
+        });
+    } catch (error) {
+        console.error('Use credits error:', error);
+        res.status(500).json({ error: 'Failed to use credits', details: error.message });
+    }
+});
+
+// Recover - Enter code on new device
+app.post('/api/credits/recover', async (req, res) => {
+    try {
+        const { code } = req.body;
+
+        if (!code) {
+            return res.status(400).json({ error: 'Recovery code is required' });
+        }
+
+        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
+
+        if (!user) {
+            return res.status(404).json({
+                error: 'Invalid recovery code',
+                message: 'No account found with this recovery code. Please check and try again.',
+            });
+        }
+
+        // Reset daily free credits if needed
+        user.resetDailyCreditsIfNeeded();
+        user.lastActive = new Date();
+        await user.save();
+
+        res.json({
+            success: true,
+            recoveryCode: user.recoveryCode,
+            credits: user.credits,
+            freeCreditsRemaining: user.freeCreditsRemaining,
+            totalAvailable: user.credits + user.freeCreditsRemaining,
+            message: 'Account recovered successfully!',
+        });
+    } catch (error) {
+        console.error('Recover error:', error);
+        res.status(500).json({ error: 'Failed to recover account', details: error.message });
+    }
+});
+
+// Get processed transactions (for debugging/support)
+app.get('/api/credits/transactions/:code', async (req, res) => {
+    try {
+        const { code } = req.params;
+        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        res.json({
+            success: true,
+            transactions: user.processedTransactions,
+        });
+    } catch (error) {
+        console.error('Transactions error:', error);
+        res.status(500).json({ error: 'Failed to get transactions', details: error.message });
+    }
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'AI App Backend is running', version: '1.0.0' });
+    res.json({ status: 'ok', message: 'AI App Backend is running', version: '2.0.0' });
 });
 
 // Start server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
-    console.log(`✨ SERVER VERSION: v2.2 (With Web Block Handling)`);
+    console.log(`✨ SERVER VERSION: v3.0 (With Credits System)`);
     console.log(`📝 Notes endpoint: POST /api/notes`);
     console.log(`💬 Reply endpoint: POST /api/reply`);
+    console.log(`💳 Credits endpoints: /api/credits/*`);
 });
