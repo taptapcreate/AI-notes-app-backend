@@ -14,7 +14,7 @@ const UserSchema = new mongoose.Schema({
     },
     freeCreditsRemaining: {
         type: Number,
-        default: 5, // Daily free credits
+        default: 3, // Daily free credits
     },
     lastFreeCreditsReset: {
         type: Date,
@@ -57,7 +57,7 @@ UserSchema.methods.resetDailyCreditsIfNeeded = function () {
 
     // Check if it's a new day (different date)
     if (now.toDateString() !== lastReset.toDateString()) {
-        this.freeCreditsRemaining = 5;
+        this.freeCreditsRemaining = 3;
         this.lastFreeCreditsReset = now;
         return true;
     }

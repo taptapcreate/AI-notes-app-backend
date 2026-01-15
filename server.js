@@ -883,18 +883,28 @@ app.post('/api/credits/use', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // Check if user has enough PURCHASED credits
-        // NOTE: Free credits are tracked locally in the app (AsyncStorage), not on server
-        if (user.credits < amount) {
+        // Reset daily free credits if needed
+        user.resetDailyCreditsIfNeeded();
+
+        const totalAvailable = user.credits + user.freeCreditsRemaining;
+
+        if (totalAvailable < amount) {
             return res.status(400).json({
                 error: 'Insufficient credits',
-                available: user.credits,
+                available: totalAvailable,
                 required: amount,
             });
         }
 
-        // Deduct from purchased credits only
-        user.credits -= amount;
+        // Use free credits first, then purchased credits
+        let remaining = amount;
+        if (user.freeCreditsRemaining >= remaining) {
+            user.freeCreditsRemaining -= remaining;
+        } else {
+            remaining -= user.freeCreditsRemaining;
+            user.freeCreditsRemaining = 0;
+            user.credits -= remaining;
+        }
 
         user.lastActive = new Date();
         await user.save();
@@ -903,8 +913,8 @@ app.post('/api/credits/use', async (req, res) => {
             success: true,
             creditsUsed: amount,
             remainingCredits: user.credits,
-            remainingFreeCredits: 0, // Free credits are local-only now
-            totalAvailable: user.credits,
+            remainingFreeCredits: user.freeCreditsRemaining,
+            totalAvailable: user.credits + user.freeCreditsRemaining,
         });
     } catch (error) {
         console.error('Use credits error:', error);
