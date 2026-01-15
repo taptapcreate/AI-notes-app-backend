@@ -926,36 +926,112 @@ app.post('/api/credits/use', async (req, res) => {
     }
 });
 
-// Recover - Enter code on new device
+// Recover - Merge credits from old account to current account
+// Old account is deleted after merge to prevent abuse
 app.post('/api/credits/recover', async (req, res) => {
     try {
-        const { code } = req.body;
+        const { code, currentCode } = req.body;
 
         if (!code) {
             return res.status(400).json({ error: 'Recovery code is required' });
         }
 
-        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
+        const oldCode = code.toUpperCase();
+        const currentRecoveryCode = currentCode?.toUpperCase();
 
-        if (!user) {
+        // Find the old account
+        const oldAccount = await User.findOne({ recoveryCode: oldCode });
+
+        if (!oldAccount) {
             return res.status(404).json({
                 error: 'Invalid recovery code',
                 message: 'No account found with this recovery code. Please check and try again.',
             });
         }
 
-        // Reset daily free credits if needed
-        user.resetDailyCreditsIfNeeded();
-        user.lastActive = new Date();
-        await user.save();
+        // If same code as current, just return the account info
+        if (currentRecoveryCode && oldCode === currentRecoveryCode) {
+            oldAccount.resetDailyCreditsIfNeeded();
+            oldAccount.lastActive = new Date();
+            await oldAccount.save();
+
+            return res.json({
+                success: true,
+                recoveryCode: oldAccount.recoveryCode,
+                credits: oldAccount.credits,
+                freeCreditsRemaining: oldAccount.freeCreditsRemaining,
+                totalAvailable: oldAccount.credits + oldAccount.freeCreditsRemaining,
+                message: 'Already using this account!',
+                merged: false
+            });
+        }
+
+        // If current code provided and different, MERGE credits
+        if (currentRecoveryCode && oldCode !== currentRecoveryCode) {
+            const currentAccount = await User.findOne({ recoveryCode: currentRecoveryCode });
+
+            if (!currentAccount) {
+                // Current account doesn't exist, just switch to old account
+                oldAccount.resetDailyCreditsIfNeeded();
+                oldAccount.lastActive = new Date();
+                await oldAccount.save();
+
+                return res.json({
+                    success: true,
+                    recoveryCode: oldAccount.recoveryCode,
+                    credits: oldAccount.credits,
+                    freeCreditsRemaining: oldAccount.freeCreditsRemaining,
+                    totalAvailable: oldAccount.credits + oldAccount.freeCreditsRemaining,
+                    message: 'Account recovered successfully!',
+                    merged: false
+                });
+            }
+
+            // MERGE: Add old account credits to current account
+            const mergedCredits = currentAccount.credits + oldAccount.credits;
+            currentAccount.credits = mergedCredits;
+            currentAccount.resetDailyCreditsIfNeeded();
+            currentAccount.lastActive = new Date();
+
+            // Merge processed transactions for record-keeping
+            if (oldAccount.processedTransactions && oldAccount.processedTransactions.length > 0) {
+                currentAccount.processedTransactions = [
+                    ...(currentAccount.processedTransactions || []),
+                    ...oldAccount.processedTransactions.map(t => ({ ...t, mergedFrom: oldCode }))
+                ];
+            }
+
+            await currentAccount.save();
+
+            // DELETE old account permanently (prevents reuse)
+            await User.deleteOne({ recoveryCode: oldCode });
+            console.log(`🔀 Merged ${oldAccount.credits} credits from ${oldCode} to ${currentRecoveryCode}, old account deleted`);
+
+            return res.json({
+                success: true,
+                recoveryCode: currentAccount.recoveryCode,
+                credits: currentAccount.credits,
+                freeCreditsRemaining: currentAccount.freeCreditsRemaining,
+                totalAvailable: currentAccount.credits + currentAccount.freeCreditsRemaining,
+                message: `Merged ${oldAccount.credits} credits! Old code is now invalid.`,
+                merged: true,
+                creditsAdded: oldAccount.credits
+            });
+        }
+
+        // No current code provided - just switch to old account (legacy behavior)
+        oldAccount.resetDailyCreditsIfNeeded();
+        oldAccount.lastActive = new Date();
+        await oldAccount.save();
 
         res.json({
             success: true,
-            recoveryCode: user.recoveryCode,
-            credits: user.credits,
-            freeCreditsRemaining: user.freeCreditsRemaining,
-            totalAvailable: user.credits + user.freeCreditsRemaining,
+            recoveryCode: oldAccount.recoveryCode,
+            credits: oldAccount.credits,
+            freeCreditsRemaining: oldAccount.freeCreditsRemaining,
+            totalAvailable: oldAccount.credits + oldAccount.freeCreditsRemaining,
             message: 'Account recovered successfully!',
+            merged: false
         });
     } catch (error) {
         console.error('Recover error:', error);
