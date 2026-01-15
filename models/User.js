@@ -33,6 +33,11 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: Date.now,
     },
+    switchHistory: [{
+        fromCode: String,
+        timestamp: { type: Date, default: Date.now },
+        description: String
+    }],
 });
 
 // Generate random recovery code
