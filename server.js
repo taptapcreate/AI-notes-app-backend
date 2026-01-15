@@ -6,7 +6,11 @@ const mongoose = require('mongoose');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { YoutubeTranscript } = require('youtube-transcript');
+const { Expo } = require('expo-server-sdk');
 require('dotenv').config();
+
+// Initialize Expo Push SDK
+const expo = new Expo();
 
 // Import User model
 const User = require('./models/User');
@@ -976,6 +980,185 @@ app.get('/api/credits/transactions/:code', async (req, res) => {
     } catch (error) {
         console.error('Transactions error:', error);
         res.status(500).json({ error: 'Failed to get transactions', details: error.message });
+    }
+});
+
+// ==========================================
+// PUSH NOTIFICATIONS
+// ==========================================
+
+// Notification Token Schema (using mongoose for consistency)
+const NotificationTokenSchema = new mongoose.Schema({
+    token: { type: String, required: true, unique: true, index: true },
+    platform: { type: String, default: 'unknown' },
+    recoveryCode: { type: String, default: null },
+    appVersion: { type: String, default: '1.0.0' },
+    enabled: { type: Boolean, default: true },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+});
+
+const NotificationToken = mongoose.model('NotificationToken', NotificationTokenSchema);
+
+// Register push token
+app.post('/api/notifications/register', async (req, res) => {
+    try {
+        const { token, platform, recoveryCode, appVersion } = req.body;
+
+        if (!token) {
+            return res.status(400).json({ error: 'Token is required' });
+        }
+
+        if (!Expo.isExpoPushToken(token)) {
+            return res.status(400).json({ error: 'Invalid Expo push token format' });
+        }
+
+        await NotificationToken.findOneAndUpdate(
+            { token },
+            {
+                platform: platform || 'unknown',
+                recoveryCode: recoveryCode || null,
+                appVersion: appVersion || '1.0.0',
+                enabled: true,
+                updatedAt: new Date()
+            },
+            { upsert: true, new: true }
+        );
+
+        console.log(`✅ Push token registered: ${platform || 'unknown'}`);
+
+        res.json({
+            success: true,
+            message: 'Token registered successfully'
+        });
+    } catch (error) {
+        console.error('Register token error:', error);
+        res.status(500).json({ error: 'Failed to register token', details: error.message });
+    }
+});
+
+// Unregister push token
+app.delete('/api/notifications/unregister', async (req, res) => {
+    try {
+        const { token } = req.body;
+
+        if (!token) {
+            return res.status(400).json({ error: 'Token is required' });
+        }
+
+        await NotificationToken.deleteOne({ token });
+
+        res.json({
+            success: true,
+            message: 'Token unregistered successfully'
+        });
+    } catch (error) {
+        console.error('Unregister token error:', error);
+        res.status(500).json({ error: 'Failed to unregister token', details: error.message });
+    }
+});
+
+// Send notification to all users
+app.post('/api/notifications/send-all', async (req, res) => {
+    try {
+        const { title, body, data, platform } = req.body;
+
+        if (!title || !body) {
+            return res.status(400).json({ error: 'Title and body are required' });
+        }
+
+        // Build query - optionally filter by platform
+        const query = { enabled: true };
+        if (platform && ['ios', 'android'].includes(platform.toLowerCase())) {
+            query.platform = platform.toLowerCase();
+        }
+
+        const tokens = await NotificationToken.find(query).select('token');
+
+        if (tokens.length === 0) {
+            return res.json({ success: true, message: 'No registered devices found', sent: 0 });
+        }
+
+        const pushTokens = tokens.map(t => t.token);
+        const result = await sendPushNotifications(pushTokens, { title, body, data: data || {} });
+
+        res.json({
+            success: true,
+            sent: result.success,
+            failed: result.failed,
+            total: tokens.length
+        });
+    } catch (error) {
+        console.error('Send-all error:', error);
+        res.status(500).json({ error: 'Failed to send notifications', details: error.message });
+    }
+});
+
+// Helper: Send push notifications using Expo SDK
+async function sendPushNotifications(expoPushTokens, { title, body, data }) {
+    const messages = [];
+
+    for (const pushToken of expoPushTokens) {
+        if (!Expo.isExpoPushToken(pushToken)) {
+            console.error(`❌ Invalid token skipped: ${pushToken}`);
+            continue;
+        }
+
+        messages.push({
+            to: pushToken,
+            sound: 'default',
+            title,
+            body,
+            data: data || {},
+        });
+    }
+
+    const chunks = expo.chunkPushNotifications(messages);
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const chunk of chunks) {
+        try {
+            const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+
+            for (let i = 0; i < ticketChunk.length; i++) {
+                const ticket = ticketChunk[i];
+                if (ticket.status === 'ok') {
+                    successCount++;
+                } else if (ticket.status === 'error') {
+                    failCount++;
+                    console.error(`❌ Push failed:`, ticket.message);
+
+                    // Auto-cleanup: Remove token if device uninstalled app
+                    if (ticket.details?.error === 'DeviceNotRegistered') {
+                        const invalidToken = chunk[i].to;
+                        await NotificationToken.deleteOne({ token: invalidToken });
+                        console.log(`🗑️ Deleted invalid token: ${invalidToken}`);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Batch send error:', error);
+            failCount += chunk.length;
+        }
+    }
+
+    return { success: successCount, failed: failCount };
+}
+
+// Get notification stats
+app.get('/api/notifications/stats', async (req, res) => {
+    try {
+        const total = await NotificationToken.countDocuments({ enabled: true });
+        const ios = await NotificationToken.countDocuments({ enabled: true, platform: 'ios' });
+        const android = await NotificationToken.countDocuments({ enabled: true, platform: 'android' });
+
+        res.json({
+            success: true,
+            stats: { total, ios, android }
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to get stats', details: error.message });
     }
 });
 
