@@ -15,8 +15,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log('✅ Connected to MongoDB Atlas'))
+const DB_NAME = 'ai_notes_app';
+
+mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
+    .then(() => console.log(`✅ Connected to MongoDB Atlas (${DB_NAME})`))
     .catch(err => console.error('❌ MongoDB connection error:', err));
 
 // Middleware
