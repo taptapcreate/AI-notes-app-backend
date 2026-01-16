@@ -44,6 +44,18 @@ const getModel = (maxTokens = 2048) => {
     });
 };
 
+// Get the model for streaming responses
+const getStreamingModel = (maxTokens = 4096) => {
+    return genAI.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        generationConfig: {
+            temperature: 0.7,
+            topP: 0.9,
+            maxOutputTokens: maxTokens,
+        },
+    });
+};
+
 // Helper: Sleep function for delays
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -191,15 +203,15 @@ const generateWithRetry = async (model, content, retries = 3, delay = 2000) => {
 const lengthGuides = {
     brief: {
         instruction: 'Be VERY concise. Maximum 5-6 bullet points total. Focus ONLY on the most critical information. Skip minor details. Keep it SHORT.',
-        maxTokens: 500
+        maxTokens: 1000
     },
     standard: {
         instruction: 'Be comprehensive but clear. Include all key points with moderate detail. Aim for 10-15 bullet points with explanations.',
-        maxTokens: 1200
+        maxTokens: 2500
     },
     detailed: {
         instruction: 'Be extremely thorough and in-depth. Include ALL information with comprehensive explanations, context, examples, and supporting details. Aim for 20-30 detailed bullet points. Expand on every concept.',
-        maxTokens: 3000
+        maxTokens: 5000
     },
 };
 
@@ -603,12 +615,118 @@ Generate the notes now:`;
                 return res.status(400).json({ error: 'Invalid input type' });
         }
 
-        const notes = result.response.text();
+        let notes = result.response.text();
+
+        // Check if response was truncated (cut off mid-sentence)
+        const finishReason = result.response.candidates?.[0]?.finishReason;
+
+        // Smart continuation: If truncated, ask AI to complete
+        if (finishReason === 'MAX_TOKENS') {
+            try {
+                const continuationPrompt = `The following notes were cut off mid-way. Complete them naturally from where they stopped. Do NOT repeat any content, just continue seamlessly.
+
+INCOMPLETE NOTES (continue from here):
+"""
+${notes.slice(-500)}
+"""
+
+Continue the notes now, picking up exactly where it stopped:`;
+
+                const continuationModel = getModel(1500); // Extra tokens for completion
+                const continuationResult = await generateWithRetry(continuationModel, continuationPrompt);
+                const continuation = continuationResult.response.text();
+
+                // Combine: Remove potential overlap and merge
+                notes = notes.trim() + '\n' + continuation.trim();
+            } catch (contError) {
+                console.log('Continuation failed, using original:', contError.message);
+                // If continuation fails, just clean up the truncation
+                const lastCompleteEnd = Math.max(
+                    notes.lastIndexOf('. '),
+                    notes.lastIndexOf('.\n'),
+                    notes.lastIndexOf('!\n'),
+                    notes.lastIndexOf('?\n')
+                );
+                if (lastCompleteEnd > notes.length * 0.5) {
+                    notes = notes.substring(0, lastCompleteEnd + 1).trim();
+                }
+            }
+        }
+
         res.json({ notes });
 
     } catch (error) {
         console.error('Notes generation error:', error);
         res.status(500).json({ error: 'Failed to generate notes', details: error.message });
+    }
+});
+// ==================== STREAMING NOTES ENDPOINT ====================
+app.post('/api/notes/stream', async (req, res) => {
+    try {
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english' } = req.body;
+
+        if (!content) {
+            return res.status(400).json({ error: 'Content is required' });
+        }
+
+        // Set SSE headers
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.flushHeaders();
+
+        const lengthConfig = lengthGuides[noteLength] || lengthGuides.standard;
+        const lengthInstruction = lengthConfig.instruction;
+        const maxTokens = lengthConfig.maxTokens;
+
+        const formatInstruction = formatGuides[format] || formatGuides.bullet;
+        const toneInstruction = toneGuides[tone] || toneGuides.professional;
+
+        const languageInstruction = language && language.toLowerCase() !== 'english'
+            ? `IMPORTANT: Generate ALL content in ${language}.`
+            : 'Keep the output in English.';
+
+        let prompt = `You are an expert note-taking assistant. Transform the following content into perfectly organized, professional notes.
+
+INPUT CONTENT:
+"""
+${content}
+"""
+
+LENGTH REQUIREMENT: ${lengthInstruction}
+FORMAT REQUIREMENT: ${formatInstruction}
+TONE REQUIREMENT: ${toneInstruction}
+LANGUAGE REQUIREMENT: ${languageInstruction}
+
+INSTRUCTIONS:
+1. Create a clear, hierarchical structure with sections
+2. Extract key information according to the length requirement
+3. Use bullet points (•) for lists
+4. Bold important terms with **asterisks**
+5. Add a "📌 Key Takeaways" section at the end
+
+Generate the notes now:`;
+
+        const model = getStreamingModel(maxTokens);
+        const streamResult = await model.generateContentStream(prompt);
+
+        // Stream each chunk as SSE
+        for await (const chunk of streamResult.stream) {
+            const chunkText = chunk.text();
+            if (chunkText) {
+                res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+            }
+        }
+
+        // Signal completion
+        res.write('data: [DONE]\n\n');
+        res.end();
+
+    } catch (error) {
+        console.error('Streaming notes error:', error);
+        res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+        res.end();
     }
 });
 
