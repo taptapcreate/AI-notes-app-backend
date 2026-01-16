@@ -33,13 +33,13 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Get the model with configuration
-const getModel = () => {
+const getModel = (maxTokens = 2048) => {
     return genAI.getGenerativeModel({
         model: 'gemini-2.5-flash',
         generationConfig: {
             temperature: 0.7,
             topP: 0.9,
-            maxOutputTokens: 2048,
+            maxOutputTokens: maxTokens,
         },
     });
 };
@@ -194,14 +194,25 @@ app.post('/api/notes', async (req, res) => {
             return res.status(400).json({ error: 'Content is required' });
         }
 
-        // Note length instructions
+        // Note length instructions with token limits
         const lengthGuides = {
-            brief: 'Be VERY concise. Maximum 5-6 bullet points. Focus only on the most critical information. Skip minor details.',
-            standard: 'Be comprehensive but clear. Include all key points with moderate detail. Aim for 8-12 bullet points.',
-            detailed: 'Be thorough and in-depth. Include all information with explanations. Provide context and examples where helpful. Aim for 15+ bullet points.',
+            brief: {
+                instruction: 'Be VERY concise. Maximum 5-6 bullet points total. Focus ONLY on the most critical information. Skip minor details. Keep it SHORT.',
+                maxTokens: 500
+            },
+            standard: {
+                instruction: 'Be comprehensive but clear. Include all key points with moderate detail. Aim for 10-15 bullet points with explanations.',
+                maxTokens: 1200
+            },
+            detailed: {
+                instruction: 'Be extremely thorough and in-depth. Include ALL information with comprehensive explanations, context, examples, and supporting details. Aim for 20-30 detailed bullet points. Expand on every concept.',
+                maxTokens: 3000
+            },
         };
 
-        const lengthInstruction = lengthGuides[noteLength] || lengthGuides.standard;
+        const lengthConfig = lengthGuides[noteLength] || lengthGuides.standard;
+        const lengthInstruction = lengthConfig.instruction;
+        const maxTokens = lengthConfig.maxTokens;
 
         // Format instructions
         const formatGuides = {
@@ -266,7 +277,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const textModel = getModel();
+                const textModel = getModel(maxTokens);
                 result = await generateWithRetry(textModel, prompt);
                 break;
 
@@ -299,7 +310,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now following all requirements:`;
 
-                const visionModel = getModel();
+                const visionModel = getModel(maxTokens);
                 result = await generateWithRetry(visionModel, [
                     prompt,
                     {
@@ -341,7 +352,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now following all requirements:`;
 
-                const audioModel = getModel();
+                const audioModel = getModel(maxTokens);
 
                 // Try different mime types based on what Expo typically records
                 // iOS uses .m4a (audio/m4a), Android may use .3gp or .m4a
@@ -440,7 +451,7 @@ Space for extra observations
 Fill in this template as you review your PDF!
 (Note: Since I cannot read the PDF directly, I have provided a template. If you can copy the text from the PDF and paste it as text input, I can generate specific notes for you!)`;
 
-                const pdfModel = getModel();
+                const pdfModel = getModel(maxTokens);
                 result = await generateWithRetry(pdfModel, prompt);
                 break;
 
@@ -487,7 +498,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const webModel = getModel();
+                const webModel = getModel(maxTokens);
                 result = await generateWithRetry(webModel, prompt);
                 break;
 
@@ -538,7 +549,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const ytModel = getModel();
+                const ytModel = getModel(maxTokens);
                 result = await generateWithRetry(ytModel, prompt);
                 break;
 
