@@ -185,6 +185,84 @@ const generateWithRetry = async (model, content, retries = 3, delay = 2000) => {
     }
 };
 
+// ==================== SHARED GUIDES ====================
+
+// Note length instructions with token limits
+const lengthGuides = {
+    brief: {
+        instruction: 'Be VERY concise. Maximum 5-6 bullet points total. Focus ONLY on the most critical information. Skip minor details. Keep it SHORT.',
+        maxTokens: 500
+    },
+    standard: {
+        instruction: 'Be comprehensive but clear. Include all key points with moderate detail. Aim for 10-15 bullet points with explanations.',
+        maxTokens: 1200
+    },
+    detailed: {
+        instruction: 'Be extremely thorough and in-depth. Include ALL information with comprehensive explanations, context, examples, and supporting details. Aim for 20-30 detailed bullet points. Expand on every concept.',
+        maxTokens: 3000
+    },
+};
+
+// Tone instructions (Combined Notes + Reply)
+const toneGuides = {
+    professional: 'Use professional, business-appropriate language.',
+    academic: 'Use formal, academic language suitable for research or study.',
+    casual: 'Use relaxed, easy-to-understand language.',
+    creative: 'Use engaging, descriptive, and creative language.',
+    friendly: 'Be warm, approachable, and friendly.',
+    flirty: 'Be playful, charming, and slightly flirty.',
+    witty: 'Be clever, quick-witted, and sharp.',
+    sarcastic: 'Use sarcasm and irony (but keep it light).',
+    firm: 'Be firm, decisive, and authoritative.',
+    humorous: 'Be funny, amusing, and lighthearted.',
+    empathetic: 'Show deep understanding and empathy.',
+    supportive: 'Be encouraging, uplifting, and supportive.',
+    dramatic: 'Be expressive, emotional, and dramatic.',
+    enthusiastic: 'Show high energy and excitement.',
+    apologetic: 'Be sincere, sorry, and apologetic.',
+    grateful: 'Express strong appreciation and gratitude.',
+    confident: 'Sound sure, self-assured, and confident.',
+};
+
+// Format instructions (Combined Notes + Reply)
+const formatGuides = {
+    // Notes formats
+    bullet: 'Use standard bullet points with clear hierarchy.',
+    meeting: 'Format as meeting minutes: structured with Attendees, Agenda, Discussion Points, Decisions made, and Action Items.',
+    study: 'Format as a study guide: Definitions, Key Concepts, Summaries, and Review Questions.',
+    todo: 'Format as a To-Do list: prioritized tasks, clear checkboxes, and deadlines/timeframes if implied.',
+    summary: 'Format as an executive summary: High-level overview, key findings, and strategic recommendations. Paragraph form.',
+    blog: 'Format as a structured blog post skeleton: Catchy Title, Introduction, clearly headed Body Paragraphs, and Conclusion.',
+
+    // Reply formats
+    email: 'Format as a standard email with Subject line.',
+    whatsapp: 'Format as a WhatsApp message: casual, use emojis, short paragraphs.',
+    sms: 'Format as a text message: very short, concise, no subject line.',
+    instagram: 'Format for Instagram DM: casual, trendy, use emojis.',
+    dating: 'Format for a dating app message: engaging, personal, conversation starter.',
+    linkedin: 'Format for LinkedIn: professional but networking-focused.',
+    twitter: 'Format as a Tweet/X post: under 280 chars, use hashtags.',
+    discord: 'Format for Discord: gamer/community tone, use markdown if needed.',
+    slack: 'Format for Slack: professional but colloquial, clear and concise.',
+    tiktok: 'Format for TikTok comment/caption: catchy, trendy, uses hashtags.',
+    letter: 'Format as a formal letter: Date, Salutation, Body, Closing.',
+};
+
+// Style instructions (Reply specific)
+const styleGuides = {
+    short: 'Keep it brief and to the point.',
+    detailed: 'Provide a detailed and comprehensive response.',
+    polite: 'Be very polite, courteous, and respectful.',
+    direct: 'Be direct, straightforward, and efficient.',
+    questioning: 'Include thoughtful questions to keep the conversation going.',
+    persuasive: 'Use persuasive language to convince or influence.',
+    philosophical: 'Adopt a philosophical, deep, and contemplative style.',
+    poetic: 'Use poetic, lyrical, and expressive language.',
+    diplomatic: 'Be diplomatic, tactful, and careful with wording.',
+    storytelling: 'Use a storytelling approach with narrative elements.',
+    numbered: 'Format the response as a numbered list.',
+};
+
 // ==================== NOTES ENDPOINT ====================
 app.post('/api/notes', async (req, res) => {
     try {
@@ -194,44 +272,12 @@ app.post('/api/notes', async (req, res) => {
             return res.status(400).json({ error: 'Content is required' });
         }
 
-        // Note length instructions with token limits
-        const lengthGuides = {
-            brief: {
-                instruction: 'Be VERY concise. Maximum 5-6 bullet points total. Focus ONLY on the most critical information. Skip minor details. Keep it SHORT.',
-                maxTokens: 500
-            },
-            standard: {
-                instruction: 'Be comprehensive but clear. Include all key points with moderate detail. Aim for 10-15 bullet points with explanations.',
-                maxTokens: 1200
-            },
-            detailed: {
-                instruction: 'Be extremely thorough and in-depth. Include ALL information with comprehensive explanations, context, examples, and supporting details. Aim for 20-30 detailed bullet points. Expand on every concept.',
-                maxTokens: 3000
-            },
-        };
-
         const lengthConfig = lengthGuides[noteLength] || lengthGuides.standard;
         const lengthInstruction = lengthConfig.instruction;
         const maxTokens = lengthConfig.maxTokens;
 
-        // Format instructions
-        const formatGuides = {
-            bullet: 'Use standard bullet points with clear hierarchy.',
-            meeting: 'Format as meeting minutes: structured with Attendees, Agenda, Discussion Points, Decisions made, and Action Items.',
-            study: 'Format as a study guide: Definitions, Key Concepts, Summaries, and Review Questions.',
-            todo: 'Format as a To-Do list: prioritized tasks, clear checkboxes, and deadlines/timeframes if implied.',
-            summary: 'Format as an executive summary: High-level overview, key findings, and strategic recommendations. Paragraph form.',
-            blog: 'Format as a structured blog post skeleton: Catchy Title, Introduction, clearly headed Body Paragraphs, and Conclusion.',
-        };
         const formatInstruction = formatGuides[format] || formatGuides.bullet;
 
-        // Tone instructions
-        const toneGuides = {
-            professional: 'Use professional, business-appropriate language.',
-            academic: 'Use formal, academic language suitable for research or study.',
-            casual: 'Use relaxed, easy-to-understand language.',
-            creative: 'Use engaging, descriptive, and creative language.',
-        };
         const toneInstruction = toneGuides[tone] || toneGuides.professional;
 
         // Language instruction
