@@ -558,79 +558,72 @@ Generate the notes now:`;
 // ==================== REPLY ENDPOINT ====================
 app.post('/api/reply', async (req, res) => {
     try {
-        const { message, tone, style, format } = req.body;
+        const { message, tone, style, format, mode = 'reply', language = 'English' } = req.body;
 
         if (!message) {
             return res.status(400).json({ error: 'Message is required' });
         }
 
-        const toneGuides = {
-            friendly: 'Be warm, personable, use friendly language. Feel free to use exclamation marks and positive words. Show genuine interest.',
-            professional: 'Be formal and business-appropriate. Use proper grammar, avoid slang. Be respectful yet confident.',
-            casual: 'Be relaxed and conversational. Use natural language, contractions are fine. Keep it light.',
-            firm: 'Be assertive and clear. State your position confidently. Be direct but not rude.',
-            humorous: 'Add light humor and wit. Keep it fun and entertaining while still being appropriate. Use clever wordplay if suitable.',
-            empathetic: 'Show understanding and compassion. Acknowledge their feelings. Be supportive and caring.',
-            enthusiastic: 'Be excited and energetic! Show genuine enthusiasm. Use positive, uplifting language.',
-            apologetic: 'Express genuine apology and understanding. Take responsibility where appropriate. Offer to make things right.',
-            grateful: 'Express sincere thanks and appreciation. Be heartfelt and genuine in your gratitude.',
-            confident: 'Be self-assured and decisive. Show expertise and authority without being arrogant.',
-        };
+        // ... keys ...
 
-        const styleGuides = {
-            short: 'Keep it brief - 2-3 sentences maximum. Get straight to the point.',
-            detailed: 'Be comprehensive. Explain your reasoning. Address all points mentioned.',
-            polite: 'Add extra courtesies. Thank them, wish them well. Be extra considerate.',
-            direct: 'No filler or pleasantries. State exactly what you mean clearly.',
-            persuasive: 'Craft a convincing message. Use compelling arguments and reasoning to influence their decision.',
-            diplomatic: 'Be tactful and balanced. Choose words carefully to avoid conflict while maintaining your position.',
-            storytelling: 'Use narrative elements. Share a brief anecdote or example to make your point more relatable.',
-            numbered: 'Organize your response with numbered points for clarity and easy reference.',
-        };
+        let prompt;
 
-        const formatGuides = {
-            email: `Format as a proper email:
-- Start with appropriate greeting (Hi/Hello/Dear based on tone)
-- Body paragraph(s)
-- Professional sign-off (Best regards/Thanks/Sincerely based on tone)
-- Don't include subject line`,
-            whatsapp: `Format for WhatsApp/text messaging:
-- No formal greeting needed (can use Hey or Hi)
-- Keep it conversational
-- Use common abbreviations where natural
-- Emojis are okay if they fit the tone
-- No sign-off needed`,
-            letter: `Format as a formal letter:
-- Start with "Dear [appropriate title],"
-- Proper paragraph structure
-- Formal closing like "Sincerely," or "Respectfully,"
-- Leave [Your Name] at the end`,
-            sms: `Format for SMS/text message:
-- Very brief and to the point
-- No greeting necessary
-- Abbreviations encouraged
-- Single short paragraph or a few lines
-- No sign-off`,
-            linkedin: `Format for LinkedIn message:
-- Professional but personable
-- Reference their profile/work if relevant
-- Clear purpose for reaching out
-- Professional closing`,
-            twitter: `Format for Twitter/X reply:
-- Under 280 characters if possible
-- Punchy and engaging
-- Can use hashtags if relevant
-- Conversational tone`,
-            slack: `Format for Slack/Teams message:
-- Casual but professional
-- Can use emoji reactions
-- Clear and scannable
-- Use bullet points for multiple items`,
-        };
+        if (mode === 'refine') {
+            // STRICT REFINE MODE
+            prompt = `You are an expert editor and translator. Rewrite/Refine the user's draft message.
 
-        const prompt = `You are an expert communication assistant. Generate 3 distinct, ready-to-send messages based on the user's input.
+USER'S DRAFT:
+"""
+${message}
+"""
 
-USER INPUT:
+TARGET REQUIREMENTS:
+• Tone: ${toneGuides[tone] || toneGuides.professional}
+• Style: ${styleGuides[style] || styleGuides.short}
+• Format: ${formatGuides[format] || formatGuides.email}
+• Output Language: ${language}
+
+IMPORTANT RULES:
+1. Do NOT reply to the message. You must REWRITE it.
+2. Keep the original meaning but change the wording/tone.
+3. Write as a NATIVE speaker of ${language}. Do not use literal translations.
+4. If the target language is different from input, TRANSLATE + REFINE simultaneously to sound natural.
+5. Generate 3 distinct versions.
+6. Each version must be COMPLETE.
+7. Separate strictly with: ---REPLY---
+
+Generate 3 refined versions now:`;
+
+        } else if (mode === 'compose') {
+            // STRICT COMPOSE MODE
+            prompt = `You are an expert writer and translator. Write a message based on the user's topic/instruction.
+
+USER'S TOPIC/INSTRUCTION:
+"""
+${message}
+"""
+
+TARGET REQUIREMENTS:
+• Tone: ${toneGuides[tone] || toneGuides.professional}
+• Style: ${styleGuides[style] || styleGuides.short}
+• Format: ${formatGuides[format] || formatGuides.email}
+• Output Language: ${language}
+
+IMPORTANT RULES:
+1. Write a NEW message about this topic in ${language}.
+2. Expand on the instruction to make it a complete message.
+3. Write as a NATIVE speaker of ${language}.
+4. Generate 3 distinct versions.
+5. Each version must be COMPLETE.
+6. Separate strictly with: ---REPLY---
+
+Generate 3 versions now:`;
+
+        } else {
+            // STRICT REPLY MODE (Default)
+            prompt = `You are an expert communication assistant. Generate a reply TO the message below.
+
+RECEIVED MESSAGE:
 """
 ${message}
 """
@@ -639,20 +632,19 @@ REPLY REQUIREMENTS:
 • Tone: ${toneGuides[tone] || toneGuides.professional}
 • Style: ${styleGuides[style] || styleGuides.short}
 • Format: ${formatGuides[format] || formatGuides.email}
-
-INTERPRETATION GUIDE:
-• The User Input could be a message they received (needing a reply) OR a draft they wrote (needing refinement).
-• If the input looks like a Rough Draft (lowercase, slang, shorthand like "how r u", "i want 2 go") AND the user hasn't explicitly asked for a reply, assume the user wants to REFINE/POLISH it into the selected Tone/Style.
-• If the input looks like a full Question/Statement directed AT the user (e.g. "When can we meet?"), assume the user wants to REPLY to it.
-• If ambiguous, prioritize REFINEMENT if the tone selected is formal/professional but the input is casual.
+• Output Language: ${language}
 
 IMPORTANT RULES:
-1. Each output must be COMPLETE and ready to copy-paste.
-2. Each output should take a slightly different approach.
-3. Match the tone EXACTLY.
-4. Separate each option with exactly: ---REPLY---
+1. You are engaging in conversation. Reply TO what was said.
+2. Answer in ${language} regardless of the input language.
+3. Write as a NATIVE speaker of ${language}.
+4. Don't simply rewrite the message. Answer it.
+5. Generate 3 distinct options.
+6. Each option must be COMPLETE.
+7. Separate strictly with: ---REPLY---
 
-Generate 3 options now:`;
+Generate 3 replies now:`;
+        }
 
         const model = getModel();
         const result = await generateWithRetry(model, prompt);
