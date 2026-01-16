@@ -810,6 +810,101 @@ Generate the follow-up response now:`;
     }
 });
 
+// ==================== SENTIMENT ENDPOINT ====================
+app.post('/api/sentiment', async (req, res) => {
+    try {
+        const { text } = req.body;
+        if (!text) return res.status(400).json({ error: 'Text is required' });
+
+        const prompt = `Analyze the sentiment of this text.
+        
+TEXT: "${text}"
+
+Determine if it is Positive, Negative, or Neutral.
+Also provide a confidence score (0-100%) and a brief explanation.
+
+FORMAT AS JSON:
+{
+    "sentiment": "Positive/Negative/Neutral",
+    "score": 0.85,
+    "explanation": "Brief explanation here"
+}
+`;
+
+        const model = getModel();
+        const result = await generateWithRetry(model, prompt);
+        const textResponse = result.response.text();
+
+        // Extract JSON from response
+        const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const data = JSON.parse(jsonMatch[0]);
+            res.json(data);
+        } else {
+            res.json({ sentiment: 'Neutral', score: 0.5, explanation: 'Could not analyze.' });
+        }
+
+    } catch (error) {
+        console.error('Sentiment error:', error);
+        res.status(500).json({ error: 'Failed' });
+    }
+});
+
+// ==================== TRANSLATE ENDPOINT ====================
+app.post('/api/translate', async (req, res) => {
+    try {
+        const { text, targetLanguage } = req.body;
+        if (!text || !targetLanguage) {
+            return res.status(400).json({ error: 'Text and target language are required' });
+        }
+
+        const prompt = `Translate the following text to ${targetLanguage}.
+        
+TEXT: "${text}"
+
+RULES:
+- Maintain the original tone and meaning
+- Return ONLY the translated text
+- Do not add explanations or notes
+`;
+
+        const model = getModel();
+        const result = await generateWithRetry(model, prompt);
+        res.json({ translatedText: result.response.text() });
+
+    } catch (error) {
+        console.error('Translate error:', error);
+        res.status(500).json({ error: 'Failed' });
+    }
+});
+
+// ==================== POLISH ENDPOINT ====================
+app.post('/api/polish', async (req, res) => {
+    try {
+        const { text, mode } = req.body;
+        if (!text) return res.status(400).json({ error: 'Text is required' });
+
+        const prompt = `Rewrite this text in a ${mode || 'professional'} style.
+        
+TEXT: "${text}"
+
+RULES:
+- Maintain the original meaning
+- Improve grammar and flow
+- Match the requested style (${mode})
+- Return ONLY the rewritten text, no explanations.
+`;
+
+        const model = getModel();
+        const result = await generateWithRetry(model, prompt);
+        res.json({ polishedText: result.response.text() });
+
+    } catch (error) {
+        console.error('Polish error:', error);
+        res.status(500).json({ error: 'Failed' });
+    }
+});
+
 // ==================== CREDITS SYSTEM ENDPOINTS ====================
 
 // Register new user - Generate recovery code
