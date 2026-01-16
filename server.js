@@ -628,9 +628,9 @@ app.post('/api/reply', async (req, res) => {
 - Use bullet points for multiple items`,
         };
 
-        const prompt = `You are an expert communication assistant. Generate 3 distinct, ready-to-send replies for this message.
+        const prompt = `You are an expert communication assistant. Generate 3 distinct, ready-to-send messages based on the user's input.
 
-ORIGINAL MESSAGE TO REPLY TO:
+USER INPUT:
 """
 ${message}
 """
@@ -640,15 +640,19 @@ REPLY REQUIREMENTS:
 • Style: ${styleGuides[style] || styleGuides.short}
 • Format: ${formatGuides[format] || formatGuides.email}
 
-IMPORTANT RULES:
-1. Each reply must be COMPLETE and ready to copy-paste
-2. Each reply should take a slightly different approach/angle
-3. Match the tone EXACTLY to what was requested
-4. Be contextually aware - understand what they're asking/saying
-5. Don't include any labels like "Reply 1:" or explanations
-6. Separate each reply with exactly: ---REPLY---
+INTERPRETATION GUIDE:
+• The User Input could be a message they received (needing a reply) OR a draft they wrote (needing refinement).
+• If the input looks like a Rough Draft (lowercase, slang, shorthand like "how r u", "i want 2 go") AND the user hasn't explicitly asked for a reply, assume the user wants to REFINE/POLISH it into the selected Tone/Style.
+• If the input looks like a full Question/Statement directed AT the user (e.g. "When can we meet?"), assume the user wants to REPLY to it.
+• If ambiguous, prioritize REFINEMENT if the tone selected is formal/professional but the input is casual.
 
-Generate 3 replies now:`;
+IMPORTANT RULES:
+1. Each output must be COMPLETE and ready to copy-paste.
+2. Each output should take a slightly different approach.
+3. Match the tone EXACTLY.
+4. Separate each option with exactly: ---REPLY---
+
+Generate 3 options now:`;
 
         const model = getModel();
         const result = await generateWithRetry(model, prompt);
