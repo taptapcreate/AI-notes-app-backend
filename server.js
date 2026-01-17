@@ -21,12 +21,30 @@ const PORT = process.env.PORT || 3000;
 // MongoDB Connection
 const DB_NAME = 'ai_notes_app';
 
-// SERVER CONFIG - Watch Ad Offers
-const AD_REWARD_CONFIG = {
-    STANDARD_REWARD: 1,
-    SPECIAL_OFFER_ACTIVE: false, // Set to true to enable special offer
-    SPECIAL_REWARD: 3,
-    SPECIAL_MESSAGE: "Special Offer! Watch an ad to earn 3 credits!",
+const AppConfig = require('./models/AppConfig');
+
+// Helper: Get App Config (Singleton)
+const getAppConfig = async () => {
+    try {
+        let config = await AppConfig.findOne({ key: 'master_config' });
+        if (!config) {
+            console.log('⚠️ No AppConfig found on DB. Creating default...');
+            config = new AppConfig();
+            await config.save();
+        }
+        return config;
+    } catch (error) {
+        console.error('Error fetching config:', error);
+        // Fallback in case of DB error
+        return {
+            adRewards: {
+                standardReward: 1,
+                specialOfferActive: false,
+                specialReward: 3,
+                specialMessage: "Special Offer!"
+            }
+        };
+    }
 };
 
 mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
@@ -1202,9 +1220,27 @@ app.post('/api/credits/use', async (req, res) => {
 
 // ==================== AD REWARD ENDPOINTS ====================
 
-// Get Ad Offer Config (Frontend check)
-app.get('/api/config/ad-offer', (req, res) => {
-    res.json(AD_REWARD_CONFIG);
+// ==================== APP CONFIG & ADS ====================
+
+// Get Master App Config (Banners, Ads, Alerts)
+app.get('/api/config', async (req, res) => {
+    try {
+        const config = await getAppConfig();
+        res.json(config);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch config' });
+    }
+});
+
+// Legacy Endpoint Support (Redirect to new logic if needed, or keep for older app versions)
+app.get('/api/config/ad-offer', async (req, res) => {
+    const config = await getAppConfig();
+    res.json({
+        STANDARD_REWARD: config.adRewards.standardReward,
+        SPECIAL_OFFER_ACTIVE: config.adRewards.specialOfferActive,
+        SPECIAL_REWARD: config.adRewards.specialReward,
+        SPECIAL_MESSAGE: config.adRewards.specialMessage,
+    });
 });
 
 // Claim Watch Ad Reward (1 per day)
@@ -1229,10 +1265,14 @@ app.post('/api/credits/claim-ad-reward', async (req, res) => {
             });
         }
 
+        // Fetch Dynamic Config
+        const config = await getAppConfig();
+        const { adRewards } = config;
+
         // Determine Amount
-        const rewardAmount = AD_REWARD_CONFIG.SPECIAL_OFFER_ACTIVE
-            ? AD_REWARD_CONFIG.SPECIAL_REWARD
-            : AD_REWARD_CONFIG.STANDARD_REWARD;
+        const rewardAmount = adRewards.specialOfferActive
+            ? adRewards.specialReward
+            : adRewards.standardReward;
 
         // Apply Reward
         user.credits += rewardAmount;
@@ -1251,7 +1291,7 @@ app.post('/api/credits/claim-ad-reward', async (req, res) => {
             success: true,
             creditsAdded: rewardAmount,
             newBalance: user.credits,
-            message: AD_REWARD_CONFIG.SPECIAL_OFFER_ACTIVE
+            message: adRewards.specialOfferActive
                 ? `Special Offer! You earned ${rewardAmount} credits!`
                 : `You earned ${rewardAmount} credit! Come back tomorrow for more.`
         });
