@@ -1042,7 +1042,7 @@ app.post('/api/credits/register', async (req, res) => {
         const user = new User({
             recoveryCode,
             credits: 0,
-            freeCreditsRemaining: 5,
+            freeCreditsRemaining: 3, // Match daily limit
         });
 
         await user.save();
