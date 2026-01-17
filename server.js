@@ -21,6 +21,14 @@ const PORT = process.env.PORT || 3000;
 // MongoDB Connection
 const DB_NAME = 'ai_notes_app';
 
+// SERVER CONFIG - Watch Ad Offers
+const AD_REWARD_CONFIG = {
+    STANDARD_REWARD: 1,
+    SPECIAL_OFFER_ACTIVE: false, // Set to true to enable special offer
+    SPECIAL_REWARD: 3,
+    SPECIAL_MESSAGE: "Special Offer! Watch an ad to earn 3 credits!",
+};
+
 mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
     .then(() => console.log(`✅ Connected to MongoDB Atlas (${DB_NAME})`))
     .catch(err => console.error('❌ MongoDB connection error:', err));
@@ -1189,6 +1197,68 @@ app.post('/api/credits/use', async (req, res) => {
     } catch (error) {
         console.error('Use credits error:', error);
         res.status(500).json({ error: 'Failed to use credits', details: error.message });
+    }
+});
+
+// ==================== AD REWARD ENDPOINTS ====================
+
+// Get Ad Offer Config (Frontend check)
+app.get('/api/config/ad-offer', (req, res) => {
+    res.json(AD_REWARD_CONFIG);
+});
+
+// Claim Watch Ad Reward (1 per day)
+app.post('/api/credits/claim-ad-reward', async (req, res) => {
+    try {
+        const { code } = req.body;
+        if (!code) return res.status(400).json({ error: 'Recovery code is required' });
+
+        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // Check if already claimed today
+        const now = new Date();
+        const lastClaim = user.lastAdRewardDate ? new Date(user.lastAdRewardDate) : null;
+
+        if (lastClaim && lastClaim.toDateString() === now.toDateString()) {
+            return res.json({
+                success: false,
+                message: 'You have already claimed your daily ad reward!',
+                alreadyClaimed: true,
+                nextClaimTime: 'tomorrow'
+            });
+        }
+
+        // Determine Amount
+        const rewardAmount = AD_REWARD_CONFIG.SPECIAL_OFFER_ACTIVE
+            ? AD_REWARD_CONFIG.SPECIAL_REWARD
+            : AD_REWARD_CONFIG.STANDARD_REWARD;
+
+        // Apply Reward
+        user.credits += rewardAmount;
+        user.lastAdRewardDate = now;
+
+        // Log transaction
+        user.processedTransactions.push({
+            transactionId: `ad_reward_${Date.now()}`,
+            credits: rewardAmount,
+            processedAt: now,
+        });
+
+        await user.save();
+
+        res.json({
+            success: true,
+            creditsAdded: rewardAmount,
+            newBalance: user.credits,
+            message: AD_REWARD_CONFIG.SPECIAL_OFFER_ACTIVE
+                ? `Special Offer! You earned ${rewardAmount} credits!`
+                : `You earned ${rewardAmount} credit! Come back tomorrow for more.`
+        });
+
+    } catch (error) {
+        console.error('Ad reward claim error:', error);
+        res.status(500).json({ error: 'Failed to claim reward', details: error.message });
     }
 });
 

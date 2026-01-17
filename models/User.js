@@ -47,6 +47,11 @@ const UserSchema = new mongoose.Schema({
         timestamp: { type: Date, default: Date.now },
         description: String
     }],
+    // Ad Reward Tracking
+    lastAdRewardDate: {
+        type: Date,
+        default: null,
+    },
 });
 
 // Generate random recovery code
