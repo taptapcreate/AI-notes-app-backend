@@ -20,6 +20,15 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: Date.now,
     },
+    // Rate limiting for subscribers
+    dailyRequestCount: {
+        type: Number,
+        default: 0,
+    },
+    lastRequestReset: {
+        type: Date,
+        default: Date.now,
+    },
     processedTransactions: [{
         transactionId: String,
         credits: Number,
@@ -67,6 +76,37 @@ UserSchema.methods.resetDailyCreditsIfNeeded = function () {
         return true;
     }
     return false;
+};
+
+// Check and increment daily request count (for subscribers)
+// Returns { allowed: boolean, remaining: number, limit: number }
+UserSchema.methods.checkAndIncrementDailyLimit = function (dailyLimit = 100) {
+    const now = new Date();
+    const lastReset = new Date(this.lastRequestReset);
+
+    // Reset count if it's a new day
+    if (now.toDateString() !== lastReset.toDateString()) {
+        this.dailyRequestCount = 0;
+        this.lastRequestReset = now;
+    }
+
+    // Check if under limit
+    if (this.dailyRequestCount >= dailyLimit) {
+        return {
+            allowed: false,
+            remaining: 0,
+            limit: dailyLimit,
+            message: `Daily limit of ${dailyLimit} requests reached. Resets at midnight.`
+        };
+    }
+
+    // Increment and allow
+    this.dailyRequestCount += 1;
+    return {
+        allowed: true,
+        remaining: dailyLimit - this.dailyRequestCount,
+        limit: dailyLimit
+    };
 };
 
 module.exports = mongoose.model('User', UserSchema);
