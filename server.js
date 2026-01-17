@@ -38,6 +38,8 @@ const getAppConfig = async () => {
         // Fallback in case of DB error
         return {
             adRewards: {
+                enabled: false,
+                active: false,
                 standardReward: 1,
                 specialOfferActive: false,
                 specialReward: 3,

@@ -26,8 +26,8 @@ const AppConfigSchema = new mongoose.Schema({
     },
     // 3. Ad Rewards
     adRewards: {
-        enabled: { type: Boolean, default: true }, // Whether to show the ad section and rewards at all
-        active: { type: Boolean, default: true },  // Whether the feature is currently operational (shows message if false)
+        enabled: { type: Boolean, default: false }, // Whether to show the ad section and rewards at all
+        active: { type: Boolean, default: false },  // Whether the feature is currently operational (shows message if false)
         standardReward: { type: Number, default: 1 },
         specialOfferActive: { type: Boolean, default: false },
         specialReward: { type: Number, default: 3 },
