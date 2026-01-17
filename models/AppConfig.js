@@ -26,7 +26,8 @@ const AppConfigSchema = new mongoose.Schema({
     },
     // 3. Ad Rewards
     adRewards: {
-        active: { type: Boolean, default: true }, // Master toggle for Watch Ads feature
+        enabled: { type: Boolean, default: true }, // Whether to show the ad section and rewards at all
+        active: { type: Boolean, default: true },  // Whether the feature is currently operational (shows message if false)
         standardReward: { type: Number, default: 1 },
         specialOfferActive: { type: Boolean, default: false },
         specialReward: { type: Number, default: 3 },
