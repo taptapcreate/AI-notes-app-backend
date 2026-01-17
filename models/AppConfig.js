@@ -14,6 +14,8 @@ const AppConfigSchema = new mongoose.Schema({
         message: { type: String, default: '' },
         isBlocking: { type: Boolean, default: false }, // Force update or maintenance
     },
+    // 1.5 Free Limits
+    freeDailyCredits: { type: Number, default: 3 },
     // 2. Subscription Promo (Home Screen)
     subscriptionOffer: {
         active: { type: Boolean, default: false },
@@ -24,6 +26,7 @@ const AppConfigSchema = new mongoose.Schema({
     },
     // 3. Ad Rewards
     adRewards: {
+        active: { type: Boolean, default: true }, // Master toggle for Watch Ads feature
         standardReward: { type: Number, default: 1 },
         specialOfferActive: { type: Boolean, default: false },
         specialReward: { type: Number, default: 3 },

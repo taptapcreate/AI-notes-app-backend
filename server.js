@@ -1096,7 +1096,8 @@ app.get('/api/credits/balance/:code', async (req, res) => {
         }
 
         // Reset daily free credits if needed
-        const wasReset = user.resetDailyCreditsIfNeeded();
+        const config = await getAppConfig();
+        const wasReset = user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
         if (wasReset) {
             await user.save();
         }
@@ -1108,8 +1109,9 @@ app.get('/api/credits/balance/:code', async (req, res) => {
         res.json({
             success: true,
             credits: user.credits,
+            adCredits: user.adCredits || 0,
             freeCreditsRemaining: user.freeCreditsRemaining,
-            totalAvailable: user.credits + user.freeCreditsRemaining,
+            totalAvailable: user.credits + (user.adCredits || 0) + user.freeCreditsRemaining,
         });
     } catch (error) {
         console.error('Balance error:', error);
@@ -1180,9 +1182,10 @@ app.post('/api/credits/use', async (req, res) => {
         }
 
         // Reset daily free credits if needed
-        user.resetDailyCreditsIfNeeded();
+        const config = await getAppConfig();
+        user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
 
-        const totalAvailable = user.credits + user.freeCreditsRemaining;
+        const totalAvailable = user.credits + (user.adCredits || 0) + user.freeCreditsRemaining;
 
         if (totalAvailable < amount) {
             return res.status(400).json({
@@ -1192,13 +1195,32 @@ app.post('/api/credits/use', async (req, res) => {
             });
         }
 
-        // Use free credits first, then purchased credits
+        // Use free credits first, then ad credits, then purchased credits
         let remaining = amount;
+
+        // 1. Free Credits
         if (user.freeCreditsRemaining >= remaining) {
             user.freeCreditsRemaining -= remaining;
+            remaining = 0;
         } else {
             remaining -= user.freeCreditsRemaining;
             user.freeCreditsRemaining = 0;
+        }
+
+        // 2. Ad Credits
+        if (remaining > 0) {
+            const adBal = user.adCredits || 0;
+            if (adBal >= remaining) {
+                user.adCredits = adBal - remaining;
+                remaining = 0;
+            } else {
+                remaining -= adBal;
+                user.adCredits = 0;
+            }
+        }
+
+        // 3. Purchased Credits
+        if (remaining > 0) {
             user.credits -= remaining;
         }
 
@@ -1209,8 +1231,9 @@ app.post('/api/credits/use', async (req, res) => {
             success: true,
             creditsUsed: amount,
             remainingCredits: user.credits,
+            remainingAdCredits: user.adCredits || 0,
             remainingFreeCredits: user.freeCreditsRemaining,
-            totalAvailable: user.credits + user.freeCreditsRemaining,
+            totalAvailable: user.credits + (user.adCredits || 0) + user.freeCreditsRemaining,
         });
     } catch (error) {
         console.error('Use credits error:', error);
@@ -1274,8 +1297,9 @@ app.post('/api/credits/claim-ad-reward', async (req, res) => {
             ? adRewards.specialReward
             : adRewards.standardReward;
 
-        // Apply Reward
-        user.credits += rewardAmount;
+        // Apply Reward (to Ad Credits bucket)
+        if (!user.adCredits) user.adCredits = 0;
+        user.adCredits += rewardAmount;
         user.lastAdRewardDate = now;
 
         // Log transaction
@@ -1290,7 +1314,8 @@ app.post('/api/credits/claim-ad-reward', async (req, res) => {
         res.json({
             success: true,
             creditsAdded: rewardAmount,
-            newBalance: user.credits,
+            newBalance: user.adCredits,
+            totalAvailable: user.credits + user.adCredits + user.freeCreditsRemaining,
             message: adRewards.specialOfferActive
                 ? `Special Offer! You earned ${rewardAmount} credits!`
                 : `You earned ${rewardAmount} credit! Come back tomorrow for more.`
@@ -1343,7 +1368,8 @@ app.post('/api/credits/recover', recoverLimiter, async (req, res) => {
 
         // 2. If same code as current, just return info
         if (currentRecoveryCode && targetCode === currentRecoveryCode) {
-            targetAccount.resetDailyCreditsIfNeeded();
+            const config = await getAppConfig();
+            targetAccount.resetDailyCreditsIfNeeded(config.freeDailyCredits);
             targetAccount.lastActive = new Date();
             await targetAccount.save();
 
@@ -1351,8 +1377,9 @@ app.post('/api/credits/recover', recoverLimiter, async (req, res) => {
                 success: true,
                 recoveryCode: targetAccount.recoveryCode,
                 credits: targetAccount.credits,
+                adCredits: targetAccount.adCredits || 0,
                 freeCreditsRemaining: targetAccount.freeCreditsRemaining,
-                totalAvailable: targetAccount.credits + targetAccount.freeCreditsRemaining,
+                totalAvailable: targetAccount.credits + (targetAccount.adCredits || 0) + targetAccount.freeCreditsRemaining,
                 message: 'Already using this account!',
             });
         }
@@ -1381,7 +1408,8 @@ app.post('/api/credits/recover', recoverLimiter, async (req, res) => {
             });
         }
 
-        targetAccount.resetDailyCreditsIfNeeded();
+        const config = await getAppConfig();
+        targetAccount.resetDailyCreditsIfNeeded(config.freeDailyCredits);
         targetAccount.lastActive = new Date();
         await targetAccount.save();
 
@@ -1389,8 +1417,9 @@ app.post('/api/credits/recover', recoverLimiter, async (req, res) => {
             success: true,
             recoveryCode: targetAccount.recoveryCode,
             credits: targetAccount.credits,
+            adCredits: targetAccount.adCredits || 0,
             freeCreditsRemaining: targetAccount.freeCreditsRemaining,
-            totalAvailable: targetAccount.credits + targetAccount.freeCreditsRemaining,
+            totalAvailable: targetAccount.credits + (targetAccount.adCredits || 0) + targetAccount.freeCreditsRemaining,
             message: 'Account recovered successfully!',
         });
     } catch (error) {

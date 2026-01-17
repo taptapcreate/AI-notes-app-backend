@@ -12,6 +12,10 @@ const UserSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
+    adCredits: {
+        type: Number,
+        default: 0,
+    },
     freeCreditsRemaining: {
         type: Number,
         default: 3, // Daily free credits
@@ -70,13 +74,13 @@ UserSchema.methods.hasProcessedTransaction = function (transactionId) {
 };
 
 // Reset daily free credits if new day
-UserSchema.methods.resetDailyCreditsIfNeeded = function () {
+UserSchema.methods.resetDailyCreditsIfNeeded = function (limit = 3) {
     const now = new Date();
     const lastReset = new Date(this.lastFreeCreditsReset);
 
     // Check if it's a new day (different date)
     if (now.toDateString() !== lastReset.toDateString()) {
-        this.freeCreditsRemaining = 3;
+        this.freeCreditsRemaining = limit;
         this.lastFreeCreditsReset = now;
         return true;
     }
