@@ -502,9 +502,7 @@ Tip: Try recording in a quieter environment for better results!`;
                 break;
 
             case 'pdf':
-                prompt = `The user has uploaded a PDF file named: "${content}"
-
-Since I cannot read the PDF content directly, provide a professional note-taking template they can use.
+                prompt = `You are an expert at analyzing documents. Analyze this PDF document thoroughly and create comprehensive notes.
 
 LENGTH REQUIREMENT: ${lengthInstruction}
 FORMAT REQUIREMENT: ${formatInstruction}
@@ -513,42 +511,36 @@ LANGUAGE REQUIREMENT: ${languageInstruction}
 USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
+1. Provide a clear summary of the document's purpose
+2. Extract all key findings, data, and arguments
+3. Organize the content logically (headers, bullet points)
+4. Highlight any important dates, names, or requirements
+5. If it's a form or template, describe its structure and required fields
 
-📄 **Notes Template for: ${content}**
+FORMAT YOUR RESPONSE AS:
+📄 **Document Analysis**
 
-**Document Overview**
-• Title: Document title here
-• Date: Date if applicable
-• Type: Report/Article/Manual/etc.
+**Overview:**
+[Brief summary of the document]
 
-**Main Content**
+**Detailed Content:**
+• [Organized detailed notes]
 
-Section 1: Topic
-• Key point here
-• Key point here
+**Key Takeaways:**
+• [Important points]
 
-Section 2: Topic
-• Key point here
-• Key point here
-
-**Key Takeaways**
-• Most important point 1
-• Most important point 2
-• Most important point 3
-
-**Action Items**
-• Task 1
-• Task 2
-
-**Additional Notes**
-Space for extra observations
-
----
-Fill in this template as you review your PDF!
-(Note: Since I cannot read the PDF directly, I have provided a template. If you can copy the text from the PDF and paste it as text input, I can generate specific notes for you!)`;
+Generate the notes now:`;
 
                 const pdfModel = getModel(maxTokens);
-                result = await generateWithRetry(pdfModel, prompt);
+                result = await generateWithRetry(pdfModel, [
+                    prompt,
+                    {
+                        inlineData: {
+                            mimeType: 'application/pdf',
+                            data: content,
+                        },
+                    },
+                ]);
                 break;
 
             case 'website':
