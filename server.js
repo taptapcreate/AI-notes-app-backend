@@ -343,6 +343,45 @@ app.post('/api/notes', async (req, res) => {
     `
             : '';
 
+        // PRO: Distinct Formatting Logic
+        const proFormatting = isPro
+            ? `
+FORMAT YOUR RESPONSE AS:
+# [Professional Title]
+
+⭐ **Executive Summary**
+[A high-level synthesis of the core message (2-3 sentences). Not just a summary, but the "Bottom Line".]
+
+🧐 **Context & Analysis**
+[Why this matters, underlying concepts, or strategic importance]
+
+📝 **Detailed Breakdown**
+• Section headers in bold
+• Organized content with strict hierarchy
+• Sub-points for depth
+
+🚀 **Strategic Implications / Actionable Insights**
+• What to do next or how to apply this knowledge
+• Potential impact or hidden opportunities
+
+📌 **Key Takeaways**
+• [Critical point 1]
+• [Critical point 2]
+`
+            : `
+FORMAT YOUR RESPONSE AS:
+# Appropriate Title Based on Content
+
+• Section headers in bold
+• Organized content with bullet points
+• Sub-points indented properly
+
+## Key Takeaways
+• Most important point 1
+• Most important point 2
+• Most important point 3
+`;
+
         let prompt = '';
         let result;
 
@@ -377,17 +416,7 @@ INSTRUCTIONS:
 4. Bold important terms by surrounding them with **asterisks**
 5. Add a "📌 Key Takeaways" section at the end
 
-FORMAT YOUR RESPONSE AS:
-# Appropriate Title Based on Content
-
-• Section headers in bold
-• Organized content with bullet points
-• Sub-points indented properly
-
-## Key Takeaways
-• Most important point 1
-• Most important point 2
-• Most important point 3
+${proFormatting}
 
 Generate the notes now:`;
 
@@ -816,11 +845,24 @@ app.post('/api/reply', async (req, res) => {
 
         // ... keys ...
 
+        // PRO: Smarter Prompt Logic
+        const proInstruction = isPro
+            ? `
+    🌟 **PRO MODE ACTIVE (High Intelligence Analysis)**
+    - Use **Chain-of-Thought** reasoning to structure your output.
+    - Go deeper than surface level: Analyze *implications*, *unspoken context*, and *strategic value*.
+    - If explaining a concept, assume the user is intelligent but wants clarity (like Feynman Technique).
+    - If summarizing, prioritize *synthesizing ideas* over just listing facts.
+    - Use richer vocabulary and more precise terminology suitable for an expert audience.
+    `
+            : '';
+
         let prompt;
 
         if (mode === 'refine') {
             // STRICT REFINE MODE
             prompt = `You are an expert editor and translator. Rewrite/Refine the user's draft message.
+    ${proInstruction}
 
 USER'S DRAFT:
 """
@@ -846,6 +888,7 @@ Generate ${replyCount} refined versions now:`;
         } else if (mode === 'compose') {
             // STRICT COMPOSE MODE
             prompt = `You are an expert writer and translator. Write a message based on the user's topic/instruction.
+    ${proInstruction}
 
 USER'S TOPIC/INSTRUCTION:
 """
@@ -870,6 +913,7 @@ Generate ${replyCount} versions now:`;
         } else {
             // STRICT REPLY MODE (Default)
             prompt = `You are an expert communication assistant. Generate a reply TO the message below.
+    ${proInstruction}
 
 RECEIVED MESSAGE:
 """
