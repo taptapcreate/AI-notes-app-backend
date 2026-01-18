@@ -61,7 +61,7 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Get the model with configuration
-const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash-002') => {
+const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -73,7 +73,7 @@ const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash-002') => {
 };
 
 // Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-1.5-flash-002') => {
+const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-2.0-flash') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -312,19 +312,11 @@ const styleGuides = {
 // ==================== NOTES ENDPOINT ====================
 app.post('/api/notes', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction = '', isPro = false } = req.body;
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction = '' } = req.body;
 
         if (!content) {
             return res.status(400).json({ error: 'Content is required' });
         }
-
-        // MODEL STRATEGY FOR PROFITABILITY:
-        // Free: Gemini 1.5 Flash (Extremely cheap, fast, good for basic usage)
-        // Pro:  Gemini 2.0 Flash (Smarter, better reasoning, newest model) 
-        // Note: 2.0 Flash is currently free in preview, 1.5 Flash is very cheap.
-        // Avoid 1.5 Pro ($$$) to protect margins on "Unlimited" plans.
-        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-002';
-        console.log(`🧠 Using model: ${modelName} (Pro: ${isPro})`);
 
         const lengthConfig = lengthGuides[noteLength] || lengthGuides.standard;
         const lengthInstruction = lengthConfig.instruction;
@@ -386,7 +378,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const textModel = getModel(maxTokens, modelName);
+                const textModel = getModel(maxTokens);
                 result = await generateWithRetry(textModel, prompt);
                 break;
 
@@ -426,7 +418,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now following all requirements:`;
 
-                const visionModel = getModel(maxTokens, modelName);
+                const visionModel = getModel(maxTokens);
                 result = await generateWithRetry(visionModel, [
                     prompt,
                     {
@@ -477,7 +469,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now following all requirements:`;
 
-                const audioModel = getModel(maxTokens, modelName);
+                const audioModel = getModel(maxTokens);
 
                 // Try different mime types based on what Expo typically records
                 // iOS uses .m4a (audio/m4a), Android may use .3gp or .m4a
@@ -561,7 +553,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const pdfModel = getModel(maxTokens, modelName);
+                const pdfModel = getModel(maxTokens);
                 result = await generateWithRetry(pdfModel, [
                     prompt,
                     {
@@ -617,7 +609,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const webModel = getModel(maxTokens, modelName);
+                const webModel = getModel(maxTokens);
                 result = await generateWithRetry(webModel, prompt);
                 break;
 
@@ -725,15 +717,11 @@ Continue the notes now, picking up exactly where it stopped:`;
 // ==================== STREAMING NOTES ENDPOINT ====================
 app.post('/api/notes/stream', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', isPro = false } = req.body;
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english' } = req.body;
 
         if (!content) {
             return res.status(400).json({ error: 'Content is required' });
         }
-
-        // Use Advanced Model for Pro users
-        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-002';
-        console.log(`🧠 Streaming using model: ${modelName} (Pro: ${isPro})`);
 
         // Set SSE headers
         res.setHeader('Content-Type', 'text/event-stream');
@@ -774,7 +762,7 @@ INSTRUCTIONS:
 
 Generate the notes now:`;
 
-        const model = getStreamingModel(maxTokens, modelName);
+        const model = getStreamingModel(maxTokens);
         const streamResult = await model.generateContentStream(prompt);
 
         // Stream each chunk as SSE
@@ -813,8 +801,7 @@ app.post('/api/reply', async (req, res) => {
         let prompt;
 
         if (mode === 'refine') {
-            // ... strict refine prompt ...
-            // (existing prompt code)
+            // STRICT REFINE MODE
             prompt = `You are an expert editor and translator. Rewrite/Refine the user's draft message.
 
 USER'S DRAFT:
@@ -837,9 +824,9 @@ IMPORTANT RULES:
 7. Separate strictly with: ---REPLY---
 
 Generate ${replyCount} refined versions now:`;
+
         } else if (mode === 'compose') {
-            // ... strict compose prompt ...
-            // (existing prompt code)
+            // STRICT COMPOSE MODE
             prompt = `You are an expert writer and translator. Write a message based on the user's topic/instruction.
 
 USER'S TOPIC/INSTRUCTION:
@@ -861,8 +848,9 @@ IMPORTANT RULES:
 6. Separate strictly with: ---REPLY---
 
 Generate ${replyCount} versions now:`;
+
         } else {
-            // ... default reply prompt ...
+            // STRICT REPLY MODE (Default)
             prompt = `You are an expert communication assistant. Generate a reply TO the message below.
 
 RECEIVED MESSAGE:
@@ -887,13 +875,7 @@ IMPORTANT RULES:
 Generate ${replyCount} replies now:`;
         }
 
-        // MODEL STRATEGY:
-        // Free: Gemini 1.5 Flash
-        // Pro:  Gemini 2.0 Flash
-        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-002';
-        console.log(`🧠 Reply using model: ${modelName} (Pro: ${isPro})`);
-
-        const model = getModel(2048, modelName);
+        const model = getModel();
         const result = await generateWithRetry(model, prompt);
         const responseText = result.response.text();
 
