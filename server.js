@@ -61,7 +61,7 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Get the model with configuration
-const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
+const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash-latest') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -73,7 +73,7 @@ const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
 };
 
 // Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-2.0-flash') => {
+const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-1.5-flash-latest') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -323,7 +323,7 @@ app.post('/api/notes', async (req, res) => {
         // Pro:  Gemini 2.0 Flash (Smarter, better reasoning, newest model) 
         // Note: 2.0 Flash is currently free in preview, 1.5 Flash is very cheap.
         // Avoid 1.5 Pro ($$$) to protect margins on "Unlimited" plans.
-        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash';
+        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-latest';
         console.log(`🧠 Using model: ${modelName} (Pro: ${isPro})`);
 
         const lengthConfig = lengthGuides[noteLength] || lengthGuides.standard;
@@ -725,11 +725,15 @@ Continue the notes now, picking up exactly where it stopped:`;
 // ==================== STREAMING NOTES ENDPOINT ====================
 app.post('/api/notes/stream', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english' } = req.body;
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', isPro = false } = req.body;
 
         if (!content) {
             return res.status(400).json({ error: 'Content is required' });
         }
+
+        // Use Advanced Model for Pro users
+        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-latest';
+        console.log(`🧠 Streaming using model: ${modelName} (Pro: ${isPro})`);
 
         // Set SSE headers
         res.setHeader('Content-Type', 'text/event-stream');
@@ -770,7 +774,7 @@ INSTRUCTIONS:
 
 Generate the notes now:`;
 
-        const model = getStreamingModel(maxTokens);
+        const model = getStreamingModel(maxTokens, modelName);
         const streamResult = await model.generateContentStream(prompt);
 
         // Stream each chunk as SSE
@@ -886,7 +890,7 @@ Generate ${replyCount} replies now:`;
         // MODEL STRATEGY:
         // Free: Gemini 1.5 Flash
         // Pro:  Gemini 2.0 Flash
-        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash';
+        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-latest';
         console.log(`🧠 Reply using model: ${modelName} (Pro: ${isPro})`);
 
         const model = getModel(2048, modelName);
