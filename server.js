@@ -61,7 +61,7 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Get the model with configuration
-const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash-latest') => {
+const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash-002') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -73,7 +73,7 @@ const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash-latest') => {
 };
 
 // Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-1.5-flash-latest') => {
+const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-1.5-flash-002') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -323,7 +323,7 @@ app.post('/api/notes', async (req, res) => {
         // Pro:  Gemini 2.0 Flash (Smarter, better reasoning, newest model) 
         // Note: 2.0 Flash is currently free in preview, 1.5 Flash is very cheap.
         // Avoid 1.5 Pro ($$$) to protect margins on "Unlimited" plans.
-        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-latest';
+        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-002';
         console.log(`🧠 Using model: ${modelName} (Pro: ${isPro})`);
 
         const lengthConfig = lengthGuides[noteLength] || lengthGuides.standard;
@@ -732,7 +732,7 @@ app.post('/api/notes/stream', async (req, res) => {
         }
 
         // Use Advanced Model for Pro users
-        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-latest';
+        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-002';
         console.log(`🧠 Streaming using model: ${modelName} (Pro: ${isPro})`);
 
         // Set SSE headers
@@ -890,7 +890,7 @@ Generate ${replyCount} replies now:`;
         // MODEL STRATEGY:
         // Free: Gemini 1.5 Flash
         // Pro:  Gemini 2.0 Flash
-        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-latest';
+        const modelName = isPro ? 'gemini-2.0-flash-exp' : 'gemini-1.5-flash-002';
         console.log(`🧠 Reply using model: ${modelName} (Pro: ${isPro})`);
 
         const model = getModel(2048, modelName);
