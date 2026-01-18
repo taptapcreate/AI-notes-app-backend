@@ -61,9 +61,9 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Get the model with configuration
-const getModel = (maxTokens = 2048) => {
+const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
     return genAI.getGenerativeModel({
-        model: 'gemini-2.5-flash',
+        model: modelName,
         generationConfig: {
             temperature: 0.7,
             topP: 0.9,
@@ -73,9 +73,9 @@ const getModel = (maxTokens = 2048) => {
 };
 
 // Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096) => {
+const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-2.0-flash') => {
     return genAI.getGenerativeModel({
-        model: 'gemini-2.5-flash',
+        model: modelName,
         generationConfig: {
             temperature: 0.7,
             topP: 0.9,
@@ -286,6 +286,12 @@ const formatGuides = {
     slack: 'Format for Slack: professional but colloquial, clear and concise.',
     tiktok: 'Format for TikTok comment/caption: catchy, trendy, uses hashtags.',
     letter: 'Format as a formal letter: Date, Salutation, Body, Closing.',
+    eli5: 'Format as an "Explain Like I\'m 5" (ELI5) summary: use very simple language, relatable analogies, and avoid technical jargon.',
+    quiz: 'Generate 5 study questions or a quick quiz based on the content to help with learning and retention.',
+    recipe: 'Format as a recipe: extract Ingredients (with measurements) and Step-by-Step Instructions.',
+    code: 'Format as a code explanation: break down logic into simple steps, explain technical terms, and highlight efficiency.',
+    social: 'Format as a catchy social media post: use hooks, emojis, and relevant hashtags. Engaging and shareable.',
+    grammar: 'Focus on fixing spelling, grammar, and punctuation while maintaining the original meaning. Only improve clarity.',
 };
 
 // Style instructions (Reply specific)
@@ -306,7 +312,7 @@ const styleGuides = {
 // ==================== NOTES ENDPOINT ====================
 app.post('/api/notes', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english' } = req.body;
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction = '' } = req.body;
 
         if (!content) {
             return res.status(400).json({ error: 'Content is required' });
@@ -341,6 +347,7 @@ LENGTH REQUIREMENT: ${lengthInstruction}
 FORMAT REQUIREMENT: ${formatInstruction}
 TONE REQUIREMENT: ${toneInstruction}
 LANGUAGE REQUIREMENT: ${languageInstruction}
+USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
 1. Create a clear, hierarchical structure with sections
@@ -374,6 +381,7 @@ LENGTH REQUIREMENT: ${lengthInstruction}
 FORMAT REQUIREMENT: ${formatInstruction}
 TONE REQUIREMENT: ${toneInstruction}
 LANGUAGE REQUIREMENT: ${languageInstruction}
+USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
 1. If it contains text/handwriting: Transcribe it accurately and organize it
@@ -415,6 +423,7 @@ LENGTH REQUIREMENT: ${lengthInstruction}
 FORMAT REQUIREMENT: ${formatInstruction}
 TONE REQUIREMENT: ${toneInstruction}
 LANGUAGE REQUIREMENT: ${languageInstruction}
+USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
 1. First, transcribe the spoken content accurately
@@ -501,6 +510,7 @@ LENGTH REQUIREMENT: ${lengthInstruction}
 FORMAT REQUIREMENT: ${formatInstruction}
 TONE REQUIREMENT: ${toneInstruction}
 LANGUAGE REQUIREMENT: ${languageInstruction}
+USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
 
@@ -556,6 +566,7 @@ LENGTH REQUIREMENT: ${lengthInstruction}
 FORMAT REQUIREMENT: ${formatInstruction}
 TONE REQUIREMENT: ${toneInstruction}
 LANGUAGE REQUIREMENT: ${languageInstruction}
+USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
 1. Identify the main topic and key arguments/points
@@ -603,6 +614,7 @@ LENGTH REQUIREMENT: ${lengthInstruction}
 FORMAT REQUIREMENT: ${formatInstruction}
 TONE REQUIREMENT: ${toneInstruction}
 LANGUAGE REQUIREMENT: ${languageInstruction}
+USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
 1. Reconstruct the logical flow of the video
@@ -761,7 +773,7 @@ Generate the notes now:`;
 // ==================== REPLY ENDPOINT ====================
 app.post('/api/reply', async (req, res) => {
     try {
-        const { message, tone, style, format, mode = 'reply', language = 'English' } = req.body;
+        const { message, tone, style, format, mode = 'reply', language = 'English', instruction = '' } = req.body;
 
         if (!message) {
             return res.status(400).json({ error: 'Message is required' });
@@ -781,10 +793,9 @@ ${message}
 """
 
 TARGET REQUIREMENTS:
-• Tone: ${toneGuides[tone] || toneGuides.professional}
-• Style: ${styleGuides[style] || styleGuides.short}
 • Format: ${formatGuides[format] || formatGuides.email}
 • Output Language: ${language}
+• USER INTENT/INSTRUCTION: ${instruction || 'None provided. Focus on polishing the draft.'}
 
 IMPORTANT RULES:
 1. Do NOT reply to the message. You must REWRITE it.
@@ -807,10 +818,9 @@ ${message}
 """
 
 TARGET REQUIREMENTS:
-• Tone: ${toneGuides[tone] || toneGuides.professional}
-• Style: ${styleGuides[style] || styleGuides.short}
 • Format: ${formatGuides[format] || formatGuides.email}
 • Output Language: ${language}
+• USER INTENT/INSTRUCTION: ${instruction || 'None provided. Compose a complete version based on topic.'}
 
 IMPORTANT RULES:
 1. Write a NEW message about this topic in ${language}.
@@ -832,10 +842,9 @@ ${message}
 """
 
 REPLY REQUIREMENTS:
-• Tone: ${toneGuides[tone] || toneGuides.professional}
-• Style: ${styleGuides[style] || styleGuides.short}
 • Format: ${formatGuides[format] || formatGuides.email}
 • Output Language: ${language}
+• USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate helpful replies.'}
 
 IMPORTANT RULES:
 1. You are engaging in conversation. Reply TO what was said.
@@ -971,13 +980,16 @@ Also provide a confidence score (0-100%) and a brief explanation.
 
 FORMAT AS JSON:
 {
-    "sentiment": "Positive/Negative/Neutral",
+    "type": "positive/negative/neutral/angry/frustrated/happy/sad/urgent/confused",
+    "emoji": "appropriate emoji",
+    "label": "Brief Label",
+    "color": "Hex color without opacity (e.g. #10B981)",
     "score": 0.85,
     "explanation": "Brief explanation here"
 }
 `;
 
-        const model = getModel();
+        const model = getModel(512, 'gemini-1.5-flash-8b');
         const result = await generateWithRetry(model, prompt);
         const textResponse = result.response.text();
 
