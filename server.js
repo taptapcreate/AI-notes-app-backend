@@ -312,7 +312,7 @@ const styleGuides = {
 // ==================== NOTES ENDPOINT ====================
 app.post('/api/notes', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction = '' } = req.body;
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction = '', isPro = false } = req.body;
 
         if (!content) {
             return res.status(400).json({ error: 'Content is required' });
@@ -331,12 +331,25 @@ app.post('/api/notes', async (req, res) => {
             ? `IMPORTANT: Generate ALL content in ${language}. Provide the SAME level of detail and number of points as you would in English. Do NOT shorten or summarize when translating. Use natural ${language} phrasing.`
             : 'Keep the output in English.';
 
+        // PRO: Smarter Prompt Logic
+        const proInstruction = isPro
+            ? `
+    🌟 **PRO MODE ACTIVE (High Intelligence Analysis)**
+    - Use **Chain-of-Thought** reasoning to structure your output.
+    - Go deeper than surface level: Analyze *implications*, *unspoken context*, and *strategic value*.
+    - If explaining a concept, assume the user is intelligent but wants clarity (like Feynman Technique).
+    - If summarizing, prioritize *synthesizing ideas* over just listing facts.
+    - Use richer vocabulary and more precise terminology suitable for an expert audience.
+    `
+            : '';
+
         let prompt = '';
         let result;
 
         switch (type) {
             case 'text':
                 prompt = `You are an expert AI assistant. Your task depends on the input content:
+    ${proInstruction}
 
     1. **IF INPUT IS A QUESTION/INSTRUCTION** (e.g., "Explain Quantum Physics", "Write a poem"):
        - **ANSWER** the question or **EXECUTE** the instruction directly.
@@ -384,6 +397,7 @@ Generate the notes now:`;
 
             case 'image':
                 prompt = `You are an expert at analyzing images. Your task depends on the image content:
+    ${proInstruction}
 
     1. **IF IMAGE CONTAINS A QUESTION/PROBLEM** (e.g., homework, exam question):
        - **SOLVE** or **ANSWER** it.
@@ -432,6 +446,7 @@ Generate the notes now following all requirements:`;
 
             case 'voice':
                 prompt = `You are an expert AI assistant. Your task depends on the audio content:
+    ${proInstruction}
 
     1. **IF AUDIO IS A QUESTION/INSTRUCTION** (e.g., "Tell me about the Event Loop", "How do I make pasta?"):
        - **ANSWER** the question or **FULFILL** the request directly.
@@ -525,6 +540,7 @@ Tip: Try recording in a quieter environment for better results!`;
 
             case 'pdf':
                 prompt = `You are an expert at analyzing documents. Analyze this PDF document thoroughly and create comprehensive notes.
+    ${proInstruction}
 
 LENGTH REQUIREMENT: ${lengthInstruction}
 FORMAT REQUIREMENT: ${formatInstruction}
@@ -568,6 +584,7 @@ Generate the notes now:`;
             case 'website':
                 const websiteText = await fetchWebsiteContent(content);
                 prompt = `You are an expert web researcher. Summarize the following website content into clear, organized notes.
+    ${proInstruction}
 
 URL: ${content}
 
@@ -616,6 +633,7 @@ Generate the notes now:`;
             case 'youtube':
                 const transcript = await fetchYouTubeTranscript(content);
                 prompt = `You are an expert video summarizer. Create detailed notes from this YouTube video transcript.
+    ${proInstruction}
 
 VIDEO URL: ${content}
 
