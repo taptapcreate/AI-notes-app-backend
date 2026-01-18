@@ -787,11 +787,14 @@ Generate the notes now:`;
 // ==================== REPLY ENDPOINT ====================
 app.post('/api/reply', async (req, res) => {
     try {
-        const { message, tone, style, format, mode = 'reply', language = 'English', instruction = '' } = req.body;
+        const { message, tone, style, format, mode = 'reply', language = 'English', instruction = '', isPro = false } = req.body;
 
         if (!message) {
             return res.status(400).json({ error: 'Message is required' });
         }
+
+        // Determine number of replies (PRO GETS 5, FREE GETS 3)
+        const replyCount = isPro ? 5 : 3;
 
         // ... keys ...
 
@@ -816,11 +819,11 @@ IMPORTANT RULES:
 2. Keep the original meaning but change the wording/tone.
 3. Write as a NATIVE speaker of ${language}. Do not use literal translations.
 4. If the target language is different from input, TRANSLATE + REFINE simultaneously to sound natural.
-5. Generate 3 distinct versions.
+5. Generate ${replyCount} distinct versions.
 6. Each version must be COMPLETE.
 7. Separate strictly with: ---REPLY---
 
-Generate 3 refined versions now:`;
+Generate ${replyCount} refined versions now:`;
 
         } else if (mode === 'compose') {
             // STRICT COMPOSE MODE
@@ -840,11 +843,11 @@ IMPORTANT RULES:
 1. Write a NEW message about this topic in ${language}.
 2. Expand on the instruction to make it a complete message.
 3. Write as a NATIVE speaker of ${language}.
-4. Generate 3 distinct versions.
+4. Generate ${replyCount} distinct versions.
 5. Each version must be COMPLETE.
 6. Separate strictly with: ---REPLY---
 
-Generate 3 versions now:`;
+Generate ${replyCount} versions now:`;
 
         } else {
             // STRICT REPLY MODE (Default)
@@ -865,11 +868,11 @@ IMPORTANT RULES:
 2. Answer in ${language} regardless of the input language.
 3. Write as a NATIVE speaker of ${language}.
 4. Don't simply rewrite the message. Answer it.
-5. Generate 3 distinct options.
+5. Generate ${replyCount} distinct options.
 6. Each option must be COMPLETE.
 7. Separate strictly with: ---REPLY---
 
-Generate 3 replies now:`;
+Generate ${replyCount} replies now:`;
         }
 
         const model = getModel();
@@ -882,7 +885,7 @@ Generate 3 replies now:`;
             .filter(reply => reply.length > 0);
 
         // If splitting didn't work well, try other patterns
-        if (replies.length < 3) {
+        if (replies.length < replyCount) {
             replies = responseText.split(/\n\n(?=(?:Hi|Hello|Dear|Hey|Thank|I ))/i)
                 .map(reply => reply.trim())
                 .filter(reply => reply.length > 15);
@@ -893,13 +896,13 @@ Generate 3 replies now:`;
             reply.replace(/^(Reply\s*\d+:?|Option\s*\d+:?|\d+\.)/i, '').trim()
         );
 
-        // Ensure we have 3 replies
-        while (replies.length < 3) {
-            replies.push(replies[0] || 'Sorry, I couldn\'t generate a reply. Please try again.');
+        // Ensure we have enough replies (fallback)
+        while (replies.length < replyCount) {
+            replies.push(replies[0] || 'Sorry, I couldn\'t generate enough unique replies. Please try again.');
         }
 
-        // Take only first 3
-        replies = replies.slice(0, 3);
+        // Take only the requested amount
+        replies = replies.slice(0, replyCount);
 
         res.json({ replies });
 
