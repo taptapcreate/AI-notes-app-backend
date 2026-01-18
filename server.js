@@ -336,17 +336,25 @@ app.post('/api/notes', async (req, res) => {
 
         switch (type) {
             case 'text':
-                prompt = `You are an expert note-taking assistant. Transform the following content into perfectly organized, professional notes.
+                prompt = `You are an expert AI assistant. Your task depends on the input content:
 
-INPUT CONTENT:
-"""
-${content}
-"""
+    1. **IF INPUT IS A QUESTION/INSTRUCTION** (e.g., "Explain Quantum Physics", "Write a poem"):
+       - **ANSWER** the question or **EXECUTE** the instruction directly.
+       - Do NOT summarize the request (e.g., don't say "The user asked for...").
+       - Provide the actual detailed answer/content in the "Detailed Notes" section.
 
-LENGTH REQUIREMENT: ${lengthInstruction}
-FORMAT REQUIREMENT: ${formatInstruction}
-TONE REQUIREMENT: ${toneInstruction}
-LANGUAGE REQUIREMENT: ${languageInstruction}
+    2. **IF INPUT IS CONTENT** (e.g., an article, notes, meeting transcript):
+       - Transform it into perfectly organized, professional notes as usual.
+
+    INPUT CONTENT:
+    """
+    ${content}
+    """
+
+    LENGTH REQUIREMENT: ${lengthInstruction}
+    FORMAT REQUIREMENT: ${formatInstruction}
+    TONE REQUIREMENT: ${toneInstruction}
+    LANGUAGE REQUIREMENT: ${languageInstruction}
 USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
@@ -375,20 +383,26 @@ Generate the notes now:`;
                 break;
 
             case 'image':
-                prompt = `You are an expert at analyzing images and extracting information. Analyze this image thoroughly and create comprehensive notes.
+                prompt = `You are an expert at analyzing images. Your task depends on the image content:
 
-LENGTH REQUIREMENT: ${lengthInstruction}
-FORMAT REQUIREMENT: ${formatInstruction}
-TONE REQUIREMENT: ${toneInstruction}
-LANGUAGE REQUIREMENT: ${languageInstruction}
-USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
+    1. **IF IMAGE CONTAINS A QUESTION/PROBLEM** (e.g., homework, exam question):
+       - **SOLVE** or **ANSWER** it.
+       - Explain the solution step-by-step in the "Detailed Notes" section.
 
-INSTRUCTIONS:
-1. If it contains text/handwriting: Transcribe it accurately and organize it
-2. If it's a diagram/chart: Explain what it shows and extract all data
-3. If it's a photo of notes/whiteboard: Clean up and organize the content
-4. If it's any other image: Describe it and note key observations
-5. Apply the requested Tone, Format, and Language settings.
+    2. **IF IMAGE IS CONTENT** (e.g., a diagram, screenshot, photo of notes):
+       - Analyze and extract the information into satisfying notes.
+
+    LENGTH REQUIREMENT: ${lengthInstruction}
+    FORMAT REQUIREMENT: ${formatInstruction}
+    TONE REQUIREMENT: ${toneInstruction}
+    LANGUAGE REQUIREMENT: ${languageInstruction}
+    USER INTENT/INSTRUCTION: ${instruction || 'None provided.'}
+
+    INSTRUCTIONS:
+    1. If text/handwriting: Transcribe accurately.
+    2. If diagram/chart: Explain insights and data.
+    3. If question: Provide the solution.
+    4. Apply requested Tone/Format/Language.
 
 FORMAT YOUR RESPONSE AS:
 📷 **Image Analysis Notes**
@@ -417,21 +431,29 @@ Generate the notes now following all requirements:`;
                 break;
 
             case 'voice':
-                prompt = `You are an expert transcriber and note-taker. Transcribe this audio and convert it into organized, professional notes.
+                prompt = `You are an expert AI assistant. Your task depends on the audio content:
 
-LENGTH REQUIREMENT: ${lengthInstruction}
-FORMAT REQUIREMENT: ${formatInstruction}
-TONE REQUIREMENT: ${toneInstruction}
-LANGUAGE REQUIREMENT: ${languageInstruction}
-USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
+    1. **IF AUDIO IS A QUESTION/INSTRUCTION** (e.g., "Tell me about the Event Loop", "How do I make pasta?"):
+       - **ANSWER** the question or **FULFILL** the request directly.
+       - The "Summary" should state the topic (e.g., "Explanation of Event Loop").
+       - The "Detailed Notes" MUST contain the **ACTUAL ANSWER/EXPLANATION**, NOT a description of the request (e.g., do NOT say "The speaker asked about...").
+       - Treat the audio as a prompt for you to answer.
 
-INSTRUCTIONS:
-1. First, transcribe the spoken content accurately
-2. Clean up filler words (um, uh, like, you know)
-3. Organize by topics/themes mentioned
-4. Extract action items if any are mentioned
-5. Highlight important names, dates, numbers
-6. Apply the requested Tone, Format, and Language settings.
+    2. **IF AUDIO IS RECORDED CONTENT** (e.g., meeting, lecture, voice memo):
+       - **TRANSCRIBE** and **SUMMARIZE** the content into organized notes.
+
+    LENGTH REQUIREMENT: ${lengthInstruction}
+    FORMAT REQUIREMENT: ${formatInstruction}
+    TONE REQUIREMENT: ${toneInstruction}
+    LANGUAGE REQUIREMENT: ${languageInstruction}
+    USER INTENT/INSTRUCTION: ${instruction || 'None provided.'}
+
+    INSTRUCTIONS:
+    1. Detect if this is a User Question vs. Recorded Content.
+    2. If Question: Provide the answer.
+    3. If Content: Transcribe and summarize.
+    4. Clean up filler words.
+    5. Apply requested Tone/Format/Language.
 
 FORMAT YOUR RESPONSE AS:
 🎙️ **Audio Notes**
