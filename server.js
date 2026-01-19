@@ -1486,6 +1486,25 @@ app.post('/api/webhooks/revenuecat', async (req, res) => {
             });
             await user.save();
             console.log(`💰 Added ${credits} credits to user ${appUserId}. New Balance: ${user.credits}`);
+
+            // === SEND PUSH NOTIFICATION ===
+            try {
+                // Find device token linked to this recovery code
+                const notifToken = await NotificationToken.findOne({ recoveryCode: appUserId.toUpperCase() });
+
+                if (notifToken) {
+                    await sendPushNotifications([notifToken.token], {
+                        title: 'Purchase Successful! 🌟',
+                        body: `${credits} Credits have been added to your account.`,
+                        data: { type: 'CREDIT_UPDATE', newBalance: user.credits }
+                    });
+                    console.log(`🔔 Sent purchase notification to ${appUserId}`);
+                }
+            } catch (notifError) {
+                console.error('⚠️ Failed to send webhook notification:', notifError);
+                // Don't fail the request, just log it
+            }
+
         } else {
             // For subscriptions or unknown products, we might log it but no credit action needed yet
             console.log(`ℹ️ No credits linked to product ${productIdentifier}`);
