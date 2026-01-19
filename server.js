@@ -1199,10 +1199,10 @@ app.get('/api/credits/balance/:code', async (req, res) => {
         if (config.dailyFreeCreditsEnabled) {
             const wasReset = user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
 
-            // SPECIAL CASE: If we didn't reset because it's the same day, BUT we just 
-            // switched from Total Mode back to Daily Mode, we might have way more 
-            // than the daily limit. Force a reset to the limit in this case.
-            if (!wasReset && user.freeCreditsRemaining > config.freeDailyCredits) {
+            // AGGRESSIVE RESET: If daily mode is enabled, user must NOT have more or less than the daily limit 
+            // if we just switched mode today. Irrespective of when it was last reset, 
+            // the kill switch being ON means they get exactly the daily limit.
+            if (!wasReset && user.freeCreditsRemaining !== config.freeDailyCredits) {
                 user.freeCreditsRemaining = config.freeDailyCredits;
                 await user.save();
             } else if (wasReset) {
