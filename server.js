@@ -1418,6 +1418,10 @@ const CREDITS_PER_PRODUCT = {
     'ai_notes_pro_weekly_subscription': 0,
     'ai_notes_pro_monthly_subscription': 0,
 
+    // Android Subscription IDs (Subscription:BasePlan)
+    'ai_notes_pro_weekly_subscription:ai-notes-pro-weekly-subscription': 0,
+    'ai_notes_pro_monthly_subscription:ai-notes-pro-monthly-subscription': 0,
+
     // One-time packs
     'ai_notes_lite_pack_credits': 100,
     'ai_notes_power_pack_credits': 350,
