@@ -1198,7 +1198,14 @@ app.get('/api/credits/balance/:code', async (req, res) => {
         const config = await getAppConfig();
         if (config.dailyFreeCreditsEnabled) {
             const wasReset = user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
-            if (wasReset) {
+
+            // SPECIAL CASE: If we didn't reset because it's the same day, BUT we just 
+            // switched from Total Mode back to Daily Mode, we might have way more 
+            // than the daily limit. Force a reset to the limit in this case.
+            if (!wasReset && user.freeCreditsRemaining > config.freeDailyCredits) {
+                user.freeCreditsRemaining = config.freeDailyCredits;
+                await user.save();
+            } else if (wasReset) {
                 await user.save();
             }
         }
