@@ -1410,6 +1410,95 @@ app.post('/api/credits/use', async (req, res) => {
 
 // ==================== AD REWARD ENDPOINTS ====================
 
+// ==================== REVENUECAT WEBHOOK ====================
+
+// Copied from PurchaseService.js to ensure consistency
+const CREDITS_PER_PRODUCT = {
+    // Subscriptions (Grant entitlement, handled via Subscription Status, not here usually)
+    'ai_notes_pro_weekly_subscription': 0,
+    'ai_notes_pro_monthly_subscription': 0,
+
+    // One-time packs
+    'ai_notes_lite_pack_credits': 100,
+    'ai_notes_power_pack_credits': 350,
+    'ai_notes_pro_pack_credits': 550,
+    'ai_notes_elite_pack_credits': 900,
+    'ai_notes_ultimate_pack_credits': 1800,
+    'ai_notes_mega_pack_credits': 3500,
+    'ai_notes_supreme_pack_credits': 5000,
+};
+
+app.post('/api/webhooks/revenuecat', async (req, res) => {
+    try {
+        const { event, api_version } = req.body;
+        const authHeader = req.headers['authorization'];
+        const REVENUECAT_SECRET = process.env.REVENUECAT_WEBHOOK_SECRET || 'your_secret_here';
+
+        // 1. Security Check
+        if (authHeader !== REVENUECAT_SECRET && authHeader !== `Bearer ${REVENUECAT_SECRET}`) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+
+        if (!event) {
+            return res.status(400).json({ error: 'No event data' });
+        }
+
+        // 2. Identify Event Type
+        // We care about INITIAL_PURCHASE (Consumables/Cousumables) and NON_RENEWING_PURCHASE
+        // For Subscriptions, we might care about RENEWAL if we gave monthly credits (not currently the design)
+        const relevantEvents = ['INITIAL_PURCHASE', 'NON_RENEWING_PURCHASE', 'RENEWAL'];
+
+        if (!relevantEvents.includes(event.type) && !event.type.includes('TEST')) {
+            return res.status(200).json({ message: 'Event ignored', type: event.type });
+        }
+
+        const productIdentifier = event.product_id;
+        const appUserId = event.app_user_id; // This should be our Recovery Code
+        const transactionId = event.transaction_id || event.id;
+        const credits = CREDITS_PER_PRODUCT[productIdentifier] || 0;
+
+        console.log(`🔔 RevenueCat Webhook: ${event.type} for ${appUserId} (${productIdentifier})`);
+
+        // 3. User Lookup
+        const user = await User.findOne({ recoveryCode: appUserId.toUpperCase() });
+
+        if (!user) {
+            console.warn(`⚠️ User not found for webhook: ${appUserId}`);
+            // Return 200 so RevenueCat stops retrying. We can't fix a missing user here.
+            return res.status(200).json({ error: 'User not found' });
+        }
+
+        // 4. Idempotency Check
+        if (user.hasProcessedTransaction(transactionId)) {
+            console.log(`✅ Transaction ${transactionId} already processed. Skipping.`);
+            return res.status(200).json({ message: 'Already processed' });
+        }
+
+        // 5. Grant Credits
+        if (credits > 0) {
+            user.credits += credits;
+            user.processedTransactions.push({
+                transactionId,
+                credits,
+                source: 'revenuecat_webhook',
+                processedAt: new Date(),
+                rawEvent: event
+            });
+            await user.save();
+            console.log(`💰 Added ${credits} credits to user ${appUserId}. New Balance: ${user.credits}`);
+        } else {
+            // For subscriptions or unknown products, we might log it but no credit action needed yet
+            console.log(`ℹ️ No credits linked to product ${productIdentifier}`);
+        }
+
+        res.status(200).json({ success: true });
+
+    } catch (error) {
+        console.error('Webhook error:', error);
+        res.status(500).json({ error: 'Failed to process webhook' });
+    }
+});
+
 // ==================== APP CONFIG & ADS ====================
 
 // Get Master App Config (Banners, Ads, Alerts)
