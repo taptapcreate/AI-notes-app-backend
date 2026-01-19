@@ -1158,10 +1158,12 @@ app.post('/api/credits/register', async (req, res) => {
         }
 
         // Create new user
+        const { platform } = req.body;
         const user = new User({
             recoveryCode,
             credits: 0,
             freeCreditsRemaining: 3, // Match daily limit
+            platform: platform ? platform.toLowerCase() : 'other',
         });
 
         await user.save();

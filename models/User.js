@@ -56,6 +56,11 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null,
     },
+    platform: {
+        type: String,
+        enum: ['ios', 'android', 'web', 'other'],
+        default: 'other',
+    },
 });
 
 // Generate random recovery code
