@@ -1157,12 +1157,15 @@ app.post('/api/credits/register', async (req, res) => {
             if (!existing) isUnique = true;
         }
 
-        // Create new user
+        // Create new user with dynamic config values
+        const config = await getAppConfig();
         const { platform } = req.body;
+        const isDaily = config.dailyFreeCreditsEnabled ?? true;
         const user = new User({
             recoveryCode,
             credits: 0,
-            freeCreditsRemaining: 3, // Match daily limit
+            freeCreditsRemaining: 3, // Fallback, will be updated by sync logic
+            welcomePackVersion: 0, // Force first login to sync
             platform: platform ? platform.toLowerCase() : 'other',
         });
 
@@ -1173,6 +1176,7 @@ app.post('/api/credits/register', async (req, res) => {
             recoveryCode,
             credits: user.credits,
             freeCreditsRemaining: user.freeCreditsRemaining,
+            userServerVersion: user.welcomePackVersion || 0,
         });
     } catch (error) {
         console.error('Register error:', error);
@@ -1208,6 +1212,7 @@ app.get('/api/credits/balance/:code', async (req, res) => {
             credits: user.credits,
             adCredits: user.adCredits || 0,
             freeCreditsRemaining: user.freeCreditsRemaining,
+            userServerVersion: user.welcomePackVersion || 0,
             totalAvailable: user.credits + (user.adCredits || 0) + user.freeCreditsRemaining,
         });
     } catch (error) {
@@ -1240,11 +1245,12 @@ app.post('/api/credits/sync-welcome-pack', async (req, res) => {
             });
         }
 
+        // If version is matched or higher, still return success so the client can update its local marker
         res.json({
-            success: false,
-            message: 'User already at this or higher version',
-            currentBalance: user.freeCreditsRemaining,
-            currentVersion: user.welcomePackVersion
+            success: true,
+            version: user.welcomePackVersion,
+            newBalance: user.freeCreditsRemaining,
+            message: 'User already at this or higher version'
         });
     } catch (error) {
         console.error('Welcome pack sync error:', error);
