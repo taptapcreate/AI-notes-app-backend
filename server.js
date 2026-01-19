@@ -1164,18 +1164,21 @@ app.post('/api/credits/register', async (req, res) => {
         const user = new User({
             recoveryCode,
             credits: 0,
-            freeCreditsRemaining: isDaily ? config.freeDailyCredits : config.welcomePackCredits,
+            freeCreditsRemaining: isDaily ? config.freeDailyCredits : 0,
+            welcomePackBalance: isDaily ? 0 : config.welcomePackCredits,
             welcomePackVersion: isDaily ? 0 : config.welcomePackVersion,
             platform: platform ? platform.toLowerCase() : 'other',
         });
 
         await user.save();
 
+        const currentFree = isDaily ? user.freeCreditsRemaining : user.welcomePackBalance;
+
         res.json({
             success: true,
             recoveryCode,
             credits: user.credits,
-            freeCreditsRemaining: user.freeCreditsRemaining,
+            freeCreditsRemaining: currentFree,
             userServerVersion: user.welcomePackVersion || 0,
         });
     } catch (error) {
@@ -1208,19 +1211,34 @@ app.get('/api/credits/balance/:code', async (req, res) => {
             } else if (wasReset) {
                 await user.save();
             }
+        } else {
+            // WELCOME PACK AUTO-SYNC: If daily mode is DISABLED, check if version has changed
+            const remoteVersion = config.welcomePackVersion || 1;
+            const currentVersion = user.welcomePackVersion || 0;
+
+            if (remoteVersion > currentVersion) {
+                console.log(`🎁 Auto-updating Welcome Pack for user ${user.recoveryCode}: V${currentVersion} -> V${remoteVersion}`);
+                user.welcomePackBalance = config.welcomePackCredits || 12;
+                user.welcomePackVersion = remoteVersion;
+                await user.save();
+            }
         }
 
         // Update last active
         user.lastActive = new Date();
         await user.save();
 
+        // Return balance based on which mode is active
+        const isDaily = config.dailyFreeCreditsEnabled ?? true;
+        const currentFree = isDaily ? user.freeCreditsRemaining : user.welcomePackBalance;
+
         res.json({
             success: true,
             credits: user.credits,
             adCredits: user.adCredits || 0,
-            freeCreditsRemaining: user.freeCreditsRemaining,
+            freeCreditsRemaining: currentFree,
             userServerVersion: user.welcomePackVersion || 0,
-            totalAvailable: user.credits + (user.adCredits || 0) + user.freeCreditsRemaining,
+            totalAvailable: user.credits + (user.adCredits || 0) + currentFree,
         });
     } catch (error) {
         console.error('Balance error:', error);
@@ -1241,13 +1259,13 @@ app.post('/api/credits/sync-welcome-pack', async (req, res) => {
         // Only update if the provided version is newer than what we have
         const currentVersion = user.welcomePackVersion || 0;
         if (version > currentVersion) {
-            user.freeCreditsRemaining = credits;
+            user.welcomePackBalance = credits;
             user.welcomePackVersion = version;
             await user.save();
 
             return res.json({
                 success: true,
-                newBalance: user.freeCreditsRemaining,
+                newBalance: user.welcomePackBalance,
                 version: user.welcomePackVersion
             });
         }
@@ -1256,7 +1274,7 @@ app.post('/api/credits/sync-welcome-pack', async (req, res) => {
         res.json({
             success: true,
             version: user.welcomePackVersion,
-            newBalance: user.freeCreditsRemaining,
+            newBalance: user.welcomePackBalance,
             message: 'User already at this or higher version'
         });
     } catch (error) {
@@ -1331,7 +1349,10 @@ app.post('/api/credits/use', async (req, res) => {
         const config = await getAppConfig();
         user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
 
-        const totalAvailable = user.credits + (user.adCredits || 0) + user.freeCreditsRemaining;
+        const isDaily = config.dailyFreeCreditsEnabled ?? true;
+        const currentFreeFieldName = isDaily ? 'freeCreditsRemaining' : 'welcomePackBalance';
+
+        const totalAvailable = user.credits + (user.adCredits || 0) + user[currentFreeFieldName];
 
         if (totalAvailable < amount) {
             return res.status(400).json({
@@ -1341,16 +1362,16 @@ app.post('/api/credits/use', async (req, res) => {
             });
         }
 
-        // Use free credits first, then ad credits, then purchased credits
+        // Use free credits (from the correct pool) first, then ad credits, then purchased credits
         let remaining = amount;
 
-        // 1. Free Credits
-        if (user.freeCreditsRemaining >= remaining) {
-            user.freeCreditsRemaining -= remaining;
+        // 1. Free Credits (Current Active Pool)
+        if (user[currentFreeFieldName] >= remaining) {
+            user[currentFreeFieldName] -= remaining;
             remaining = 0;
         } else {
-            remaining -= user.freeCreditsRemaining;
-            user.freeCreditsRemaining = 0;
+            remaining -= user[currentFreeFieldName];
+            user[currentFreeFieldName] = 0;
         }
 
         // 2. Ad Credits
@@ -1378,8 +1399,8 @@ app.post('/api/credits/use', async (req, res) => {
             creditsUsed: amount,
             remainingCredits: user.credits,
             remainingAdCredits: user.adCredits || 0,
-            remainingFreeCredits: user.freeCreditsRemaining,
-            totalAvailable: user.credits + (user.adCredits || 0) + user.freeCreditsRemaining,
+            remainingFreeCredits: user[currentFreeFieldName],
+            totalAvailable: user.credits + (user.adCredits || 0) + user[currentFreeFieldName],
         });
     } catch (error) {
         console.error('Use credits error:', error);
