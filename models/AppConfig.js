@@ -19,6 +19,8 @@ const AppConfigSchema = new mongoose.Schema({
 
     // 1.5 Free Limits
     freeDailyCredits: { type: Number, default: 3 },
+    welcomePackCredits: { type: Number, default: 5 },
+    welcomePackVersion: { type: Number, default: 1 },
     // 2. Subscription Promo (Home Screen)
     subscriptionOffer: {
         active: { type: Boolean, default: false },
