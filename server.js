@@ -1164,8 +1164,8 @@ app.post('/api/credits/register', async (req, res) => {
         const user = new User({
             recoveryCode,
             credits: 0,
-            freeCreditsRemaining: 3, // Fallback, will be updated by sync logic
-            welcomePackVersion: 0, // Force first login to sync
+            freeCreditsRemaining: isDaily ? config.freeDailyCredits : config.welcomePackCredits,
+            welcomePackVersion: isDaily ? 0 : config.welcomePackVersion,
             platform: platform ? platform.toLowerCase() : 'other',
         });
 
