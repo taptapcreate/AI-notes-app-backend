@@ -14,6 +14,9 @@ const AppConfigSchema = new mongoose.Schema({
         message: { type: String, default: '' },
         isBlocking: { type: Boolean, default: false }, // Force update or maintenance
     },
+    // 1.2 "Kill Switch" for Daily Credits
+    dailyFreeCreditsEnabled: { type: Boolean, default: true },
+
     // 1.5 Free Limits
     freeDailyCredits: { type: Number, default: 3 },
     // 2. Subscription Promo (Home Screen)
