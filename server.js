@@ -1190,11 +1190,13 @@ app.get('/api/credits/balance/:code', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // Reset daily free credits if needed
+        // Reset daily free credits if mode is enabled
         const config = await getAppConfig();
-        const wasReset = user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
-        if (wasReset) {
-            await user.save();
+        if (config.dailyFreeCreditsEnabled) {
+            const wasReset = user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
+            if (wasReset) {
+                await user.save();
+            }
         }
 
         // Update last active
