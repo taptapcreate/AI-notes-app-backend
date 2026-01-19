@@ -1214,6 +1214,42 @@ app.get('/api/credits/balance/:code', async (req, res) => {
     }
 });
 
+// Sync Welcome Pack Version & Credits (For Lifetime/Total Credit mode)
+app.post('/api/credits/sync-welcome-pack', async (req, res) => {
+    try {
+        const { code, version, credits } = req.body;
+
+        if (!code) return res.status(400).json({ error: 'Recovery code is required' });
+
+        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // Only update if the provided version is newer than what we have
+        const currentVersion = user.welcomePackVersion || 0;
+        if (version > currentVersion) {
+            user.freeCreditsRemaining = credits;
+            user.welcomePackVersion = version;
+            await user.save();
+
+            return res.json({
+                success: true,
+                newBalance: user.freeCreditsRemaining,
+                version: user.welcomePackVersion
+            });
+        }
+
+        res.json({
+            success: false,
+            message: 'User already at this or higher version',
+            currentBalance: user.freeCreditsRemaining,
+            currentVersion: user.welcomePackVersion
+        });
+    } catch (error) {
+        console.error('Welcome pack sync error:', error);
+        res.status(500).json({ error: 'Failed to sync welcome pack' });
+    }
+});
+
 // Add credits (after purchase) - with transaction tracking to prevent abuse
 app.post('/api/credits/add', async (req, res) => {
     try {
