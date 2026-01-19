@@ -20,9 +20,9 @@ const UserSchema = new mongoose.Schema({
         type: Number,
         default: 3, // Daily free credits
     },
-    welcomePackBalance: {
+    totalFreeCredits: {
         type: Number,
-        default: 0, // One-time welcome pack credits (separated to avoid interference)
+        default: 0, // Separated to avoid daily reset interference
     },
     lastFreeCreditsReset: {
         type: Date,
