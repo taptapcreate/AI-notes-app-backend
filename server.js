@@ -230,16 +230,16 @@ const generateWithRetry = async (model, content, retries = 3, delay = 2000) => {
 // Note length instructions with token limits
 const lengthGuides = {
     brief: {
-        instruction: 'Be VERY concise. Maximum 5-6 bullet points total. Focus ONLY on the most critical information. Skip minor details. Keep it SHORT.',
-        maxTokens: 1000
+        instruction: 'Be VERY concise. Maximum 3-5 critical bullet points total. Focus ONLY on the single most important message. Skip all details. Keep it extremely short.',
+        maxTokens: 800
     },
     standard: {
-        instruction: 'Be comprehensive but clear. Include all key points with moderate detail. Aim for 10-15 bullet points with explanations.',
-        maxTokens: 2500
+        instruction: 'Provide a clear, balanced summary. Include 7-10 bullet points covering the main themes with brief explanations. Avoid deep dives.',
+        maxTokens: 1500
     },
     detailed: {
-        instruction: 'Provide a thorough high-level analysis. Include all major insights, strategic takeaways, and core concepts with clear explanations. Aim for 10-15 comprehensive bullet points that capture the essence without page-by-page recitation.',
-        maxTokens: 3000 // Optimized from 5000
+        instruction: 'Provide a thorough high-level analysis. Include 12-15 comprehensive bullet points that capture all core insights and strategic takeaways without page-by-page recitation.',
+        maxTokens: 2500
     },
 };
 
