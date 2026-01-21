@@ -61,7 +61,7 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Get the model with configuration
-const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash-latest') => {
+const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -73,7 +73,7 @@ const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash-latest') => {
 };
 
 // Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-1.5-flash-latest') => {
+const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-2.0-flash') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
