@@ -238,8 +238,8 @@ const lengthGuides = {
         maxTokens: 1500
     },
     detailed: {
-        instruction: 'Provide a thorough high-level analysis. Include 12-15 comprehensive bullet points that capture all core insights and strategic takeaways without page-by-page recitation.',
-        maxTokens: 2500
+        instruction: 'Provide a very thorough and comprehensive analysis. Include 15-20 detailed bullet points that capture all core insights, strategic takeaways, and supporting nuances without page-by-page recitation.',
+        maxTokens: 4000 // Increased for better depth per user request
     },
 };
 
