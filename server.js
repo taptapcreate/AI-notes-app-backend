@@ -1016,7 +1016,7 @@ FORMAT YOUR RESPONSE AS:
 Generate the follow-up response now:`;
         }
 
-        const model = getModel(2048, 'gemini-1.5-flash-8b-latest');
+        const model = getModel(2048, 'gemini-2.0-flash');
         const result = await generateWithRetry(model, prompt);
         const response = result.response.text();
 
@@ -1052,7 +1052,7 @@ FORMAT AS JSON:
 }
 `;
 
-        const model = getModel(512, 'gemini-1.5-flash-8b-latest');
+        const model = getModel(512, 'gemini-2.0-flash');
         const result = await generateWithRetry(model, prompt);
         const textResponse = result.response.text();
 
@@ -1089,7 +1089,7 @@ RULES:
 - Do not add explanations or notes
 `;
 
-        const model = getModel(2048, 'gemini-1.5-flash-8b-latest');
+        const model = getModel(2048, 'gemini-2.0-flash');
         const result = await generateWithRetry(model, prompt);
         res.json({ translatedText: result.response.text() });
 
@@ -1116,7 +1116,7 @@ RULES:
 - Return ONLY the rewritten text, no explanations.
 `;
 
-        const model = getModel(2048, 'gemini-1.5-flash-8b-latest');
+        const model = getModel(2048, 'gemini-2.0-flash');
         const result = await generateWithRetry(model, prompt);
         res.json({ polishedText: result.response.text() });
 
