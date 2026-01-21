@@ -61,7 +61,7 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Get the model with configuration
-const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
+const getModel = (maxTokens = 2048, modelName = 'gemini-1.5-flash') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -73,7 +73,7 @@ const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
 };
 
 // Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-2.0-flash') => {
+const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-1.5-flash') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -113,7 +113,7 @@ const fetchWebsiteContent = async (url) => {
             }
         });
 
-        return content.substring(0, 20000); // Limit context window
+        return content.substring(0, 10000); // Limit context window (Optimized from 20k)
     } catch (error) {
         if (error.response && error.response.status === 403) {
             throw new Error('WEB_ACCESS_BLOCKED: This website blocks automated access. Please copy/paste content manually.');
@@ -201,7 +201,7 @@ const fetchYouTubeTranscript = async (url) => {
             throw new Error('YOUTUBE_BLOCK: Automated access blocked by YouTube. Please copy/paste transcript manually.');
         }
 
-        return transcript.substring(0, 25000); // Limit context window
+        return transcript.substring(0, 15000); // Limit context window (Optimized from 25k)
     } catch (error) {
         if (error.message.includes('YOUTUBE_BLOCK')) throw error;
         throw new Error(`Failed to fetch YouTube transcript: ${error.message}`);
@@ -238,8 +238,8 @@ const lengthGuides = {
         maxTokens: 2500
     },
     detailed: {
-        instruction: 'Be extremely thorough and in-depth. Include ALL information with comprehensive explanations, context, examples, and supporting details. Aim for 20-30 detailed bullet points. Expand on every concept.',
-        maxTokens: 5000
+        instruction: 'Provide a thorough high-level analysis. Include all major insights, strategic takeaways, and core concepts with clear explanations. Aim for 10-15 comprehensive bullet points that capture the essence without page-by-page recitation.',
+        maxTokens: 3000 // Optimized from 5000
     },
 };
 
@@ -411,10 +411,11 @@ USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard prof
 
 INSTRUCTIONS:
 1. Create a clear, hierarchical structure with sections
-2. Extract key information according to the length requirement
+2. Extract major insights and high-level information
 3. Use bullet points (•) for lists, not dashes
 4. Bold important terms by surrounding them with **asterisks**
-5. Add a "📌 Key Takeaways" section at the end
+5. Focus on a high-level synthesis and avoid unnecessary granular detail
+6. Add a "📌 Key Takeaways" section at the end
 
 ${proFormatting}
 
@@ -446,6 +447,7 @@ Generate the notes now:`;
     2. If diagram/chart: Explain insights and data.
     3. If question: Provide the solution.
     4. Apply requested Tone/Format/Language.
+    5. Prioritize high-level insights and strategic takeaways over minor details.
 
 FORMAT YOUR RESPONSE AS:
 📷 **Image Analysis Notes**
@@ -498,6 +500,7 @@ Generate the notes now following all requirements:`;
     3. If Content: Transcribe and summarize.
     4. Clean up filler words.
     5. Apply requested Tone/Format/Language.
+    6. Keep summaries high-level and focus on the most impactful takeaways.
 
 FORMAT YOUR RESPONSE AS:
 🎙️ **Audio Notes**
@@ -578,11 +581,11 @@ LANGUAGE REQUIREMENT: ${languageInstruction}
 USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
-1. Provide a clear summary of the document's purpose
-2. Extract all key findings, data, and arguments
+1. Provide a clear high-level summary of the document's core message
+2. Extract major findings, strategic data, and key arguments
 3. Organize the content logically (headers, bullet points)
-4. Highlight any important dates, names, or requirements
-5. If it's a form or template, describe its structure and required fields
+4. Highlight critical requirements or milestones
+5. Avoid granular or page-by-page recitation; focus on the "Bottom Line"
 
 FORMAT YOUR RESPONSE AS:
 📄 **Document Analysis**
@@ -629,10 +632,10 @@ LANGUAGE REQUIREMENT: ${languageInstruction}
 USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
-1. Identify the main topic and key arguments/points
-2. Extract important data, dates, or quotes
-3. Ignore navigation elements or footer text if any slipped through
-4. Organize logical sections with headers
+1. Provide a high-level summary of the website's core arguments
+2. Extract only the most important data, dates, or quotes
+3. Ignore navigation elements, ads, or footer text
+4. Organize into 3-4 logical sections with clear headers
 
 FORMAT YOUR RESPONSE AS:
 🌐 **Website Summary**
@@ -678,10 +681,10 @@ LANGUAGE REQUIREMENT: ${languageInstruction}
 USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
 
 INSTRUCTIONS:
-1. Reconstruct the logical flow of the video
-2. Group related points into sections with timestamps if possible (guess based on flow, or just use logical sections)
-3. Capture the core message and all supporting details
-4. Ignore filler speech ("um", "guys", "welcome back")
+1. Provide a clear high-level summary of the video's core message
+2. Group major themes and strategic insights into sections
+3. Identify the "Bottom Line" takeaways
+4. Ignore filler speech and avoid granular page-by-page or timestamp-by-timestamp recitation
 
 FORMAT YOUR RESPONSE AS:
 📺 **Video Notes**
@@ -721,36 +724,17 @@ Generate the notes now:`;
         // Check if response was truncated (cut off mid-sentence)
         const finishReason = result.response.candidates?.[0]?.finishReason;
 
-        // Smart continuation: If truncated, ask AI to complete
+        // Truncation cleanup instead of continuation (Saves tokens/cost)
         if (finishReason === 'MAX_TOKENS') {
-            try {
-                const continuationPrompt = `The following notes were cut off mid-way. Complete them naturally from where they stopped. Do NOT repeat any content, just continue seamlessly.
-
-INCOMPLETE NOTES (continue from here):
-"""
-${notes.slice(-500)}
-"""
-
-Continue the notes now, picking up exactly where it stopped:`;
-
-                const continuationModel = getModel(1500); // Extra tokens for completion
-                const continuationResult = await generateWithRetry(continuationModel, continuationPrompt);
-                const continuation = continuationResult.response.text();
-
-                // Combine: Remove potential overlap and merge
-                notes = notes.trim() + '\n' + continuation.trim();
-            } catch (contError) {
-                console.log('Continuation failed, using original:', contError.message);
-                // If continuation fails, just clean up the truncation
-                const lastCompleteEnd = Math.max(
-                    notes.lastIndexOf('. '),
-                    notes.lastIndexOf('.\n'),
-                    notes.lastIndexOf('!\n'),
-                    notes.lastIndexOf('?\n')
-                );
-                if (lastCompleteEnd > notes.length * 0.5) {
-                    notes = notes.substring(0, lastCompleteEnd + 1).trim();
-                }
+            console.log('Notes truncated. Trimming last incomplete sentence to save cost.');
+            const lastCompleteEnd = Math.max(
+                notes.lastIndexOf('. '),
+                notes.lastIndexOf('.\n'),
+                notes.lastIndexOf('!\n'),
+                notes.lastIndexOf('?\n')
+            );
+            if (lastCompleteEnd > notes.length * 0.5) {
+                notes = notes.substring(0, lastCompleteEnd + 1).trim();
             }
         }
 
@@ -1032,7 +1016,7 @@ FORMAT YOUR RESPONSE AS:
 Generate the follow-up response now:`;
         }
 
-        const model = getModel();
+        const model = getModel(2048, 'gemini-1.5-flash-8b');
         const result = await generateWithRetry(model, prompt);
         const response = result.response.text();
 
@@ -1105,7 +1089,7 @@ RULES:
 - Do not add explanations or notes
 `;
 
-        const model = getModel();
+        const model = getModel(2048, 'gemini-1.5-flash-8b');
         const result = await generateWithRetry(model, prompt);
         res.json({ translatedText: result.response.text() });
 
@@ -1132,7 +1116,7 @@ RULES:
 - Return ONLY the rewritten text, no explanations.
 `;
 
-        const model = getModel();
+        const model = getModel(2048, 'gemini-1.5-flash-8b');
         const result = await generateWithRetry(model, prompt);
         res.json({ polishedText: result.response.text() });
 
