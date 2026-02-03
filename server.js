@@ -23,6 +23,97 @@ const DB_NAME = 'ai_notes_app';
 
 const AppConfig = require('./models/AppConfig');
 
+// RevenueCat API Configuration
+const REVENUECAT_API_KEY = process.env.REVENUECAT_API_SECRET_KEY; // Secret API key from RevenueCat dashboard
+const REVENUECAT_API_URL = 'https://api.revenuecat.com/v1';
+
+// Product ID to credits mapping (must match app's PurchaseService.js)
+const CREDIT_PACK_PRODUCTS = {
+    'ai_notes_lite_pack_credits': 100,
+    'ai_notes_power_pack_credits': 350,
+    'ai_notes_pro_pack_credits': 550,
+    'ai_notes_elite_pack_credits': 900,
+    'ai_notes_ultimate_pack_credits': 1800,
+    'ai_notes_mega_pack_credits': 3500,
+    'ai_notes_supreme_pack_credits': 5000,
+};
+
+/**
+ * Fetch and sync missing RevenueCat purchases for a user
+ * This is called during balance fetch to ensure credits are properly synced
+ */
+const syncRevenueCatPurchases = async (user) => {
+    if (!REVENUECAT_API_KEY) {
+        console.log('⚠️ REVENUECAT_API_SECRET_KEY not configured, skipping purchase sync');
+        return { synced: 0, credits: 0 };
+    }
+
+    try {
+        // Fetch customer info from RevenueCat using the recovery code as app_user_id
+        const response = await axios.get(
+            `${REVENUECAT_API_URL}/subscribers/${user.recoveryCode}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${REVENUECAT_API_KEY}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+
+        const subscriber = response.data.subscriber;
+        if (!subscriber || !subscriber.non_subscriptions) {
+            return { synced: 0, credits: 0 };
+        }
+
+        let totalCreditsAdded = 0;
+        let purchasesSynced = 0;
+
+        // Process non-subscription purchases (one-time credit packs)
+        for (const [productId, purchases] of Object.entries(subscriber.non_subscriptions)) {
+            const creditsPerPurchase = CREDIT_PACK_PRODUCTS[productId];
+            if (!creditsPerPurchase) continue; // Not a credit pack
+
+            for (const purchase of purchases) {
+                const transactionId = purchase.id || purchase.store_transaction_id;
+
+                // Skip if already processed
+                if (user.hasProcessedTransaction(transactionId)) {
+                    continue;
+                }
+
+                // Add credits for this purchase
+                user.credits += creditsPerPurchase;
+                user.processedTransactions.push({
+                    transactionId,
+                    credits: creditsPerPurchase,
+                    source: 'revenuecat_sync',
+                    processedAt: new Date(),
+                });
+
+                totalCreditsAdded += creditsPerPurchase;
+                purchasesSynced++;
+
+                console.log(`💰 [Sync] Added ${creditsPerPurchase} credits for ${productId} (tx: ${transactionId})`);
+            }
+        }
+
+        if (purchasesSynced > 0) {
+            await user.save();
+            console.log(`✅ [Sync] Synced ${purchasesSynced} purchases, added ${totalCreditsAdded} credits for user ${user.recoveryCode}`);
+        }
+
+        return { synced: purchasesSynced, credits: totalCreditsAdded };
+
+    } catch (error) {
+        // 404 means user doesn't exist in RevenueCat yet (no purchases) - this is OK
+        if (error.response?.status === 404) {
+            return { synced: 0, credits: 0 };
+        }
+        console.error('⚠️ RevenueCat sync error:', error.message);
+        return { synced: 0, credits: 0, error: error.message };
+    }
+};
+
 // Helper: Get App Config (Singleton)
 const getAppConfig = async () => {
     try {
@@ -1181,6 +1272,14 @@ app.get('/api/credits/balance/:code', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
+        // Sync any missing RevenueCat purchases (backend-only credit recovery)
+        try {
+            await syncRevenueCatPurchases(user);
+        } catch (syncError) {
+            console.error('⚠️ Purchase sync failed (non-blocking):', syncError.message);
+            // Don't fail the balance request if sync fails
+        }
+
         // Reset daily free credits if mode is enabled
         const config = await getAppConfig();
         if (config.dailyFreeCreditsEnabled) {
@@ -1883,6 +1982,7 @@ app.get('/api/notifications/stats', async (req, res) => {
         res.status(500).json({ error: 'Failed to get stats', details: error.message });
     }
 });
+
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
