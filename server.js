@@ -14,6 +14,7 @@ const expo = new Expo();
 
 // Import User model
 const User = require('./models/User');
+const PendingPurchase = require('./models/PendingPurchase');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1545,8 +1546,33 @@ app.post('/api/webhooks/revenuecat', async (req, res) => {
 
         if (!user) {
             console.warn(`⚠️ User not found for webhook: ${appUserId}`);
-            // Return 200 so RevenueCat stops retrying. We can't fix a missing user here.
-            return res.status(200).json({ error: 'User not found' });
+
+            // Store as pending purchase for later manual linking
+            if (credits > 0) {
+                try {
+                    // Check if this transaction is already pending
+                    const existingPending = await PendingPurchase.findOne({ transactionId });
+                    if (!existingPending) {
+                        await PendingPurchase.create({
+                            rcAppUserId: appUserId,
+                            productId: productIdentifier,
+                            transactionId,
+                            credits,
+                            rawEvent: event,
+                        });
+                        console.log(`📦 Stored as pending purchase: ${transactionId} (${credits} credits)`);
+                    }
+                } catch (pendingError) {
+                    console.error('Failed to store pending purchase:', pendingError.message);
+                }
+            }
+
+            // Return 200 so RevenueCat stops retrying
+            return res.status(200).json({
+                success: true,
+                message: 'Stored as pending purchase',
+                pendingCredits: credits
+            });
         }
 
         // 4. Idempotency Check
@@ -1983,6 +2009,117 @@ app.get('/api/notifications/stats', async (req, res) => {
     }
 });
 
+
+// ==================== PENDING PURCHASES ADMIN ====================
+
+/**
+ * Get all pending purchases (for admin debugging)
+ * GET /api/admin/pending-purchases
+ */
+app.get('/api/admin/pending-purchases', async (req, res) => {
+    try {
+        const pending = await PendingPurchase.find({ status: 'pending' })
+            .sort({ createdAt: -1 })
+            .limit(100);
+
+        res.json({
+            success: true,
+            count: pending.length,
+            purchases: pending.map(p => ({
+                id: p._id,
+                rcAppUserId: p.rcAppUserId,
+                productId: p.productId,
+                credits: p.credits,
+                transactionId: p.transactionId,
+                createdAt: p.createdAt,
+            })),
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to get pending purchases', details: error.message });
+    }
+});
+
+/**
+ * Link a pending purchase to a user's recovery code
+ * POST /api/admin/link-purchase
+ * Body: { rcAppUserId: "anonymous_id", recoveryCode: "ABC123XY" }
+ * 
+ * This will find ALL pending purchases for that rcAppUserId and add credits to the user
+ */
+app.post('/api/admin/link-purchase', async (req, res) => {
+    try {
+        const { rcAppUserId, recoveryCode } = req.body;
+
+        if (!rcAppUserId || !recoveryCode) {
+            return res.status(400).json({ error: 'rcAppUserId and recoveryCode are required' });
+        }
+
+        // Find user
+        const user = await User.findOne({ recoveryCode: recoveryCode.toUpperCase() });
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Find all pending purchases for this RC app user ID
+        const pendingPurchases = await PendingPurchase.find({
+            rcAppUserId: rcAppUserId,
+            status: 'pending'
+        });
+
+        if (pendingPurchases.length === 0) {
+            return res.json({ success: true, message: 'No pending purchases found', creditsAdded: 0 });
+        }
+
+        let totalCredits = 0;
+        let processedCount = 0;
+
+        for (const pending of pendingPurchases) {
+            // Check if already processed by user
+            if (user.hasProcessedTransaction(pending.transactionId)) {
+                pending.status = 'processed';
+                pending.linkedRecoveryCode = recoveryCode.toUpperCase();
+                pending.processedAt = new Date();
+                await pending.save();
+                continue; // Already credited
+            }
+
+            // Add credits
+            user.credits += pending.credits;
+            user.processedTransactions.push({
+                transactionId: pending.transactionId,
+                credits: pending.credits,
+                source: 'admin_link',
+                processedAt: new Date(),
+            });
+
+            // Mark pending as processed
+            pending.status = 'processed';
+            pending.linkedRecoveryCode = recoveryCode.toUpperCase();
+            pending.processedAt = new Date();
+            await pending.save();
+
+            totalCredits += pending.credits;
+            processedCount++;
+        }
+
+        if (processedCount > 0) {
+            await user.save();
+        }
+
+        console.log(`✅ Admin linked ${processedCount} purchases: ${rcAppUserId} → ${recoveryCode} (+${totalCredits} credits)`);
+
+        res.json({
+            success: true,
+            purchasesLinked: processedCount,
+            creditsAdded: totalCredits,
+            newBalance: user.credits,
+        });
+
+    } catch (error) {
+        console.error('Link purchase error:', error);
+        res.status(500).json({ error: 'Failed to link purchase', details: error.message });
+    }
+});
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
