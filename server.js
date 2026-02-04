@@ -1221,9 +1221,44 @@ RULES:
 // ==================== CREDITS SYSTEM ENDPOINTS ====================
 
 // Register new user - Generate recovery code
+// UPDATED: Now checks deviceId to prevent reinstall abuse
 app.post('/api/credits/register', async (req, res) => {
     try {
-        // Generate unique recovery code
+        const { platform, deviceId } = req.body;
+
+        // ANTI-ABUSE: Check if this device already has an account
+        if (deviceId) {
+            const existingUser = await User.findOne({ deviceId });
+
+            if (existingUser) {
+                console.log(`📱 Device ${deviceId.substring(0, 8)}... already registered, returning existing account`);
+
+                // Get config for calculating free credits
+                const config = await getAppConfig();
+                const isDaily = config.dailyFreeCreditsEnabled ?? true;
+
+                // Reset daily credits if needed
+                if (isDaily) {
+                    existingUser.resetDailyCreditsIfNeeded(config.freeDailyCredits);
+                    await existingUser.save();
+                }
+
+                const currentFree = isDaily ? existingUser.freeCreditsRemaining : existingUser.totalFreeCredits;
+
+                // Return existing account
+                return res.json({
+                    success: true,
+                    recoveryCode: existingUser.recoveryCode,
+                    credits: existingUser.credits,
+                    adCredits: existingUser.adCredits || 0,
+                    freeCreditsRemaining: currentFree,
+                    userServerVersion: existingUser.welcomePackVersion || 0,
+                    isExistingDevice: true, // Flag to indicate this was a reinstall
+                });
+            }
+        }
+
+        // Generate unique recovery code for NEW user
         let recoveryCode;
         let isUnique = false;
 
@@ -1235,7 +1270,6 @@ app.post('/api/credits/register', async (req, res) => {
 
         // Create new user with dynamic config values
         const config = await getAppConfig();
-        const { platform } = req.body;
         const isDaily = config.dailyFreeCreditsEnabled ?? true;
         const user = new User({
             recoveryCode,
@@ -1244,9 +1278,12 @@ app.post('/api/credits/register', async (req, res) => {
             totalFreeCredits: isDaily ? 0 : config.welcomePackCredits,
             welcomePackVersion: isDaily ? 0 : config.welcomePackVersion,
             platform: platform ? platform.toLowerCase() : 'other',
+            deviceId: deviceId || null, // Store device ID for future reinstall detection
         });
 
         await user.save();
+
+        console.log(`✨ New user registered: ${recoveryCode} on ${platform || 'unknown'} device`);
 
         const currentFree = isDaily ? user.freeCreditsRemaining : user.totalFreeCredits;
 

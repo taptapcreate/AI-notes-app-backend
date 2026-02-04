@@ -69,6 +69,14 @@ const UserSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
+    // Device ID for reinstall abuse prevention
+    // Persists across reinstalls on Android (Android ID) and iOS (identifierForVendor)
+    deviceId: {
+        type: String,
+        default: null,
+        index: true,  // Index for fast lookup
+        sparse: true, // Allow null values without index conflicts
+    },
 });
 
 // Generate random recovery code
