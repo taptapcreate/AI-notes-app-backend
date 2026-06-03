@@ -10,12 +10,11 @@ async function listModels() {
         // Note: The SDK doesn't have a direct 'listModels' easily, but we can try a simple generation on 1.0 Pro as a test
 
         const models = [
-            'gemini-1.5-flash',
-            'gemini-1.5-flash-latest',
-            'gemini-1.5-flash-001',
-            'gemini-1.5-flash-002',
-            'gemini-2.0-flash',
-            'gemini-1.0-pro'
+            'gemini-2.5-flash',
+            'gemini-3.5-flash',
+            'gemini-3.1-flash-lite',
+            'gemini-3.1-pro-preview',
+            'gemini-2.0-flash'
         ];
 
         for (const modelName of models) {

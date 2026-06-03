@@ -4,7 +4,7 @@ require('dotenv').config();
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const testEmptyTranscript = async () => {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
 
     const content = "https://youtu.be/YoHD9XEInc0?si=Y3lShBCB80MK8h-v";
     const transcript = ""; // Empty transcript

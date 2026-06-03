@@ -153,7 +153,7 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Get the model with configuration
-const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
+const getModel = (maxTokens = 2048, modelName = 'gemini-3.5-flash') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -165,7 +165,7 @@ const getModel = (maxTokens = 2048, modelName = 'gemini-2.0-flash') => {
 };
 
 // Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-2.0-flash') => {
+const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-3.5-flash') => {
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -1108,7 +1108,7 @@ FORMAT YOUR RESPONSE AS:
 Generate the follow-up response now:`;
         }
 
-        const model = getModel(2048, 'gemini-2.0-flash');
+        const model = getModel(2048, 'gemini-3.5-flash');
         const result = await generateWithRetry(model, prompt);
         const response = result.response.text();
 
@@ -1144,7 +1144,7 @@ FORMAT AS JSON:
 }
 `;
 
-        const model = getModel(512, 'gemini-2.0-flash');
+        const model = getModel(512, 'gemini-3.5-flash');
         const result = await generateWithRetry(model, prompt);
         const textResponse = result.response.text();
 
@@ -1181,7 +1181,7 @@ RULES:
 - Do not add explanations or notes
 `;
 
-        const model = getModel(2048, 'gemini-2.0-flash');
+        const model = getModel(2048, 'gemini-3.5-flash');
         const result = await generateWithRetry(model, prompt);
         res.json({ translatedText: result.response.text() });
 
@@ -1208,7 +1208,7 @@ RULES:
 - Return ONLY the rewritten text, no explanations.
 `;
 
-        const model = getModel(2048, 'gemini-2.0-flash');
+        const model = getModel(2048, 'gemini-3.5-flash');
         const result = await generateWithRetry(model, prompt);
         res.json({ polishedText: result.response.text() });
 
