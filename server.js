@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const OpenAI = require('openai');
 const mongoose = require('mongoose');
-
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { YoutubeTranscript } = require('youtube-transcript');
@@ -149,11 +149,84 @@ mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Initialize Gemini AI
+// Initialize Gemini AI (for Audio/PDF fallback)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// Initialize OpenAI client for OpenRouter
+const openai = new OpenAI({
+    baseURL: "https://openrouter.ai/api/v1",
+    apiKey: process.env.OPEN_ROUTER_API_KEY,
+});
+
 // Get the model with configuration
-const getModel = (maxTokens = 2048, modelName = 'gemini-3.5-flash') => {
+const getModel = (maxTokens = 2048, modelName = 'openai/gpt-4o-mini') => {
+    // If the model is an OpenRouter/OpenAI model
+    if (modelName.startsWith('openai/') || modelName === 'gpt-4o-mini') {
+        const actualModelName = modelName.startsWith('openai/') ? modelName : `openai/${modelName}`;
+        return {
+            isOpenRouter: true,
+            modelName: actualModelName,
+            maxTokens: maxTokens,
+            generateContent: async (content) => {
+                let messages = [];
+                if (typeof content === 'string') {
+                    messages = [{ role: 'user', content: content }];
+                } else if (Array.isArray(content)) {
+                    let userContent = [];
+                    for (const item of content) {
+                        if (typeof item === 'string') {
+                            userContent.push({ type: 'text', text: item });
+                        } else if (item.inlineData) {
+                            const mimeType = item.inlineData.mimeType;
+                            const base64Data = item.inlineData.data;
+                            if (mimeType.startsWith('image/')) {
+                                userContent.push({
+                                    type: 'image_url',
+                                    image_url: { url: `data:${mimeType};base64,${base64Data}` }
+                                });
+                            }
+                        }
+                    }
+                    messages = [{ role: 'user', content: userContent }];
+                }
+
+                const response = await openai.chat.completions.create({
+                    model: actualModelName,
+                    messages: messages,
+                    max_tokens: maxTokens,
+                    temperature: 0.7,
+                    top_p: 0.9,
+                });
+
+                return {
+                    response: {
+                        text: () => response.choices[0]?.message?.content || ""
+                    }
+                };
+            },
+            generateContentStream: async (prompt) => {
+                const stream = await openai.chat.completions.create({
+                    model: actualModelName,
+                    messages: [{ role: 'user', content: prompt }],
+                    max_tokens: maxTokens,
+                    temperature: 0.7,
+                    top_p: 0.9,
+                    stream: true,
+                });
+                async function* geminiLikeStream() {
+                    for await (const chunk of stream) {
+                        const textContent = chunk.choices[0]?.delta?.content || "";
+                        if (textContent) {
+                            yield { text: () => textContent };
+                        }
+                    }
+                }
+                return { stream: geminiLikeStream() };
+            }
+        };
+    }
+
+    // Fallback to Gemini API
     return genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -165,15 +238,8 @@ const getModel = (maxTokens = 2048, modelName = 'gemini-3.5-flash') => {
 };
 
 // Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096, modelName = 'gemini-3.5-flash') => {
-    return genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-            temperature: 0.7,
-            topP: 0.9,
-            maxOutputTokens: maxTokens,
-        },
-    });
+const getStreamingModel = (maxTokens = 4096, modelName = 'openai/gpt-4o-mini') => {
+    return getModel(maxTokens, modelName);
 };
 
 // Helper: Sleep function for delays
@@ -608,7 +674,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now following all requirements:`;
 
-                const audioModel = getModel(maxTokens);
+                const audioModel = getModel(maxTokens, 'gemini-1.5-flash');
 
                 // Try different mime types based on what Expo typically records
                 // iOS uses .m4a (audio/m4a), Android may use .3gp or .m4a
@@ -693,7 +759,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const pdfModel = getModel(maxTokens);
+                const pdfModel = getModel(maxTokens, 'gemini-1.5-flash');
                 result = await generateWithRetry(pdfModel, [
                     prompt,
                     {
@@ -1108,7 +1174,7 @@ FORMAT YOUR RESPONSE AS:
 Generate the follow-up response now:`;
         }
 
-        const model = getModel(2048, 'gemini-3.5-flash');
+        const model = getModel(2048, 'openai/gpt-4o-mini');
         const result = await generateWithRetry(model, prompt);
         const response = result.response.text();
 
@@ -1144,7 +1210,7 @@ FORMAT AS JSON:
 }
 `;
 
-        const model = getModel(512, 'gemini-3.5-flash');
+        const model = getModel(512, 'openai/gpt-4o-mini');
         const result = await generateWithRetry(model, prompt);
         const textResponse = result.response.text();
 
@@ -1181,7 +1247,7 @@ RULES:
 - Do not add explanations or notes
 `;
 
-        const model = getModel(2048, 'gemini-3.5-flash');
+        const model = getModel(2048, 'openai/gpt-4o-mini');
         const result = await generateWithRetry(model, prompt);
         res.json({ translatedText: result.response.text() });
 
@@ -1208,7 +1274,7 @@ RULES:
 - Return ONLY the rewritten text, no explanations.
 `;
 
-        const model = getModel(2048, 'gemini-3.5-flash');
+        const model = getModel(2048, 'openai/gpt-4o-mini');
         const result = await generateWithRetry(model, prompt);
         res.json({ polishedText: result.response.text() });
 
