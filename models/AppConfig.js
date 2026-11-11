@@ -15,12 +15,16 @@ const AppConfigSchema = new mongoose.Schema({
         isBlocking: { type: Boolean, default: false }, // Force update or maintenance
     },
     // 1.2 "Kill Switch" for Daily Credits
-    dailyFreeCreditsEnabled: { type: Boolean, default: true },
+    dailyFreeCreditsEnabled: { type: Boolean, default: false },
 
     // 1.5 Free Limits
     freeDailyCredits: { type: Number, default: 3 },
-    welcomePackCredits: { type: Number, default: 5 },
+    welcomePackCredits: { type: Number, default: 7 },
     welcomePackVersion: { type: Number, default: 1 },
+    subscriberDailyLimit: { type: Number, default: 100 },
+    // Enable only after the updated mobile builds are available. The cutover
+    // script enables this together with the one-time allowance.
+    generationBillingRequired: { type: Boolean, default: false },
     // 2. Subscription Promo (Home Screen)
     subscriptionOffer: {
         active: { type: Boolean, default: false },

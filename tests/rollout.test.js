@@ -1,0 +1,188 @@
+const { test, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const { fork, execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+const { once } = require('node:events');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const mongoose = require('mongoose');
+const { MongoMemoryServer } = require('mongodb-memory-server');
+const http = require('node:http');
+const AppConfig = require('../models/AppConfig');
+const User = require('../models/User');
+const exec = promisify(execFile);
+let mongo, temporary, configServer, configURL;
+before(async () => {
+    mongo = await MongoMemoryServer.create({ binary: { version: '8.0.17' } });
+    await mongoose.connect(mongo.getUri(), { dbName: 'ai_notes_app' });
+    temporary = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'ai-notes-credit-rollout-'),
+    );
+    await Promise.all([AppConfig.init(), User.init()]);
+    configServer = http.createServer((req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(
+            JSON.stringify({
+                generationBillingVersion: 2,
+                creditPolicyVersion: 'one-time-v1',
+            }),
+        );
+    });
+    configServer.listen(0, '127.0.0.1');
+    await once(configServer, 'listening');
+    configURL = `http://127.0.0.1:${configServer.address().port}`;
+});
+after(async () => {
+    await new Promise((resolve) => configServer.close(resolve));
+    await mongoose.disconnect();
+    await mongo?.stop();
+    await fs.rm(temporary, { recursive: true, force: true });
+});
+const environment = () => ({
+    ...process.env,
+    MONGODB_URI: mongo.getUri(),
+    CREDIT_POLICY_API_URL: configURL,
+    GEMINI_API_KEY: 'test-key',
+    OPEN_ROUTER_API_KEY: 'test-key',
+    REVENUECAT_API_SECRET_KEY: '',
+    REVENUECAT_WEBHOOK_SECRET: '',
+    ADMIN_API_SECRET: '',
+    PORT: '0',
+});
+
+test('policy inspection is read-only; apply preserves versions, balances, and other settings', async () => {
+    await AppConfig.create({
+        key: 'master_config',
+        dailyFreeCreditsEnabled: true,
+        freeDailyCredits: 2,
+        welcomePackCredits: 8,
+        welcomePackVersion: 4,
+        globalAlert: { active: true, title: 'Keep me' },
+    });
+    await User.create([
+        { recoveryCode: 'DAILYAAA', credits: 50, freeCreditsRemaining: 1 },
+        {
+            recoveryCode: 'PACKAAAA',
+            credits: 100,
+            totalFreeCredits: 2,
+            welcomePackVersion: 1,
+        },
+        {
+            recoveryCode: 'SPENTAAA',
+            credits: 20,
+            totalFreeCredits: 0,
+            welcomePackVersion: 1,
+        },
+    ]);
+    const beforeUsers = JSON.stringify(
+        await User.find().sort({ recoveryCode: 1 }).lean(),
+    );
+    const script = path.resolve(__dirname, '../scripts/one-time-credits.js');
+    const run = async (args) => {
+        const { stdout } = await exec(process.execPath, [script, ...args], {
+            cwd: temporary,
+            env: environment(),
+        });
+        return JSON.parse(stdout);
+    };
+    const inspected = await run([]);
+    assert.equal(inspected.mode, 'dry-run');
+    assert.equal(inspected.eligibleForOneTimeGrant, 1);
+    assert.equal((await AppConfig.findOne()).dailyFreeCreditsEnabled, true);
+    assert.equal(
+        JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()),
+        beforeUsers,
+    );
+    await assert.rejects(run(['--apply']), /clients-ready/);
+    const applied = await run(['--apply', '--clients-ready']);
+    assert.equal(applied.applied, true);
+    const config = await AppConfig.findOne();
+    assert.equal(config.dailyFreeCreditsEnabled, false);
+    assert.equal(config.generationBillingRequired, true);
+    assert.equal(config.welcomePackCredits, 7);
+    assert.equal(config.welcomePackVersion, 4);
+    assert.equal(config.freeDailyCredits, 2);
+    assert.equal(config.globalAlert.title, 'Keep me');
+    assert.equal(
+        JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()),
+        beforeUsers,
+    );
+    const backup = JSON.parse(await fs.readFile(applied.backup, 'utf8'));
+    assert.equal(backup.dailyFreeCreditsEnabled, true);
+    assert.equal((await fs.stat(applied.backup)).mode & 0o777, 0o600);
+    await run(['--apply', '--clients-ready']);
+    assert.equal(
+        JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()),
+        beforeUsers,
+    );
+});
+
+test('the real application boots and mounts fixed routes without AI or external purchase calls', async (t) => {
+    const child = fork(path.resolve(__dirname, 'fixtures/server.cjs'), [], {
+        cwd: temporary,
+        env: environment(),
+        silent: true,
+    });
+    let errors = '';
+    child.stderr.on('data', (chunk) => {
+        errors += chunk;
+    });
+    t.after(async () => {
+        if (child.exitCode === null) {
+            const done = once(child, 'exit');
+            child.send('stop');
+            await done;
+        }
+    });
+    const [{ port }] = await Promise.race([
+        once(child, 'message'),
+        once(child, 'exit').then(() => {
+            throw new Error(`Server exited early: ${errors}`);
+        }),
+    ]);
+    const request = async (endpoint, body) => {
+        const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
+            method: body ? 'POST' : 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        return { status: response.status, body: await response.json() };
+    };
+    assert.equal((await request('/api/health')).body.status, 'ok');
+    const config = await request('/api/config');
+    assert.equal(config.body.dailyFreeCreditsEnabled, false);
+    assert.equal(config.body.welcomePackCredits, 7);
+    assert.equal(config.body.creditPolicyVersion, 'one-time-v1');
+    assert.equal(config.body.generationBillingRequired, true);
+    assert.equal(
+        (await request('/api/notes', { type: 'text', content: 'Must update' }))
+            .status,
+        426,
+    );
+    const balance = await request('/api/credits/balance/DAILYAAA');
+    assert.equal(balance.body.freeCreditsRemaining, 7);
+    assert.equal(balance.body.credits, 50);
+    const used = await request('/api/credits/use', {
+        code: 'DAILYAAA',
+        amount: 7,
+    });
+    assert.equal(used.body.remainingFreeCredits, 0);
+    const recovered = await request('/api/credits/recover', {
+        code: 'DAILYAAA',
+        currentCode: 'PACKAAAA',
+    });
+    assert.equal(recovered.body.freeCreditsRemaining, 0);
+    assert.equal(await User.countDocuments(), 3);
+    assert.equal((await request('/api/admin/pending-purchases')).status, 503);
+    assert.equal(
+        (
+            await request('/api/credits/add', {
+                code: 'DAILYAAA',
+                credits: 5000,
+                transactionId: 'fake',
+            })
+        ).status,
+        503,
+    );
+});

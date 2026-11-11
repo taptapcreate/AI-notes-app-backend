@@ -18,127 +18,46 @@ const PendingPurchase = require('./models/PendingPurchase');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+// Set this to the verified number of ingress proxies on the deployment.
+// Never trust arbitrary forwarded headers on a directly reachable server.
+if (process.env.TRUST_PROXY_HOPS !== undefined) {
+    const hops = Number(process.env.TRUST_PROXY_HOPS);
+    if (!Number.isInteger(hops) || hops < 0 || hops > 10) throw new Error('Invalid TRUST_PROXY_HOPS');
+    app.set('trust proxy', hops);
+}
 
 // MongoDB Connection
 const DB_NAME = 'ai_notes_app';
 
 const AppConfig = require('./models/AppConfig');
 
-// RevenueCat API Configuration
-const REVENUECAT_API_KEY = process.env.REVENUECAT_API_SECRET_KEY; // Secret API key from RevenueCat dashboard
-const REVENUECAT_API_URL = 'https://api.revenuecat.com/v1';
+const CreditRegistration = require('./models/CreditRegistration');
+const PurchaseClaim = require('./models/PurchaseClaim');
+const { createCredits } = require('./services/credits');
+const { createPurchases } = require('./services/purchases');
+const { WELCOME_CREDITS } = require('./services/credit-policy');
+const { createCreditRouter } = require('./routes/credits');
+const { createRevenueCatHandler } = require('./routes/revenuecat');
+const { createPurchaseAdminRouter } = require('./routes/purchase-admin');
+const creditService = createCredits({ User, CreditRegistration, PurchaseClaim, getAppConfig: () => getAppConfig() });
+const purchaseService = createPurchases({
+    credits: creditService, axios, apiKey: process.env.REVENUECAT_API_SECRET_KEY,
+    allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
+});
+const GenerationRequest = require('./models/GenerationRequest');
+const { createGeneration } = require('./services/generation');
+const { signal: generationSignal } = require('./services/generation-context');
+const generationService = createGeneration({ User, GenerationRequest, credits: creditService,
+    getAppConfig: () => getAppConfig(), entitlement: user => purchaseService.subscriptionStatus(user) });
 
-// Product ID to credits mapping (must match app's PurchaseService.js)
-const CREDIT_PACK_PRODUCTS = {
-    'ai_notes_lite_pack_credits': 100,
-    'ai_notes_power_pack_credits': 350,
-    'ai_notes_pro_pack_credits': 550,
-    'ai_notes_elite_pack_credits': 900,
-    'ai_notes_ultimate_pack_credits': 1800,
-    'ai_notes_mega_pack_credits': 3500,
-    'ai_notes_supreme_pack_credits': 5000,
-};
-
-/**
- * Fetch and sync missing RevenueCat purchases for a user
- * This is called during balance fetch to ensure credits are properly synced
- */
-const syncRevenueCatPurchases = async (user) => {
-    if (!REVENUECAT_API_KEY) {
-        console.log('⚠️ REVENUECAT_API_SECRET_KEY not configured, skipping purchase sync');
-        return { synced: 0, credits: 0 };
-    }
-
-    try {
-        // Fetch customer info from RevenueCat using the recovery code as app_user_id
-        const response = await axios.get(
-            `${REVENUECAT_API_URL}/subscribers/${user.recoveryCode}`,
-            {
-                headers: {
-                    'Authorization': `Bearer ${REVENUECAT_API_KEY}`,
-                    'Content-Type': 'application/json',
-                }
-            }
-        );
-
-        const subscriber = response.data.subscriber;
-        if (!subscriber || !subscriber.non_subscriptions) {
-            return { synced: 0, credits: 0 };
-        }
-
-        let totalCreditsAdded = 0;
-        let purchasesSynced = 0;
-
-        // Process non-subscription purchases (one-time credit packs)
-        for (const [productId, purchases] of Object.entries(subscriber.non_subscriptions)) {
-            const creditsPerPurchase = CREDIT_PACK_PRODUCTS[productId];
-            if (!creditsPerPurchase) continue; // Not a credit pack
-
-            for (const purchase of purchases) {
-                const transactionId = purchase.id || purchase.store_transaction_id;
-
-                // Skip if already processed
-                if (user.hasProcessedTransaction(transactionId)) {
-                    continue;
-                }
-
-                // Add credits for this purchase
-                user.credits += creditsPerPurchase;
-                user.processedTransactions.push({
-                    transactionId,
-                    credits: creditsPerPurchase,
-                    source: 'revenuecat_sync',
-                    processedAt: new Date(),
-                });
-
-                totalCreditsAdded += creditsPerPurchase;
-                purchasesSynced++;
-
-                console.log(`💰 [Sync] Added ${creditsPerPurchase} credits for ${productId} (tx: ${transactionId})`);
-            }
-        }
-
-        if (purchasesSynced > 0) {
-            await user.save();
-            console.log(`✅ [Sync] Synced ${purchasesSynced} purchases, added ${totalCreditsAdded} credits for user ${user.recoveryCode}`);
-        }
-
-        return { synced: purchasesSynced, credits: totalCreditsAdded };
-
-    } catch (error) {
-        // 404 means user doesn't exist in RevenueCat yet (no purchases) - this is OK
-        if (error.response?.status === 404) {
-            return { synced: 0, credits: 0 };
-        }
-        console.error('⚠️ RevenueCat sync error:', error.message);
-        return { synced: 0, credits: 0, error: error.message };
-    }
-};
 
 // Helper: Get App Config (Singleton)
 const getAppConfig = async () => {
-    try {
-        let config = await AppConfig.findOne({ key: 'master_config' });
-        if (!config) {
-            console.log('⚠️ No AppConfig found on DB. Creating default...');
-            config = new AppConfig();
-            await config.save();
-        }
-        return config;
-    } catch (error) {
-        console.error('Error fetching config:', error);
-        // Fallback in case of DB error
-        return {
-            adRewards: {
-                enabled: false,
-                active: false,
-                standardReward: 1,
-                specialOfferActive: false,
-                specialReward: 3,
-                specialMessage: "Special Offer!"
-            }
-        };
-    }
+    // Preserve existing production settings. A missing database/configuration is
+    // not permission to hand out a fallback allowance.
+    return AppConfig.findOneAndUpdate({ key: 'master_config' }, {
+        $setOnInsert: { key: 'master_config' },
+    }, { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true });
 };
 
 mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
@@ -147,7 +66,8 @@ mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '25mb' }));
+app.use('/api', generationService.middleware);
 
 // Initialize Gemini AI (for Audio/PDF fallback)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -156,6 +76,8 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const openai = new OpenAI({
     baseURL: "https://openrouter.ai/api/v1",
     apiKey: process.env.OPEN_ROUTER_API_KEY,
+    timeout: 60000,
+    maxRetries: 0,
 });
 
 // Get the model with configuration
@@ -196,7 +118,7 @@ const getModel = (maxTokens = 2048, modelName = 'openai/gpt-4o-mini') => {
                     max_tokens: maxTokens,
                     temperature: 0.7,
                     top_p: 0.9,
-                });
+                }, { signal: generationSignal() });
 
                 return {
                     response: {
@@ -369,7 +291,8 @@ const fetchYouTubeTranscript = async (url) => {
 // Helper: API Call with Retry Logic (Exponential Backoff)
 const generateWithRetry = async (model, content, retries = 3, delay = 2000) => {
     try {
-        return await model.generateContent(content);
+        generationSignal()?.throwIfAborted();
+        return await model.generateContent(content, { timeout: 60000, signal: generationSignal() });
     } catch (error) {
         const isRateLimit = error.message.includes('429') || error.message.includes('Too Many Requests');
         const isServiceUnavailable = error.message.includes('503') || error.message.includes('Overloaded');
@@ -903,76 +826,6 @@ Generate the notes now:`;
         res.status(500).json({ error: 'Failed to generate notes', details: error.message });
     }
 });
-// ==================== STREAMING NOTES ENDPOINT ====================
-app.post('/api/notes/stream', async (req, res) => {
-    try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english' } = req.body;
-
-        if (!content) {
-            return res.status(400).json({ error: 'Content is required' });
-        }
-
-        // Set SSE headers
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.flushHeaders();
-
-        const lengthConfig = lengthGuides[noteLength] || lengthGuides.standard;
-        const lengthInstruction = lengthConfig.instruction;
-        const maxTokens = lengthConfig.maxTokens;
-
-        const formatInstruction = formatGuides[format] || formatGuides.bullet;
-        const toneInstruction = toneGuides[tone] || toneGuides.professional;
-
-        const languageInstruction = language && language.toLowerCase() !== 'english'
-            ? `IMPORTANT: Generate ALL content in ${language}.`
-            : 'Keep the output in English.';
-
-        let prompt = `You are an expert note-taking assistant. Transform the following content into perfectly organized, professional notes.
-
-INPUT CONTENT:
-"""
-${content}
-"""
-
-LENGTH REQUIREMENT: ${lengthInstruction}
-FORMAT REQUIREMENT: ${formatInstruction}
-TONE REQUIREMENT: ${toneInstruction}
-LANGUAGE REQUIREMENT: ${languageInstruction}
-
-INSTRUCTIONS:
-1. Create a clear, hierarchical structure with sections
-2. Extract key information according to the length requirement
-3. Use bullet points (•) for lists
-4. Bold important terms with **asterisks**
-5. Add a "📌 Key Takeaways" section at the end
-
-Generate the notes now:`;
-
-        const model = getStreamingModel(maxTokens);
-        const streamResult = await model.generateContentStream(prompt);
-
-        // Stream each chunk as SSE
-        for await (const chunk of streamResult.stream) {
-            const chunkText = chunk.text();
-            if (chunkText) {
-                res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
-            }
-        }
-
-        // Signal completion
-        res.write('data: [DONE]\n\n');
-        res.end();
-
-    } catch (error) {
-        console.error('Streaming notes error:', error);
-        res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
-        res.end();
-    }
-});
-
 // ==================== REPLY ENDPOINT ====================
 app.post('/api/reply', async (req, res) => {
     try {
@@ -1285,448 +1138,24 @@ RULES:
 });
 
 // ==================== CREDITS SYSTEM ENDPOINTS ====================
-
-// Register new user - Generate recovery code
-// UPDATED: Now checks deviceId to prevent reinstall abuse
-app.post('/api/credits/register', async (req, res) => {
-    try {
-        const { platform, deviceId } = req.body;
-
-        // ANTI-ABUSE: Check if this device already has an account
-        if (deviceId) {
-            const existingUser = await User.findOne({ deviceId });
-
-            if (existingUser) {
-                console.log(`📱 Device ${deviceId.substring(0, 8)}... already registered, returning existing account`);
-
-                // Get config for calculating free credits
-                const config = await getAppConfig();
-                const isDaily = config.dailyFreeCreditsEnabled ?? true;
-
-                // Reset daily credits if needed
-                if (isDaily) {
-                    existingUser.resetDailyCreditsIfNeeded(config.freeDailyCredits);
-                    await existingUser.save();
-                }
-
-                const currentFree = isDaily ? existingUser.freeCreditsRemaining : existingUser.totalFreeCredits;
-
-                // Return existing account
-                return res.json({
-                    success: true,
-                    recoveryCode: existingUser.recoveryCode,
-                    credits: existingUser.credits,
-                    adCredits: existingUser.adCredits || 0,
-                    freeCreditsRemaining: currentFree,
-                    userServerVersion: existingUser.welcomePackVersion || 0,
-                    isExistingDevice: true, // Flag to indicate this was a reinstall
-                });
-            }
-        }
-
-        // Generate unique recovery code for NEW user
-        let recoveryCode;
-        let isUnique = false;
-
-        while (!isUnique) {
-            recoveryCode = User.generateRecoveryCode();
-            const existing = await User.findOne({ recoveryCode });
-            if (!existing) isUnique = true;
-        }
-
-        // Create new user with dynamic config values
-        const config = await getAppConfig();
-        const isDaily = config.dailyFreeCreditsEnabled ?? true;
-        const user = new User({
-            recoveryCode,
-            credits: 0,
-            freeCreditsRemaining: isDaily ? config.freeDailyCredits : 0,
-            totalFreeCredits: isDaily ? 0 : config.welcomePackCredits,
-            welcomePackVersion: isDaily ? 0 : config.welcomePackVersion,
-            platform: platform ? platform.toLowerCase() : 'other',
-            deviceId: deviceId || null, // Store device ID for future reinstall detection
-        });
-
-        await user.save();
-
-        console.log(`✨ New user registered: ${recoveryCode} on ${platform || 'unknown'} device`);
-
-        const currentFree = isDaily ? user.freeCreditsRemaining : user.totalFreeCredits;
-
-        res.json({
-            success: true,
-            recoveryCode,
-            credits: user.credits,
-            freeCreditsRemaining: currentFree,
-            userServerVersion: user.welcomePackVersion || 0,
-        });
-    } catch (error) {
-        console.error('Register error:', error);
-        res.status(500).json({ error: 'Failed to register', details: error.message });
-    }
-});
-
-// Get balance by recovery code
-app.get('/api/credits/balance/:code', async (req, res) => {
-    try {
-        const { code } = req.params;
-        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
-
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        // Sync any missing RevenueCat purchases (backend-only credit recovery)
-        try {
-            await syncRevenueCatPurchases(user);
-        } catch (syncError) {
-            console.error('⚠️ Purchase sync failed (non-blocking):', syncError.message);
-            // Don't fail the balance request if sync fails
-        }
-
-        // Reset daily free credits if mode is enabled
-        const config = await getAppConfig();
-        if (config.dailyFreeCreditsEnabled) {
-            const wasReset = user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
-
-            if (wasReset) {
-                await user.save();
-            }
-        } else {
-            // WELCOME PACK AUTO-SYNC: If daily mode is DISABLED, check if version has changed
-            const remoteVersion = config.welcomePackVersion || 1;
-            const currentVersion = user.welcomePackVersion || 0;
-
-            if (remoteVersion > currentVersion) {
-                console.log(`🎁 Auto-updating Welcome Pack for user ${user.recoveryCode}: V${currentVersion} -> V${remoteVersion}`);
-                user.totalFreeCredits = config.welcomePackCredits || 12;
-                user.welcomePackVersion = remoteVersion;
-                await user.save();
-            }
-        }
-
-        // Update last active
-        user.lastActive = new Date();
-        await user.save();
-
-        // Return balance based on which mode is active
-        const isDaily = config.dailyFreeCreditsEnabled ?? true;
-        const currentFree = isDaily ? user.freeCreditsRemaining : user.totalFreeCredits;
-
-        res.json({
-            success: true,
-            credits: user.credits,
-            adCredits: user.adCredits || 0,
-            freeCreditsRemaining: currentFree,
-            userServerVersion: user.welcomePackVersion || 0,
-            totalAvailable: user.credits + (user.adCredits || 0) + currentFree,
-        });
-    } catch (error) {
-        console.error('Balance error:', error);
-        res.status(500).json({ error: 'Failed to get balance', details: error.message });
-    }
-});
-
-// Sync Welcome Pack Version & Credits (For Lifetime/Total Credit mode)
-app.post('/api/credits/sync-welcome-pack', async (req, res) => {
-    try {
-        const { code, version, credits } = req.body;
-
-        if (!code) return res.status(400).json({ error: 'Recovery code is required' });
-
-        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
-        if (!user) return res.status(404).json({ error: 'User not found' });
-
-        // Only update if the provided version is newer than what we have
-        const currentVersion = user.welcomePackVersion || 0;
-        if (version > currentVersion) {
-            user.totalFreeCredits = credits;
-            user.welcomePackVersion = version;
-            await user.save();
-
-            return res.json({
-                success: true,
-                newBalance: user.totalFreeCredits,
-                version: user.welcomePackVersion
-            });
-        }
-
-        // If version is matched or higher, still return success so the client can update its local marker
-        res.json({
-            success: true,
-            version: user.welcomePackVersion,
-            newBalance: user.totalFreeCredits,
-            message: 'User already at this or higher version'
-        });
-    } catch (error) {
-        console.error('Welcome pack sync error:', error);
-        res.status(500).json({ error: 'Failed to sync welcome pack' });
-    }
-});
-
-// Add credits (after purchase) - with transaction tracking to prevent abuse
-app.post('/api/credits/add', async (req, res) => {
-    try {
-        const { code, credits, transactionId } = req.body;
-
-        if (!code || !credits || !transactionId) {
-            return res.status(400).json({ error: 'Code, credits, and transactionId are required' });
-        }
-
-        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
-
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        // Check if transaction already processed (prevent restore abuse)
-        if (user.hasProcessedTransaction(transactionId)) {
-            return res.json({
-                success: false,
-                message: 'Transaction already processed',
-                credits: user.credits,
-                alreadyProcessed: true,
-            });
-        }
-
-        // Add credits and record transaction
-        user.credits += credits;
-        user.processedTransactions.push({
-            transactionId,
-            credits,
-            processedAt: new Date(),
-        });
-
-        await user.save();
-
-        res.json({
-            success: true,
-            creditsAdded: credits,
-            newBalance: user.credits,
-            transactionId,
-        });
-    } catch (error) {
-        console.error('Add credits error:', error);
-        res.status(500).json({ error: 'Failed to add credits', details: error.message });
-    }
-});
-
-// Use credits
-app.post('/api/credits/use', async (req, res) => {
-    try {
-        const { code, amount } = req.body;
-
-        if (!code || !amount) {
-            return res.status(400).json({ error: 'Code and amount are required' });
-        }
-
-        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
-
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        // Reset daily free credits if needed
-        const config = await getAppConfig();
-        user.resetDailyCreditsIfNeeded(config.freeDailyCredits);
-
-        const isDaily = config.dailyFreeCreditsEnabled ?? true;
-        const currentFreeFieldName = isDaily ? 'freeCreditsRemaining' : 'totalFreeCredits';
-
-        const totalAvailable = user.credits + (user.adCredits || 0) + user[currentFreeFieldName];
-
-        if (totalAvailable < amount) {
-            return res.status(400).json({
-                error: 'Insufficient credits',
-                available: totalAvailable,
-                required: amount,
-            });
-        }
-
-        // Use free credits (from the correct pool) first, then ad credits, then purchased credits
-        let remaining = amount;
-
-        // 1. Free Credits (Current Active Pool)
-        if (user[currentFreeFieldName] >= remaining) {
-            user[currentFreeFieldName] -= remaining;
-            remaining = 0;
-        } else {
-            remaining -= user[currentFreeFieldName];
-            user[currentFreeFieldName] = 0;
-        }
-
-        // 2. Ad Credits
-        if (remaining > 0) {
-            const adBal = user.adCredits || 0;
-            if (adBal >= remaining) {
-                user.adCredits = adBal - remaining;
-                remaining = 0;
-            } else {
-                remaining -= adBal;
-                user.adCredits = 0;
-            }
-        }
-
-        // 3. Purchased Credits
-        if (remaining > 0) {
-            user.credits -= remaining;
-        }
-
-        user.lastActive = new Date();
-        await user.save();
-
-        res.json({
-            success: true,
-            creditsUsed: amount,
-            remainingCredits: user.credits,
-            remainingAdCredits: user.adCredits || 0,
-            remainingFreeCredits: user[currentFreeFieldName],
-            totalAvailable: user.credits + (user.adCredits || 0) + user[currentFreeFieldName],
-        });
-    } catch (error) {
-        console.error('Use credits error:', error);
-        res.status(500).json({ error: 'Failed to use credits', details: error.message });
-    }
-});
-
-// ==================== AD REWARD ENDPOINTS ====================
+app.use('/api/credits', createCreditRouter({ credits: creditService, purchases: purchaseService }));
 
 // ==================== REVENUECAT WEBHOOK ====================
 
-// Copied from PurchaseService.js to ensure consistency
-const CREDITS_PER_PRODUCT = {
-    // Subscriptions (Grant entitlement, handled via Subscription Status, not here usually)
-    'ai_notes_pro_weekly_subscription': 0,
-    'ai_notes_pro_monthly_subscription': 0,
-
-    // Android Subscription IDs (Subscription:BasePlan)
-    'ai_notes_pro_weekly_subscription:ai-notes-pro-weekly-subscription': 0,
-    'ai_notes_pro_monthly_subscription:ai-notes-pro-monthly-subscription': 0,
-
-    // One-time packs
-    'ai_notes_lite_pack_credits': 100,
-    'ai_notes_power_pack_credits': 350,
-    'ai_notes_pro_pack_credits': 550,
-    'ai_notes_elite_pack_credits': 900,
-    'ai_notes_ultimate_pack_credits': 1800,
-    'ai_notes_mega_pack_credits': 3500,
-    'ai_notes_supreme_pack_credits': 5000,
-};
-
-app.post('/api/webhooks/revenuecat', async (req, res) => {
-    try {
-        const { event, api_version } = req.body;
-        const authHeader = req.headers['authorization'];
-        const REVENUECAT_SECRET = process.env.REVENUECAT_WEBHOOK_SECRET || 'your_secret_here';
-
-        // 1. Security Check
-        if (authHeader !== REVENUECAT_SECRET && authHeader !== `Bearer ${REVENUECAT_SECRET}`) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
-
-        if (!event) {
-            return res.status(400).json({ error: 'No event data' });
-        }
-
-        // 2. Identify Event Type
-        // We care about INITIAL_PURCHASE (Consumables/Cousumables) and NON_RENEWING_PURCHASE
-        // For Subscriptions, we might care about RENEWAL if we gave monthly credits (not currently the design)
-        const relevantEvents = ['INITIAL_PURCHASE', 'NON_RENEWING_PURCHASE', 'RENEWAL'];
-
-        if (!relevantEvents.includes(event.type) && !event.type.includes('TEST')) {
-            return res.status(200).json({ message: 'Event ignored', type: event.type });
-        }
-
-        const productIdentifier = event.product_id;
-        const appUserId = event.app_user_id; // This should be our Recovery Code
-        const transactionId = event.transaction_id || event.id;
-        const credits = CREDITS_PER_PRODUCT[productIdentifier] || 0;
-
-        console.log(`🔔 RevenueCat Webhook: ${event.type} for ${appUserId} (${productIdentifier})`);
-
-        // 3. User Lookup
-        const user = await User.findOne({ recoveryCode: appUserId.toUpperCase() });
-
-        if (!user) {
-            console.warn(`⚠️ User not found for webhook: ${appUserId}`);
-
-            // Store as pending purchase for later manual linking
-            if (credits > 0) {
-                try {
-                    // Check if this transaction is already pending
-                    const existingPending = await PendingPurchase.findOne({ transactionId });
-                    if (!existingPending) {
-                        await PendingPurchase.create({
-                            rcAppUserId: appUserId,
-                            productId: productIdentifier,
-                            transactionId,
-                            credits,
-                            rawEvent: event,
-                        });
-                        console.log(`📦 Stored as pending purchase: ${transactionId} (${credits} credits)`);
-                    }
-                } catch (pendingError) {
-                    console.error('Failed to store pending purchase:', pendingError.message);
-                }
-            }
-
-            // Return 200 so RevenueCat stops retrying
-            return res.status(200).json({
-                success: true,
-                message: 'Stored as pending purchase',
-                pendingCredits: credits
-            });
-        }
-
-        // 4. Idempotency Check
-        if (user.hasProcessedTransaction(transactionId)) {
-            console.log(`✅ Transaction ${transactionId} already processed. Skipping.`);
-            return res.status(200).json({ message: 'Already processed' });
-        }
-
-        // 5. Grant Credits
-        if (credits > 0) {
-            user.credits += credits;
-            user.processedTransactions.push({
-                transactionId,
-                credits,
-                source: 'revenuecat_webhook',
-                processedAt: new Date(),
-                rawEvent: event
-            });
-            await user.save();
-            console.log(`💰 Added ${credits} credits to user ${appUserId}. New Balance: ${user.credits}`);
-
-            // === SEND PUSH NOTIFICATION ===
-            try {
-                // Find device token linked to this recovery code
-                const notifToken = await NotificationToken.findOne({ recoveryCode: appUserId.toUpperCase() });
-
-                if (notifToken) {
-                    await sendPushNotifications([notifToken.token], {
-                        title: 'Purchase Successful! 🌟',
-                        body: `${credits} Credits have been added to your account.`,
-                        data: { type: 'CREDIT_UPDATE', newBalance: user.credits }
-                    });
-                    console.log(`🔔 Sent purchase notification to ${appUserId}`);
-                }
-            } catch (notifError) {
-                console.error('⚠️ Failed to send webhook notification:', notifError);
-                // Don't fail the request, just log it
-            }
-
-        } else {
-            // For subscriptions or unknown products, we might log it but no credit action needed yet
-            console.log(`ℹ️ No credits linked to product ${productIdentifier}`);
-        }
-
-        res.status(200).json({ success: true });
-
-    } catch (error) {
-        console.error('Webhook error:', error);
-        res.status(500).json({ error: 'Failed to process webhook' });
-    }
-});
+app.post('/api/webhooks/revenuecat', createRevenueCatHandler({
+    User, PendingPurchase, credits: creditService,
+    reconcilePurchases: user => purchaseService.sync(user, { required: true }),
+    secret: process.env.REVENUECAT_WEBHOOK_SECRET,
+    allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
+    notify: async (code, amount, newBalance) => {
+        const notifToken = await NotificationToken.findOne({ recoveryCode: code });
+        if (notifToken) await sendPushNotifications([notifToken.token], {
+            title: 'Purchase Successful! 🌟',
+            body: `${amount} Credits have been added to your account.`,
+            data: { type: 'CREDIT_UPDATE', newBalance },
+        });
+    },
+}));
 
 // ==================== APP CONFIG & ADS ====================
 
@@ -1734,203 +1163,23 @@ app.post('/api/webhooks/revenuecat', async (req, res) => {
 app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
-        res.json(config);
+        res.json({ ...config.toObject(), welcomePackCredits: WELCOME_CREDITS, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2 });
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch config' });
     }
 });
 
-// Legacy Endpoint Support (Redirect to new logic if needed, or keep for older app versions)
+// Legacy ad configuration endpoint; reward claims use the shared credit router.
 app.get('/api/config/ad-offer', async (req, res) => {
-    const config = await getAppConfig();
-    res.json({
-        STANDARD_REWARD: config.adRewards.standardReward,
-        SPECIAL_OFFER_ACTIVE: config.adRewards.specialOfferActive,
-        SPECIAL_REWARD: config.adRewards.specialReward,
-        SPECIAL_MESSAGE: config.adRewards.specialMessage,
-    });
-});
-
-// Claim Watch Ad Reward (1 per day)
-app.post('/api/credits/claim-ad-reward', async (req, res) => {
     try {
-        const { code } = req.body;
-        if (!code) return res.status(400).json({ error: 'Recovery code is required' });
-
-        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
-        if (!user) return res.status(404).json({ error: 'User not found' });
-
-        // Check if already claimed today
-        const now = new Date();
-        const lastClaim = user.lastAdRewardDate ? new Date(user.lastAdRewardDate) : null;
-
-        if (lastClaim && lastClaim.toDateString() === now.toDateString()) {
-            return res.json({
-                success: false,
-                message: 'You have already claimed your daily ad reward!',
-                alreadyClaimed: true,
-                nextClaimTime: 'tomorrow'
-            });
-        }
-
-        // Fetch Dynamic Config
         const config = await getAppConfig();
-        const { adRewards } = config;
-
-        // Determine Amount
-        const rewardAmount = adRewards.specialOfferActive
-            ? adRewards.specialReward
-            : adRewards.standardReward;
-
-        // Apply Reward (to Ad Credits bucket)
-        if (!user.adCredits) user.adCredits = 0;
-        user.adCredits += rewardAmount;
-        user.lastAdRewardDate = now;
-
-        // Log transaction
-        user.processedTransactions.push({
-            transactionId: `ad_reward_${Date.now()}`,
-            credits: rewardAmount,
-            processedAt: now,
-        });
-
-        await user.save();
-
         res.json({
-            success: true,
-            creditsAdded: rewardAmount,
-            newBalance: user.adCredits,
-            totalAvailable: user.credits + user.adCredits + user.freeCreditsRemaining,
-            message: adRewards.specialOfferActive
-                ? `Special Offer! You earned ${rewardAmount} credits!`
-                : `You earned ${rewardAmount} credit! Come back tomorrow for more.`
+            STANDARD_REWARD: config.adRewards.standardReward,
+            SPECIAL_OFFER_ACTIVE: config.adRewards.specialOfferActive,
+            SPECIAL_REWARD: config.adRewards.specialReward,
+            SPECIAL_MESSAGE: config.adRewards.specialMessage,
         });
-
-    } catch (error) {
-        console.error('Ad reward claim error:', error);
-        res.status(500).json({ error: 'Failed to claim reward', details: error.message });
-    }
-});
-
-const rateLimit = require('express-rate-limit');
-
-// Rate limiter for recovery attempts (5 per hour)
-// Prevents brute-force guessing of recovery codes
-const recoverLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 5, // Limit each IP to 5 requests per windowMs
-    message: {
-        error: 'Too many attempts',
-        message: 'Too many failed recovery attempts. Please try again in an hour.'
-    },
-    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-});
-
-// Recover - Switch to account with recovery code
-// Optimizes DB by deleting the OLD current account if it has 0 credits and no history
-// Protected by rate limiter
-app.post('/api/credits/recover', recoverLimiter, async (req, res) => {
-    try {
-        const { code, currentCode } = req.body;
-
-        if (!code) {
-            return res.status(400).json({ error: 'Recovery code is required' });
-        }
-
-        const targetCode = code.toUpperCase();
-        const currentRecoveryCode = currentCode?.toUpperCase();
-
-        // 1. Find the target account to switch TO
-        const targetAccount = await User.findOne({ recoveryCode: targetCode });
-
-        if (!targetAccount) {
-            return res.status(404).json({
-                error: 'Invalid recovery code',
-                message: 'No account found with this recovery code. Please check and try again.',
-            });
-        }
-
-        // 2. If same code as current, just return info
-        if (currentRecoveryCode && targetCode === currentRecoveryCode) {
-            const config = await getAppConfig();
-            targetAccount.resetDailyCreditsIfNeeded(config.freeDailyCredits);
-            targetAccount.lastActive = new Date();
-            await targetAccount.save();
-
-            return res.json({
-                success: true,
-                recoveryCode: targetAccount.recoveryCode,
-                credits: targetAccount.credits,
-                adCredits: targetAccount.adCredits || 0,
-                freeCreditsRemaining: targetAccount.freeCreditsRemaining,
-                totalAvailable: targetAccount.credits + (targetAccount.adCredits || 0) + targetAccount.freeCreditsRemaining,
-                message: 'Already using this account!',
-            });
-        }
-
-        // 3. AUTO-CLEANUP: Check if we should delete the current account before switching
-        if (currentRecoveryCode && targetCode !== currentRecoveryCode) {
-            const currentAccount = await User.findOne({ recoveryCode: currentRecoveryCode });
-
-            // Delete if exists AND has 0 purchased credits AND no transaction history
-            if (currentAccount &&
-                currentAccount.credits === 0 &&
-                (!currentAccount.processedTransactions || currentAccount.processedTransactions.length === 0)) {
-
-                await User.deleteOne({ recoveryCode: currentRecoveryCode });
-                console.log(`🧹 Deleted empty account ${currentRecoveryCode} while switching to ${targetCode}`);
-            }
-        }
-
-        // 4. Switch to target account
-        // Log the switch event if we are switching from another account
-        if (currentRecoveryCode && targetCode !== currentRecoveryCode) {
-            targetAccount.switchHistory.push({
-                fromCode: currentRecoveryCode,
-                timestamp: new Date(),
-                description: `Switched from ${currentRecoveryCode} to ${targetCode}`
-            });
-        }
-
-        const config = await getAppConfig();
-        targetAccount.resetDailyCreditsIfNeeded(config.freeDailyCredits);
-        targetAccount.lastActive = new Date();
-        await targetAccount.save();
-
-        res.json({
-            success: true,
-            recoveryCode: targetAccount.recoveryCode,
-            credits: targetAccount.credits,
-            adCredits: targetAccount.adCredits || 0,
-            freeCreditsRemaining: targetAccount.freeCreditsRemaining,
-            totalAvailable: targetAccount.credits + (targetAccount.adCredits || 0) + targetAccount.freeCreditsRemaining,
-            message: 'Account recovered successfully!',
-        });
-    } catch (error) {
-        console.error('Recover error:', error);
-        res.status(500).json({ error: 'Failed to recover account', details: error.message });
-    }
-});
-
-// Get processed transactions (for debugging/support)
-app.get('/api/credits/transactions/:code', async (req, res) => {
-    try {
-        const { code } = req.params;
-        const user = await User.findOne({ recoveryCode: code.toUpperCase() });
-
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        res.json({
-            success: true,
-            transactions: user.processedTransactions,
-        });
-    } catch (error) {
-        console.error('Transactions error:', error);
-        res.status(500).json({ error: 'Failed to get transactions', details: error.message });
-    }
+    } catch (error) { res.status(503).json({ error: 'Configuration is temporarily unavailable' }); }
 });
 
 // ==========================================
@@ -2115,125 +1364,32 @@ app.get('/api/notifications/stats', async (req, res) => {
 
 // ==================== PENDING PURCHASES ADMIN ====================
 
-/**
- * Get all pending purchases (for admin debugging)
- * GET /api/admin/pending-purchases
- */
-app.get('/api/admin/pending-purchases', async (req, res) => {
-    try {
-        const pending = await PendingPurchase.find({ status: 'pending' })
-            .sort({ createdAt: -1 })
-            .limit(100);
-
-        res.json({
-            success: true,
-            count: pending.length,
-            purchases: pending.map(p => ({
-                id: p._id,
-                rcAppUserId: p.rcAppUserId,
-                productId: p.productId,
-                credits: p.credits,
-                transactionId: p.transactionId,
-                createdAt: p.createdAt,
-            })),
-        });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to get pending purchases', details: error.message });
-    }
-});
-
-/**
- * Link a pending purchase to a user's recovery code
- * POST /api/admin/link-purchase
- * Body: { rcAppUserId: "anonymous_id", recoveryCode: "ABC123XY" }
- * 
- * This will find ALL pending purchases for that rcAppUserId and add credits to the user
- */
-app.post('/api/admin/link-purchase', async (req, res) => {
-    try {
-        const { rcAppUserId, recoveryCode } = req.body;
-
-        if (!rcAppUserId || !recoveryCode) {
-            return res.status(400).json({ error: 'rcAppUserId and recoveryCode are required' });
-        }
-
-        // Find user
-        const user = await User.findOne({ recoveryCode: recoveryCode.toUpperCase() });
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        // Find all pending purchases for this RC app user ID
-        const pendingPurchases = await PendingPurchase.find({
-            rcAppUserId: rcAppUserId,
-            status: 'pending'
-        });
-
-        if (pendingPurchases.length === 0) {
-            return res.json({ success: true, message: 'No pending purchases found', creditsAdded: 0 });
-        }
-
-        let totalCredits = 0;
-        let processedCount = 0;
-
-        for (const pending of pendingPurchases) {
-            // Check if already processed by user
-            if (user.hasProcessedTransaction(pending.transactionId)) {
-                pending.status = 'processed';
-                pending.linkedRecoveryCode = recoveryCode.toUpperCase();
-                pending.processedAt = new Date();
-                await pending.save();
-                continue; // Already credited
-            }
-
-            // Add credits
-            user.credits += pending.credits;
-            user.processedTransactions.push({
-                transactionId: pending.transactionId,
-                credits: pending.credits,
-                source: 'admin_link',
-                processedAt: new Date(),
-            });
-
-            // Mark pending as processed
-            pending.status = 'processed';
-            pending.linkedRecoveryCode = recoveryCode.toUpperCase();
-            pending.processedAt = new Date();
-            await pending.save();
-
-            totalCredits += pending.credits;
-            processedCount++;
-        }
-
-        if (processedCount > 0) {
-            await user.save();
-        }
-
-        console.log(`✅ Admin linked ${processedCount} purchases: ${rcAppUserId} → ${recoveryCode} (+${totalCredits} credits)`);
-
-        res.json({
-            success: true,
-            purchasesLinked: processedCount,
-            creditsAdded: totalCredits,
-            newBalance: user.credits,
-        });
-
-    } catch (error) {
-        console.error('Link purchase error:', error);
-        res.status(500).json({ error: 'Failed to link purchase', details: error.message });
-    }
-});
+app.use('/api/admin', createPurchaseAdminRouter({
+    PendingPurchase, credits: creditService, secret: process.env.ADMIN_API_SECRET,
+}));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'AI App Backend is running', version: '2.0.0' });
 });
 
+// Recover abandoned reservations after a process restart and on a bounded timer.
+if (require.main === module) {
+    mongoose.connection.asPromise().then(async () => {
+        await GenerationRequest.init();
+        await generationService.recoverExpired();
+        const sweep = setInterval(() => generationService.recoverExpired().catch(error => console.error('AI reconciliation deferred:', error.message)), 60000);
+        sweep.unref();
+    }).catch(error => console.error('AI charging initialization failed:', error.message));
+}
+
 // Start server
-app.listen(PORT, () => {
+if (require.main === module) app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
     console.log(`✨ SERVER VERSION: v3.0 (With Credits System)`);
     console.log(`📝 Notes endpoint: POST /api/notes`);
     console.log(`💬 Reply endpoint: POST /api/reply`);
     console.log(`💳 Credits endpoints: /api/credits/*`);
 });
+
+module.exports = { app };

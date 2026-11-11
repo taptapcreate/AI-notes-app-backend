@@ -1,0 +1,26 @@
+name: Credit policy tests
+
+on:
+    pull_request:
+    push:
+        branches: [main]
+
+jobs:
+    credits:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        env:
+            MONGOMS_DOWNLOAD_DIR: ${{ github.workspace }}/.cache/mongodb
+            MONGOMS_DISABLE_POSTINSTALL: '1'
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+                  cache: npm
+            - uses: actions/cache@v4
+              with:
+                  path: .cache/mongodb
+                  key: mongodb-8.0.17-${{ runner.os }}-${{ runner.arch }}
+            - run: npm ci
+            - run: npm test

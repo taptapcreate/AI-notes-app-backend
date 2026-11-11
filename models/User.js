@@ -18,7 +18,7 @@ const UserSchema = new mongoose.Schema({
     },
     freeCreditsRemaining: {
         type: Number,
-        default: 3, // Daily free credits
+        default: 0, // Assigned by the server's active credit policy
     },
     totalFreeCredits: {
         type: Number,
@@ -40,8 +40,10 @@ const UserSchema = new mongoose.Schema({
     processedTransactions: [{
         transactionId: String,
         credits: Number,
+        source: String,
         processedAt: { type: Date, default: Date.now },
     }],
+    processedPurchaseAliases: [{ type: String }],
     createdAt: {
         type: Date,
         default: Date.now,
@@ -69,6 +71,8 @@ const UserSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
+    // Version changes must never replenish an already claimed allowance.
+    welcomeGrantClaimedAt: { type: Date, default: null },
     // Device ID for reinstall abuse prevention
     // Persists across reinstalls on Android (Android ID) and iOS (identifierForVendor)
     deviceId: {
