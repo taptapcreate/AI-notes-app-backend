@@ -23,7 +23,7 @@ function validateInput(endpoint, body) {
         throw new CreditError(400, 'Invalid AI request');
     if (Buffer.byteLength(JSON.stringify(body)) > 23 * 1024 * 1024)
         throw new CreditError(413, 'The source is too large');
-    if (body.billingMode !== undefined && body.billingMode !== 'purchased')
+    if (body.billingMode !== undefined && !['free', 'purchased'].includes(body.billingMode))
         throw new CreditError(400, 'Invalid billing mode');
     const text = (value, max = 2000000) => {
         if (typeof value !== 'string' || !value.trim() || value.length > max)
@@ -287,19 +287,14 @@ function createGeneration({
                     throw new CreditError(401, 'Reconnect your AI account');
                 const timestamp = now();
                 const usage = subscriptionUsage(user, config, timestamp);
+                const { billingMode } = body;
                 let reservation;
-                if (pro && body.billingMode !== 'purchased') {
+                if (pro && usage.subscriberDailyRemaining > 0) {
                     const day = new Date(timestamp);
                     day.setUTCHours(0, 0, 0, 0);
                     const { subscriberDailyUsage: count, subscriberDailyLimit: limit } = usage;
                     const previous = user.lastRequestReset && new Date(user.lastRequestReset);
                     const sameDay = previous && previous >= day && previous < new Date(usage.subscriberResetAt);
-                    if (count >= limit)
-                        throw new CreditError(
-                            429,
-                            'Your daily subscription allowance is used. You can wait for the reset or choose to use a purchased credit.',
-                            { code: 'SUBSCRIPTION_DAILY_LIMIT', ...usage, purchasedCreditsAvailable: user.credits || 0 },
-                        );
                     const reset = sameDay ? previous : timestamp;
                     await User.updateOne(
                         { _id: user._id },
@@ -318,6 +313,24 @@ function createGeneration({
                     };
                 } else {
                     const current = balance(user, rules);
+                    const selectedBalance = billingMode === 'free' ? current.freeCreditsRemaining : current.credits;
+                    if (pro && (!billingMode || selectedBalance < 1))
+                        throw new CreditError(
+                            429,
+                            'You’ve used today’s Pro allowance. Wait for it to reset or choose a credit for this request.',
+                            {
+                                code: 'SUBSCRIPTION_DAILY_LIMIT',
+                                ...usage,
+                                freeCreditsAvailable: current.freeCreditsRemaining,
+                                freeCreditPolicy: current.freeCreditPolicy,
+                                purchasedCreditsAvailable: current.credits,
+                            },
+                        );
+                    if (billingMode && selectedBalance < 1)
+                        throw new CreditError(
+                            402,
+                            billingMode === 'free' ? 'No free credits remain.' : 'No purchased credits remain.',
+                        );
                     if (current.totalAvailable < 1)
                         throw new CreditError(
                             402,
@@ -326,10 +339,8 @@ function createGeneration({
                                 : 'No AI credits remain. Recover an existing account or purchase more credits.',
                             membership.sandbox ? { code: 'SANDBOX_PRO_ALLOWANCE_DISABLED' } : undefined,
                         );
-                    if (body.billingMode === 'purchased' && current.credits < 1)
-                        throw new CreditError(402, 'No purchased credits remain. Your daily allowance will reset automatically.');
-                    const free = body.billingMode === 'purchased' ? 0 : Math.min(current.freeCreditsRemaining, 1);
-                    const ad = body.billingMode === 'purchased' ? 0 : Math.min(current.adCredits, 1 - free);
+                    const free = billingMode === 'purchased' ? 0 : Math.min(current.freeCreditsRemaining, 1);
+                    const ad = billingMode ? 0 : Math.min(current.adCredits, 1 - free);
                     const paid = 1 - free - ad;
                     await User.updateOne(
                         { _id: user._id },

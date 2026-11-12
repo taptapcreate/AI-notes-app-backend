@@ -365,6 +365,47 @@ test('concurrent devices share one allowance and paid fallback requires an expli
     await request(code, id, body);
     assert.equal((await credits.balance(code)).credits, 2);
 });
+test('lifetime credit fallback requires consent, never substitutes another balance, and honors the reset', async (t) => {
+    time = new Date('2026-11-12T23:59:59.000Z');
+    const code = await account();
+    member = { isPro: true };
+    config.subscriberDailyLimit = 1;
+    await User.updateOne({ recoveryCode: code }, { $set: { totalFreeCredits: 1, adCredits: 3 } });
+    const request = await api(t);
+
+    const included = await request(code, randomUUID());
+    assert.equal(included.body.billing.creditCost, 0);
+    assert.equal(included.body.billing.creditBalance.freeCreditsRemaining, 1);
+    const blocked = await request(code, randomUUID());
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.freeCreditsAvailable, 1);
+    assert.equal(blocked.body.purchasedCreditsAvailable, 0);
+    assert.equal(blocked.body.subscriberResetAt, '2026-11-13T00:00:00.000Z');
+
+    const fallback = { ...source, billingMode: 'free' };
+    const { record } = await reserve(code, randomUUID(), fallback);
+    await generation.finish(record._id, 500, { error: 'Provider failed' });
+    assert.equal((await credits.balance(code)).freeCreditsRemaining, 1);
+    await User.updateOne({ recoveryCode: code }, { $set: { credits: 2 } });
+    const id = randomUUID();
+    const used = await request(code, id, fallback);
+    assert.equal(used.status, 200);
+    assert.equal(used.body.billing.creditBalance.freeCreditsRemaining, 0);
+    assert.equal(used.body.billing.creditBalance.credits, 2);
+    assert.equal(used.body.billing.creditBalance.adCredits, 3);
+    assert.equal((await request(code, id, fallback)).status, 200);
+    const staleChoice = await request(code, randomUUID(), fallback);
+    assert.equal(staleChoice.status, 429);
+    assert.equal(staleChoice.body.freeCreditsAvailable, 0);
+    assert.equal(staleChoice.body.purchasedCreditsAvailable, 2);
+
+    time = new Date('2026-11-13T00:00:00.000Z');
+    const afterReset = await request(code, randomUUID(), { ...source, billingMode: 'purchased' });
+    assert.equal(afterReset.status, 200);
+    assert.equal(afterReset.body.billing.creditCost, 0);
+    assert.equal(afterReset.body.billing.creditBalance.credits, 2);
+});
+
 test('a Pro limit override applies only to that account and removing it keeps the usage count', async (t) => {
     const custom = await account();
     const standard = await account();
