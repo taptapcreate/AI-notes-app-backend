@@ -274,7 +274,6 @@ function createGeneration({
         const config = await getAppConfig();
         const rules = policy(config);
         const membership = await entitlement(await credits.byCode(code));
-        const pro = membership.isPro === true;
         try {
             return await transaction(async (session) => {
                 const duplicate = await GenerationRequest.findById(id)
@@ -287,12 +286,32 @@ function createGeneration({
                 if (!user)
                     throw new CreditError(401, 'Reconnect your AI account');
                 const timestamp = now();
-                if (pro && !membership.quotaId && user.appleSubscriptionIds?.length)
-                    throw new CreditError(409, 'Your subscription changed. Refresh your plan and try again.');
-                const quota = pro && membership.quotaId && Subscription
-                    ? await Subscription.findById(membership.quotaId).session(session).lean() : user;
-                if (pro && membership.quotaId && (!quota || quota.revokedAt || quota.isUpgraded || Math.max(new Date(quota.expiresAt || 0).getTime(), new Date(quota.graceExpiresAt || 0).getTime()) <= timestamp.getTime()))
-                    throw new CreditError(409, 'Your subscription changed. Refresh your plan and try again.');
+                let pro = membership.isPro === true;
+                let quota = user;
+                let quotaId = membership.quotaId;
+                if (user.appleSubscriptionIds?.length) {
+                    if (!Subscription)
+                        throw new CreditError(503, 'Your subscription could not be checked. Please try again.');
+                    // A restore, renewal or expiration can occur after the earlier
+                    // provider lookup. Reserve against the current shared record.
+                    const records = await Subscription.find({
+                        _id: { $in: user.appleSubscriptionIds },
+                    }).sort({ expiresAt: -1 }).session(session).lean();
+                    const active = records.find(record =>
+                        !record.revokedAt && !record.isUpgraded &&
+                        Math.max(
+                            new Date(record.expiresAt || 0).getTime(),
+                            new Date(record.graceExpiresAt || 0).getTime(),
+                        ) > timestamp.getTime(),
+                    );
+                    pro = !!active;
+                    quota = active || records[0] || user;
+                    quotaId = active?._id;
+                } else if (pro && quotaId) {
+                    // This wallet was unlinked while the provider lookup ran.
+                    pro = false;
+                    quotaId = undefined;
+                }
                 const usage = subscriptionUsage(quota, config, timestamp);
                 const { billingMode } = body;
                 let reservation;
@@ -303,7 +322,7 @@ function createGeneration({
                     const previous = quota.lastRequestReset && new Date(quota.lastRequestReset);
                     const sameDay = previous && previous >= day && previous < new Date(usage.subscriberResetAt);
                     const reset = sameDay ? previous : timestamp;
-                    await (membership.quotaId ? Subscription : User).updateOne(
+                    await (quotaId ? Subscription : User).updateOne(
                         { _id: quota._id },
                         {
                             $set: {
@@ -315,7 +334,7 @@ function createGeneration({
                     );
                     reservation = {
                         pro: true,
-                        ...(membership.quotaId ? { subscriptionId: membership.quotaId } : {}),
+                        ...(quotaId ? { subscriptionId: quotaId } : {}),
                         day: reset.toISOString(),
                         limit,
                     };

@@ -361,3 +361,55 @@ test('a pending request started before linking refunds the migrated shared quota
         10,
     );
 });
+
+test('exhausted shared Pro and free credits can use an explicitly approved purchased credit', async () => {
+    await attach(codes[0]);
+    const membership = await service.status(await User.findOne({ recoveryCode: codes[0] }).lean());
+    await Subscription.updateOne({ _id: membership.quotaId }, {
+        $set: { dailyRequestCount: 10, lastRequestReset: time },
+    });
+    await User.updateOne({ recoveryCode: codes[0] }, { $set: { totalFreeCredits: 0, credits: 10 } });
+    // A provider response obtained before the shared link completed lacks quotaId.
+    const stale = createGeneration({
+        User, Subscription, GenerationRequest, credits,
+        getAppConfig: async () => config,
+        entitlement: async () => ({ isPro: true }),
+        now: () => new Date(time),
+    });
+    await assert.rejects(stale.begin(codes[0], randomUUID(), '/notes', source),
+        error => error.status === 429 && error.details.code === 'SUBSCRIPTION_DAILY_LIMIT' &&
+            error.details.purchasedCreditsAvailable === 10);
+    const id = randomUUID();
+    const body = { ...source, billingMode: 'purchased' };
+    const { record } = await stale.begin(codes[0], id, '/notes', body);
+    assert.equal(record.reservation.pro, false);
+    assert.equal(record.reservation.paid, 1);
+    assert.equal(record.reservation.free, 0);
+    assert.equal((await credits.balance(codes[0])).credits, 9);
+    assert.equal((await Subscription.findById(membership.quotaId)).dailyRequestCount, 10);
+    await stale.finish(record._id, 200, { notes: 'Paid result' });
+    assert.equal((await stale.begin(codes[0], id, '/notes', body)).cached, true);
+    assert.equal((await credits.balance(codes[0])).credits, 9);
+});
+
+test('an Apple subscription expiring after status lookup still permits approved purchased credits', async () => {
+    await attach(codes[0]);
+    const membership = await service.status(await User.findOne({ recoveryCode: codes[0] }).lean());
+    await Subscription.updateOne({ _id: membership.quotaId }, {
+        $set: { expiresAt: new Date(time.getTime() - 1000) },
+    });
+    const stale = createGeneration({
+        User, Subscription, GenerationRequest, credits,
+        getAppConfig: async () => config,
+        entitlement: async () => membership,
+        now: () => new Date(time),
+    });
+    const { record } = await stale.begin(codes[0], randomUUID(), '/notes',
+        { ...source, billingMode: 'purchased' });
+    assert.equal(record.reservation.pro, false);
+    assert.equal(record.reservation.membershipPro, false);
+    assert.equal(record.reservation.paid, 1);
+    assert.equal(record.reservation.free, 0);
+    assert.equal((await credits.balance(codes[0])).credits, 19);
+    assert.equal((await credits.balance(codes[0])).freeCreditsRemaining, 7);
+});
