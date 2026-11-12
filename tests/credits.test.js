@@ -687,3 +687,39 @@ test('restored receipt keeps old packs with their owner and syncs a new Mac pack
     await assert.rejects(credits.grantPurchase(second, ['old-apple-store'], 100, 'test'),
         error => error.status === 409 && error.details.code === 'PURCHASE_OWNED_BY_ANOTHER_ACCOUNT');
 });
+
+test('master allowance is a grant template: spending on one user never changes another or the configured seven', async () => {
+    const first = await register('isolation-first');
+    const second = await register('isolation-second');
+    assert.notEqual(first.recoveryCode, second.recoveryCode);
+    assert.equal(first.freeCreditsRemaining, 7);
+    assert.equal(second.freeCreditsRemaining, 7);
+    await credits.use(first.recoveryCode, 1);
+    assert.equal((await credits.balance(first.recoveryCode)).freeCreditsRemaining, 6);
+    assert.equal((await credits.balance(second.recoveryCode)).freeCreditsRemaining, 7);
+    assert.equal((await User.findOne({ recoveryCode: first.recoveryCode })).totalFreeCredits, 6);
+    assert.equal((await User.findOne({ recoveryCode: second.recoveryCode })).totalFreeCredits, 7);
+    assert.equal(config.welcomePackCredits, 7);
+    await credits.use(second.recoveryCode, 2);
+    assert.equal((await credits.balance(first.recoveryCode)).freeCreditsRemaining, 6);
+    assert.equal((await credits.balance(second.recoveryCode)).freeCreditsRemaining, 5);
+    assert.equal(config.welcomePackCredits, 7);
+});
+
+test('an untouched legacy user migrates on first balance read, with a persisted personal grant', async () => {
+    await User.create({ recoveryCode: 'LEGACYUNTOUCHED', credits: 12,
+        freeCreditsRemaining: 3, totalFreeCredits: 0, welcomePackVersion: 0 });
+    const before = await User.findOne({ recoveryCode: 'LEGACYUNTOUCHED' });
+    assert.equal(before.totalFreeCredits, 0);
+    const result = await credits.balance('LEGACYUNTOUCHED');
+    assert.equal(result.freeCreditsRemaining, 7);
+    assert.equal(result.totalAvailable, 19);
+    const after = await User.findOne({ recoveryCode: 'LEGACYUNTOUCHED' });
+    assert.equal(after.totalFreeCredits, 7);
+    assert.ok(after.welcomeGrantClaimedAt);
+    assert.equal(after.credits, 12);
+    assert.equal(after.freeCreditsRemaining, 3, 'old daily field is preserved but not spent in one-time mode');
+    await credits.use('LEGACYUNTOUCHED', 1);
+    assert.equal((await credits.balance('LEGACYUNTOUCHED')).freeCreditsRemaining, 6);
+    assert.equal((await User.findOne({ recoveryCode: 'LEGACYUNTOUCHED' })).totalFreeCredits, 6);
+});

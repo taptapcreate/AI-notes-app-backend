@@ -32,7 +32,10 @@ function purchaseAliases(product, purchase) {
     return [...new Set(aliases)];
 }
 
-function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
+function createPurchases({ credits, axios, apiKey, allowSandbox = false, sandboxProTestAccounts = '' }) {
+    const sandboxProAccounts = new Set(
+        sandboxProTestAccounts.split(',').map(code => code.trim().toUpperCase()).filter(Boolean),
+    );
     async function customer(user, { required = false } = {}) {
         if (!apiKey) {
             if (required)
@@ -83,6 +86,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
             'ai_notes_pro_monthly_subscription:ai-notes-pro-monthly-subscription',
         ]);
         const entitlements = subscriber.entitlements || {};
+        let sandboxMembership;
         for (const value of Object.values(entitlements)) {
             if (!value || !products.has(value.product_identifier)) continue;
             const subscription =
@@ -90,11 +94,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
                 subscriber.subscriptions?.[
                     value.product_identifier.split(':')[0]
                 ];
-            if (
-                subscription?.refunded_at ||
-                (subscription?.is_sandbox && !allowSandbox)
-            )
-                continue;
+            if (subscription?.refunded_at) continue;
             const expiry = value.expires_date;
             const grace =
                 value.grace_period_expires_date ||
@@ -103,16 +103,23 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
                 expiry === null ||
                 Date.parse(expiry) > Date.now() ||
                 Date.parse(grace) > Date.now()
-            )
-                return {
+            ) {
+                const membership = {
                     isPro: true,
                     plan: value.product_identifier.includes('monthly') ? 'monthly' : 'weekly',
                     expiresAt: Number.isFinite(Date.parse(expiry))
                         ? new Date(expiry).toISOString()
                         : null,
                 };
+                if (subscription?.is_sandbox !== true) return membership;
+                sandboxMembership = {
+                    ...membership,
+                    sandbox: true,
+                    isPro: allowSandbox || sandboxProAccounts.has(user.recoveryCode),
+                };
+            }
         }
-        return { isPro: false };
+        return sandboxMembership || { isPro: false };
     }
     async function sync(user, options = {}) {
         const subscriber = await customer(user, options);

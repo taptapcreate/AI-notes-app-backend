@@ -54,6 +54,7 @@ function createCreditRouter({ credits, purchases, logger = console }) {
             const membership = await purchases.subscriptionStatus(user);
             return {
                 status: membership.isPro ? 'active' : 'inactive',
+                ...(membership.sandbox ? { sandbox: true, allowanceEnabled: membership.isPro } : {}),
                 plan: membership.plan || null,
                 expiresAt: membership.expiresAt || null,
             };

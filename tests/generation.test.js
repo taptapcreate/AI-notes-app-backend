@@ -377,3 +377,43 @@ test('failed paid fallback refunds only the purchased credit and preserves daily
     assert.equal(after.subscriberDailyUsage, before.subscriberDailyUsage);
     await assert.rejects(reserve(code, randomUUID(), { ...source, billingMode: 'invalid' }), error => error.status === 400);
 });
+
+
+test('only an explicitly enabled sandbox Pro account can generate from its daily allowance at zero credits', async (t) => {
+    const enabled = await account();
+    const unlisted = await account();
+    await User.updateMany({ recoveryCode: { $in: [enabled, unlisted] } }, {
+        $set: { totalFreeCredits: 0 },
+    });
+    const product = 'ai_notes_pro_monthly_subscription';
+    const purchases = createPurchases({
+        credits,
+        apiKey: 'test-key',
+        sandboxProTestAccounts: enabled,
+        axios: { get: async () => ({ data: { subscriber: {
+            entitlements: { pro: { product_identifier: product, expires_date: '2099-01-01' } },
+            subscriptions: { [product]: { is_sandbox: true } },
+            non_subscriptions: { ai_notes_lite_pack_credits: [{ id: 'sandbox-credit-pack', is_sandbox: true }] },
+        } } }) },
+    });
+    assert.deepEqual(await purchases.sync({ recoveryCode: enabled }), { synced: 0, credits: 0 });
+    const service = createGeneration({
+        User, GenerationRequest, credits,
+        getAppConfig: async () => config,
+        entitlement: purchases.subscriptionStatus,
+        now: () => new Date(time),
+    });
+    const request = await api(t, null, service);
+    const blocked = await request(unlisted, randomUUID());
+    assert.equal(blocked.status, 402);
+    assert.equal(blocked.body.code, 'SANDBOX_PRO_ALLOWANCE_DISABLED');
+    const first = await request(enabled, randomUUID());
+    assert.equal(first.status, 200);
+    assert.equal(first.body.billing.creditCost, 0);
+    assert.equal(first.body.billing.subscriberDailyRemaining, 1);
+    config.subscriberDailyLimit = 15;
+    const second = await request(enabled, randomUUID());
+    assert.equal(second.body.billing.subscriberDailyLimit, 15);
+    assert.equal(second.body.billing.subscriberDailyRemaining, 13);
+    assert.equal((await credits.balance(enabled)).totalAvailable, 0);
+});

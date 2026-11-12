@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { DEFAULT_WELCOME_CREDITS } = require('../services/credit-policy');
+const { DEFAULT_SUBSCRIBER_DAILY_LIMIT } = require('../services/subscription-usage');
 
 const PlatformReleaseSchema = new mongoose.Schema({
     minVersion: { type: String, match: /^\d+\.\d+\.\d+$/ },
@@ -16,6 +17,11 @@ const AppConfigSchema = new mongoose.Schema({
         unique: true,
         default: 'master_config',
     },
+    maintenance: { type: new mongoose.Schema({
+        enabled: { type: Boolean, default: false },
+        title: { type: String, maxlength: 120, default: 'We’ll be back soon' },
+        message: { type: String, maxlength: 2000, default: 'AI Notes is undergoing maintenance. Please try again shortly.' },
+    }, { _id: false }), default: undefined },
     // 1. General Alerts
     globalAlert: {
         active: { type: Boolean, default: false },
@@ -39,7 +45,7 @@ const AppConfigSchema = new mongoose.Schema({
         },
     },
     welcomePackVersion: { type: Number, default: 1 },
-    subscriberDailyLimit: { type: Number, default: 10, min: 1, max: 10000, validate: Number.isSafeInteger },
+    subscriberDailyLimit: { type: Number, default: DEFAULT_SUBSCRIBER_DAILY_LIMIT, min: 1, max: 10000, validate: Number.isSafeInteger },
     // Enable only after the updated mobile builds are available. The cutover
     // script enables this together with the one-time allowance.
     generationBillingRequired: { type: Boolean, default: false },

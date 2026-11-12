@@ -1,4 +1,4 @@
-const { subscriptionUsage } = require('./subscription-usage');
+const { subscriptionUsage, getSubscriberDailyLimit } = require('./subscription-usage');
 const { createHash } = require('node:crypto');
 const { context } = require('./generation-context');
 const {
@@ -274,12 +274,7 @@ function createGeneration({
         const rules = policy(config);
         const membership = await entitlement(await credits.byCode(code));
         const pro = membership.isPro === true;
-        const limit = config.subscriberDailyLimit ?? 10;
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
-            throw new CreditError(
-                503,
-                'Subscription limits are temporarily unavailable',
-            );
+        const limit = getSubscriberDailyLimit(config);
         try {
             return await transaction(async (session) => {
                 const duplicate = await GenerationRequest.findById(id)
@@ -296,21 +291,15 @@ function createGeneration({
                 if (pro && body.billingMode !== 'purchased') {
                     const day = new Date(timestamp);
                     day.setUTCHours(0, 0, 0, 0);
-                    const previous = user.lastRequestReset
-                        ? new Date(user.lastRequestReset)
-                        : null;
-                    const sameDay = previous && previous >= day;
-                    const count = sameDay ? user.dailyRequestCount || 0 : 0;
-                    if (!Number.isSafeInteger(count) || count < 0)
-                        throw new CreditError(
-                            503,
-                            'Subscription usage needs support review',
-                        );
+                    const usage = subscriptionUsage(user, config, timestamp);
+                    const count = usage.subscriberDailyUsage;
+                    const previous = user.lastRequestReset && new Date(user.lastRequestReset);
+                    const sameDay = previous && previous >= day && previous < new Date(usage.subscriberResetAt);
                     if (count >= limit)
                         throw new CreditError(
                             429,
                             'Your daily subscription allowance is used. You can wait for the reset or choose to use a purchased credit.',
-                            { code: 'SUBSCRIPTION_DAILY_LIMIT', ...subscriptionUsage(user, config, timestamp), purchasedCreditsAvailable: user.credits || 0 },
+                            { code: 'SUBSCRIPTION_DAILY_LIMIT', ...usage, purchasedCreditsAvailable: user.credits || 0 },
                         );
                     const reset = sameDay ? previous : timestamp;
                     await User.updateOne(
@@ -333,7 +322,10 @@ function createGeneration({
                     if (current.totalAvailable < 1)
                         throw new CreditError(
                             402,
-                            'No AI credits remain. Recover an existing account or purchase more credits.',
+                            membership.sandbox
+                                ? 'This Apple sandbox subscription has no test allowance enabled, and your credit balance is zero.'
+                                : 'No AI credits remain. Recover an existing account or purchase more credits.',
+                            membership.sandbox ? { code: 'SANDBOX_PRO_ALLOWANCE_DISABLED' } : undefined,
                         );
                     if (body.billingMode === 'purchased' && current.credits < 1)
                         throw new CreditError(402, 'No purchased credits remain. Your daily allowance will reset automatically.');

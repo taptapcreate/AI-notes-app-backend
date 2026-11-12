@@ -31,12 +31,14 @@ const DB_NAME = 'ai_notes_app';
 
 const AppConfig = require('./models/AppConfig');
 const { releaseConfig } = require('./services/release-config');
+const { publicMaintenance, createMaintenanceGate } = require('./services/maintenance');
 
 const CreditRegistration = require('./models/CreditRegistration');
 const PurchaseClaim = require('./models/PurchaseClaim');
 const { createCredits } = require('./services/credits');
 const { createPurchases } = require('./services/purchases');
 const { getWelcomeCredits } = require('./services/credit-policy');
+const { getSubscriberDailyLimit } = require('./services/subscription-usage');
 const { createCreditRouter } = require('./routes/credits');
 const { createRevenueCatHandler } = require('./routes/revenuecat');
 const { createPurchaseAdminRouter } = require('./routes/purchase-admin');
@@ -44,6 +46,7 @@ const creditService = createCredits({ User, CreditRegistration, PurchaseClaim, g
 const purchaseService = createPurchases({
     credits: creditService, axios, apiKey: process.env.REVENUECAT_API_SECRET_KEY,
     allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
+    sandboxProTestAccounts: process.env.REVENUECAT_SANDBOX_PRO_TEST_ACCOUNTS,
 });
 const GenerationRequest = require('./models/GenerationRequest');
 const { createGeneration } = require('./services/generation');
@@ -68,6 +71,7 @@ mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
+app.use('/api', createMaintenanceGate({ getAppConfig }));
 app.use('/api', generationService.middleware);
 
 // Initialize Gemini AI (for Audio/PDF fallback)
@@ -1165,7 +1169,8 @@ app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true });
+        res.set('Cache-Control', 'no-store');
+        res.json({ ...config.toObject(), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

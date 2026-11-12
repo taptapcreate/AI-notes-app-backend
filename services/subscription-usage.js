@@ -1,10 +1,15 @@
 const { CreditError } = require('./credit-policy');
 const DEFAULT_SUBSCRIBER_DAILY_LIMIT = 10;
 
-function subscriptionUsage(user, config, now = new Date()) {
+function getSubscriberDailyLimit(config) {
     const limit = config.subscriberDailyLimit ?? DEFAULT_SUBSCRIBER_DAILY_LIMIT;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
         throw new CreditError(503, 'Subscription limits are temporarily unavailable');
+    return limit;
+}
+
+function subscriptionUsage(user, config, now = new Date()) {
+    const limit = getSubscriberDailyLimit(config);
     const start = new Date(now);
     start.setUTCHours(0, 0, 0, 0);
     const reset = new Date(start.getTime() + 86400000);
@@ -20,4 +25,4 @@ function subscriptionUsage(user, config, now = new Date()) {
         serverTime: new Date(now).toISOString(),
     };
 }
-module.exports = { subscriptionUsage, DEFAULT_SUBSCRIBER_DAILY_LIMIT };
+module.exports = { subscriptionUsage, getSubscriberDailyLimit, DEFAULT_SUBSCRIBER_DAILY_LIMIT };
