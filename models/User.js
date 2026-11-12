@@ -28,6 +28,8 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: Date.now,
     },
+    // Apple-signed subscription families are independent of this wallet identity.
+    appleSubscriptionIds: { type: [String], default: [] },
     // Rate limiting for subscribers
     subscriberDailyLimitOverride: {
         type: Number,

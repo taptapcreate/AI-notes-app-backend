@@ -42,15 +42,19 @@ const { getSubscriberDailyLimit } = require('./services/subscription-usage');
 const { createCreditRouter } = require('./routes/credits');
 const { createRevenueCatHandler } = require('./routes/revenuecat');
 const { createPurchaseAdminRouter } = require('./routes/purchase-admin');
-const creditService = createCredits({ User, CreditRegistration, PurchaseClaim, getAppConfig: () => getAppConfig() });
+const AppleSubscription = require('./models/AppleSubscription');
+const GenerationRequest = require('./models/GenerationRequest');
+const { createAppleSubscriptions } = require('./services/apple-subscriptions');
+const appleSubscriptions = createAppleSubscriptions({ User, Subscription: AppleSubscription, GenerationRequest, getAppConfig: () => getAppConfig() });
+const creditService = createCredits({ User, CreditRegistration, PurchaseClaim, getAppConfig: () => getAppConfig(),
+    subscriptionUsageFor: (user, config, timestamp) => appleSubscriptions.usage(user, config, timestamp) });
 const purchaseService = createPurchases({
-    credits: creditService, axios, apiKey: process.env.REVENUECAT_API_SECRET_KEY,
+    credits: creditService, appleSubscriptions, axios, apiKey: process.env.REVENUECAT_API_SECRET_KEY,
     allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
 });
-const GenerationRequest = require('./models/GenerationRequest');
 const { createGeneration } = require('./services/generation');
 const { signal: generationSignal } = require('./services/generation-context');
-const generationService = createGeneration({ User, GenerationRequest, credits: creditService,
+const generationService = createGeneration({ User, GenerationRequest, Subscription: AppleSubscription, credits: creditService,
     getAppConfig: () => getAppConfig(), entitlement: user => purchaseService.subscriptionStatus(user) });
 
 
@@ -1142,13 +1146,14 @@ RULES:
 });
 
 // ==================== CREDITS SYSTEM ENDPOINTS ====================
-app.use('/api/credits', createCreditRouter({ credits: creditService, purchases: purchaseService }));
+app.use('/api/credits', createCreditRouter({ credits: creditService, purchases: purchaseService, appleSubscriptions }));
 
 // ==================== REVENUECAT WEBHOOK ====================
 
 app.post('/api/webhooks/revenuecat', createRevenueCatHandler({
     User, PendingPurchase, credits: creditService,
     reconcilePurchases: user => purchaseService.sync(user, { required: true }),
+    subscriptionEvent: event => appleSubscriptions.webhook(event),
     secret: process.env.REVENUECAT_WEBHOOK_SECRET,
     allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
     notify: async (code, amount, newBalance) => {

@@ -18,6 +18,7 @@ function createRevenueCatHandler({
     PendingPurchase,
     credits,
     reconcilePurchases = async () => {},
+    subscriptionEvent = async () => false,
     allowSandbox = false,
     secret,
     notify = async () => {},
@@ -34,6 +35,7 @@ function createRevenueCatHandler({
             const event = req.body?.event;
             if (!event || typeof event.type !== 'string')
                 return res.status(400).json({ error: 'Invalid event' });
+            if (await subscriptionEvent(event)) return res.json({ success: true, message: 'Subscription updated' });
             if (
                 !['INITIAL_PURCHASE', 'NON_RENEWING_PURCHASE'].includes(
                     event.type,

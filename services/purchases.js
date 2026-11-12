@@ -32,7 +32,7 @@ function purchaseAliases(product, purchase) {
     return [...new Set(aliases)];
 }
 
-function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
+function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions }) {
     async function customer(user, { required = false } = {}) {
         if (!apiKey) {
             if (required)
@@ -74,6 +74,8 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
         return subscriber;
     }
     async function subscriptionStatus(user) {
+        const shared = await appleSubscriptions?.status(user);
+        if (shared) return shared;
         const subscriber = await customer(user, { required: true });
         if (!subscriber) return { isPro: false };
         const products = new Set([

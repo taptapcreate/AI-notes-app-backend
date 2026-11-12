@@ -131,6 +131,7 @@ function stable(value) {
 function createGeneration({
     User,
     GenerationRequest,
+    Subscription,
     credits,
     getAppConfig,
     entitlement,
@@ -186,9 +187,9 @@ function createGeneration({
             if (status >= 400) {
                 const held = record.reservation;
                 if (held.pro) {
-                    await User.updateOne(
+                    await (held.subscriptionId ? Subscription : User).updateOne(
                         {
-                            recoveryCode: record.recoveryCode,
+                            ...(held.subscriptionId ? { _id: held.subscriptionId } : { recoveryCode: record.recoveryCode }),
                             lastRequestReset: new Date(held.day),
                             dailyRequestCount: { $gt: 0 },
                         },
@@ -286,18 +287,24 @@ function createGeneration({
                 if (!user)
                     throw new CreditError(401, 'Reconnect your AI account');
                 const timestamp = now();
-                const usage = subscriptionUsage(user, config, timestamp);
+                if (pro && !membership.quotaId && user.appleSubscriptionIds?.length)
+                    throw new CreditError(409, 'Your subscription changed. Refresh your plan and try again.');
+                const quota = pro && membership.quotaId && Subscription
+                    ? await Subscription.findById(membership.quotaId).session(session).lean() : user;
+                if (pro && membership.quotaId && (!quota || quota.revokedAt || quota.isUpgraded || Math.max(new Date(quota.expiresAt || 0).getTime(), new Date(quota.graceExpiresAt || 0).getTime()) <= timestamp.getTime()))
+                    throw new CreditError(409, 'Your subscription changed. Refresh your plan and try again.');
+                const usage = subscriptionUsage(quota, config, timestamp);
                 const { billingMode } = body;
                 let reservation;
                 if (pro && usage.subscriberDailyRemaining > 0) {
                     const day = new Date(timestamp);
                     day.setUTCHours(0, 0, 0, 0);
                     const { subscriberDailyUsage: count, subscriberDailyLimit: limit } = usage;
-                    const previous = user.lastRequestReset && new Date(user.lastRequestReset);
+                    const previous = quota.lastRequestReset && new Date(quota.lastRequestReset);
                     const sameDay = previous && previous >= day && previous < new Date(usage.subscriberResetAt);
                     const reset = sameDay ? previous : timestamp;
-                    await User.updateOne(
-                        { _id: user._id },
+                    await (membership.quotaId ? Subscription : User).updateOne(
+                        { _id: quota._id },
                         {
                             $set: {
                                 dailyRequestCount: count + 1,
@@ -308,6 +315,7 @@ function createGeneration({
                     );
                     reservation = {
                         pro: true,
+                        ...(membership.quotaId ? { subscriptionId: membership.quotaId } : {}),
                         day: reset.toISOString(),
                         limit,
                     };
@@ -408,7 +416,7 @@ function createGeneration({
                       : 0,
                 hasProSubscription: record.reservation.membershipPro ?? record.reservation.pro,
                 creditBalance: current,
-                ...subscriptionUsage(user, await getAppConfig(), now()),
+                ...Object.fromEntries(Object.entries(current).filter(([key]) => key.startsWith('subscriber') || key === 'serverTime')),
             },
         };
     }

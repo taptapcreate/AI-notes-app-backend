@@ -21,7 +21,7 @@ function createMaintenanceGate({ getAppConfig }) {
         const route = req.path.toLowerCase();
         // Keep polling, verified payment reconciliation, and operational recovery available.
         if (req.method === 'OPTIONS' || /^\/(?:config(?:\/|$)|health$|webhooks(?:\/|$)|admin(?:\/|$))/.test(route) ||
-            /^\/credits\/(?:add|balance\/[^/]+|subscription|transactions\/[^/]+)\/?$/.test(route)) return next();
+            /^\/credits\/(?:apple-subscription|add|balance\/[^/]+|subscription|transactions\/[^/]+)\/?$/.test(route)) return next();
         try {
             const maintenance = maintenanceState(await getAppConfig());
             if (!maintenance.enabled) return next();

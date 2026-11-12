@@ -3,7 +3,7 @@ const { createHash } = require('node:crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const { CreditError, recoveryCode } = require('../services/credit-policy');
 
-function createCreditRouter({ credits, purchases, logger = console }) {
+function createCreditRouter({ credits, purchases, appleSubscriptions, logger = console }) {
     const router = express.Router();
     const endpoint = (handler) => async (req, res) => {
         try {
@@ -46,6 +46,12 @@ function createCreditRouter({ credits, purchases, logger = console }) {
             return credits.balance(user.recoveryCode);
         }),
     );
+    router.post('/apple-subscription', rateLimit({ windowMs: 60000, limit: 60, standardHeaders: true, legacyHeaders: false }), endpoint(async req => {
+        if (!appleSubscriptions) throw new CreditError(503, 'Subscription sharing is not available on this server yet');
+        const code = recoveryCode(req.body?.code);
+        await credits.byCode(code);
+        return appleSubscriptions.attach(code, req.body?.transactions);
+    }));
     // Read-only membership lookup. A failed provider check must not hide credit balances.
     router.post(
         '/subscription',
@@ -54,6 +60,7 @@ function createCreditRouter({ credits, purchases, logger = console }) {
             const membership = await purchases.subscriptionStatus(user);
             return {
                 status: membership.isPro ? 'active' : 'inactive',
+                ...(membership.appleSubscriptionBound ? { appleSubscriptionBound: true, subscriptionIdentityVersion: 1 } : {}),
                 ...(membership.sandbox ? { sandbox: true, allowanceEnabled: membership.isPro } : {}),
                 plan: membership.plan || null,
                 expiresAt: membership.expiresAt || null,

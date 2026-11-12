@@ -20,6 +20,7 @@ function createCredits({
     CreditRegistration,
     PurchaseClaim,
     getAppConfig,
+    subscriptionUsageFor = async (user, config, timestamp) => subscriptionUsage(user, config, timestamp),
     now = () => new Date(),
 }) {
     const currentPolicy = async () => policy(await getAppConfig());
@@ -238,7 +239,7 @@ function createCredits({
         const confirmed = await byCode(code);
         return {
             ...balance(confirmed, rules),
-            ...subscriptionUsage(confirmed, await getAppConfig(), now()),
+            ...await subscriptionUsageFor(confirmed, await getAppConfig(), now()),
         };
     }
 
