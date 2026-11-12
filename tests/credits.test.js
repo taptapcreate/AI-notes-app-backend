@@ -723,3 +723,44 @@ test('an untouched legacy user migrates on first balance read, with a persisted 
     assert.equal((await credits.balance('LEGACYUNTOUCHED')).freeCreditsRemaining, 6);
     assert.equal((await User.findOne({ recoveryCode: 'LEGACYUNTOUCHED' })).totalFreeCredits, 6);
 });
+
+test('pack confirmation waits for the specific store transaction and acknowledges duplicates', async t => {
+    const { recoveryCode: code } = await register();
+    const entries = [];
+    const purchases = createPurchases({ credits, apiKey: 'test', axios: {
+        get: async () => ({ data: { subscriber: { non_subscriptions: {
+            ai_notes_lite_pack_credits: entries,
+        } } } }),
+    } });
+    const api = await withAPI(t, purchases);
+    const purchase = { productId: 'ai_notes_lite_pack_credits', transactionId: 'store-pack-test' };
+    const pending = await api('/api/credits/add', { code, purchase });
+    assert.equal(pending.body.purchase.status, 'pending');
+    entries.push({ store_transaction_id: 'store-pack-test', is_sandbox: false });
+    const applied = await api('/api/credits/add', { code, purchase });
+    assert.equal(applied.body.purchase.status, 'credited');
+    assert.equal(applied.body.purchase.credits, 100);
+    assert.equal(applied.body.newBalance, 100);
+    const duplicate = await api('/api/credits/add', { code, purchase });
+    assert.equal(duplicate.body.purchase.status, 'credited');
+    assert.equal(duplicate.body.purchase.alreadyProcessed, true);
+    assert.equal(duplicate.body.newBalance, 100);
+});
+
+test('sandbox pack acknowledgement reports the server policy and permits an isolated test grant', async () => {
+    const { recoveryCode: code } = await register();
+    const user = await User.findOne({ recoveryCode: code }).lean();
+    const purchase = { productId: 'ai_notes_lite_pack_credits', transactionId: 'sandbox-pack-test' };
+    const options = { credits, apiKey: 'test', axios: {
+        get: async () => ({ data: { subscriber: { non_subscriptions: {
+            [purchase.productId]: [{ store_transaction_id: purchase.transactionId, is_sandbox: true }],
+        } } } }),
+    } };
+    const blocked = await createPurchases(options).sync(user, { purchase });
+    assert.equal(blocked.purchase.status, 'sandbox_disabled');
+    assert.equal((await credits.balance(code)).credits, 0);
+    const allowed = await createPurchases({ ...options, allowSandbox: true }).sync(user, { purchase });
+    assert.equal(allowed.purchase.status, 'credited');
+    assert.equal(allowed.purchase.sandbox, true);
+    assert.equal((await credits.balance(code)).credits, 100);
+});

@@ -99,11 +99,14 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
             const user = await credits.byCode(code);
             // Mobile versions send synthetic transaction IDs and arbitrary amounts.
             // Sync verified store purchases instead of trusting either client field.
-            const result = await purchases.sync(user, { required: true });
+            const result = await purchases.sync(user, { required: true, ...(req.body?.purchase ? { purchase: {
+                productId: req.body.purchase.productId, transactionId: req.body.purchase.transactionId,
+            } } : {}) });
             const current = await credits.balance(code);
             return {
                 ...current,
                 creditsAdded: result.credits,
+                ...(result.purchase ? { purchase: result.purchase } : {}),
                 newBalance: current.credits,
             };
         }),

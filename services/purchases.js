@@ -137,6 +137,12 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                 'Purchase verification returned an invalid response',
             );
         }
+        const expected = options.purchase;
+        if (expected && (!CREDIT_PACK_PRODUCTS[expected.productId] ||
+            typeof expected.transactionId !== 'string' || !expected.transactionId ||
+            expected.transactionId.length > 512))
+            throw new CreditError(400, 'Invalid purchase identity');
+        let confirmation = expected ? { ...expected, status: 'pending' } : undefined;
         let synced = 0;
         let amount = 0;
         for (const [product, entries] of Object.entries(purchases)) {
@@ -147,12 +153,17 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                     !purchase ||
                     typeof purchase !== 'object' ||
                     purchase.refunded_at ||
-                    purchase.refund_date ||
-                    (purchase.is_sandbox && !allowSandbox)
+                    purchase.refund_date
                 )
                     continue;
                 const aliases = purchaseAliases(product, purchase);
                 if (!aliases.length) continue;
+                const matches = expected && expected.productId === product &&
+                    aliases.includes(expected.transactionId);
+                if (purchase.is_sandbox && !allowSandbox) {
+                    if (matches) confirmation = { ...expected, status: 'sandbox_disabled', sandbox: true };
+                    continue;
+                }
                 let result;
                 try {
                     result = await credits.grantPurchase(
@@ -167,13 +178,15 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                     if (error.status === 409 && error.details?.code === 'PURCHASE_OWNED_BY_ANOTHER_ACCOUNT') continue;
                     throw error;
                 }
+                if (matches) confirmation = { ...expected, status: 'credited',
+                    credits: value, alreadyProcessed: !result.applied, sandbox: purchase.is_sandbox === true };
                 if (result.applied) {
                     synced++;
                     amount += value;
                 }
             }
         }
-        return { synced, credits: amount };
+        return { synced, credits: amount, ...(expected ? { purchase: confirmation } : {}) };
     }
     return { sync, subscriptionStatus };
 }
