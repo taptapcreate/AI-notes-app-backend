@@ -1,6 +1,14 @@
 const mongoose = require('mongoose');
 const { DEFAULT_WELCOME_CREDITS } = require('../services/credit-policy');
 
+const PlatformReleaseSchema = new mongoose.Schema({
+    minVersion: { type: String, match: /^\d+\.\d+\.\d+$/ },
+    latestVersion: { type: String, match: /^\d+\.\d+\.\d+$/ },
+    forceUpdate: { type: Boolean, default: false },
+    storeUrl: String,
+    releaseNotes: [{ type: String, maxlength: 500 }],
+}, { _id: false });
+
 const AppConfigSchema = new mongoose.Schema({
     key: {
         type: String,
@@ -52,6 +60,8 @@ const AppConfigSchema = new mongoose.Schema({
         specialReward: { type: Number, default: 3 },
         specialMessage: { type: String, default: 'Special Offer! Watch an ad to earn 3 credits!' },
     },
+    ios: { type: PlatformReleaseSchema, default: undefined },
+    android: { type: PlatformReleaseSchema, default: undefined },
     // 4. Version Control
     minAppVersion: { type: String, default: '1.0.0' },
     latestAppVersion: { type: String, default: '1.0.0' },

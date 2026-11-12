@@ -352,6 +352,7 @@ function createCredits({
             throw new CreditError(
                 409,
                 'This purchase is already linked to another account',
+                { code: 'PURCHASE_OWNED_BY_ANOTHER_ACCOUNT' },
             );
         for (const alias of [...aliases].sort()) {
             const key = createHash('sha256').update(alias).digest('hex');
@@ -373,6 +374,7 @@ function createCredits({
                 throw new CreditError(
                     409,
                     'This purchase is already linked to another account',
+                    { code: 'PURCHASE_OWNED_BY_ANOTHER_ACCOUNT' },
                 );
         }
         const updated = await User.findOneAndUpdate(

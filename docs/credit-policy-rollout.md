@@ -195,3 +195,67 @@ node scripts/subscription-policy.js --apply
 ```
 
 This changes only the limit. It preserves purchased balances, existing usage, welcome grants, and accounts. Users already over the new limit regain their daily allowance at the next UTC midnight. The public config reports `subscriptionUsageVersion: 1` and `purchasedCreditFallback: true` when the updated backend is deployed.
+
+
+## Mandatory mobile update and November policy check
+
+The public configuration checked on 2026-11-12 still had
+`dailyFreeCreditsEnabled: true`, `freeDailyCredits: 2`, `welcomePackCredits: 8`,
+`generationBillingRequired: false`, and `subscriberDailyLimit: 10`.
+Deploying code does not overwrite an existing `master_config` document.
+The `creditPolicyVersion` capability flag alone does not mean daily grants are off.
+
+`/api/config` now returns both the existing flat fields and `ios`/`android` objects
+with `minVersion`, `latestVersion`, `forceUpdate`, `forceLatest`, `storeUrl`, and
+`releaseNotes`. This also supplies the field names expected by the existing update
+modal. Installed binaries that do not contain that modal cannot gain it just from
+this backend update; strict server billing still rejects their old unauthenticated
+AI requests after cutover. A popup is a UI prompt, not the enforcement boundary.
+
+Prepare each platform separately. Only require a version that is publicly available
+to that platform's users (including any staged rollout). For example, after iOS
+1.0.4 is available, the existing `ai_notes_app.appconfigs` master document can use:
+
+```js
+// Run against ai_notes_app, after confirming the iOS update is live.
+db.appconfigs.updateOne({ key: "master_config" }, { $set: {
+  "ios.minVersion": "1.0.4",
+  "ios.latestVersion": "1.0.4",
+  "ios.forceUpdate": true,
+  "ios.storeUrl": "https://apps.apple.com/app/id6757496314",
+  "ios.releaseNotes": [
+    "Updated one-time free credits and clear daily Pro usage.",
+    "Improved notes, replies, and native iPhone/iPad tools."
+  ]
+} });
+```
+
+Leave Android's minimum at its current supported release until the new Android
+version is available, then set `android.minVersion`, `android.latestVersion`,
+`android.forceUpdate: true`, and
+`android.storeUrl: "https://play.google.com/store/apps/details?id=com.taptapcreate.ainotes"`.
+Use the actual public version. Do not advance global `minAppVersion` to an iOS-only
+release, because it is the fallback for both platforms. New mobile clients check
+updates on launch and foreground, keep an existing mandatory prompt on a network
+failure, and handle store-opening failures without dismissing the prompt.
+
+To choose seven one-time credits for future eligible accounts, change
+`welcomePackCredits` to `7` in that master document. This does not replace existing
+claimed balances or give everyone another seven credits. Existing daily-only users
+who never claimed a welcome pack receive the configured one-time allowance when
+first synchronized after cutover; existing claimed/spent packs are preserved.
+
+After updated clients are available and the mandatory update is configured,
+run the documented `credits:policy -- --dry-run`, then
+`credits:policy -- --apply --clients-ready` from the backend environment.
+This disables daily grants and requires authenticated server billing together.
+Keep `subscriberDailyLimit: 10`. A subscription supplies ten *generations* per UTC
+day per connected AI Notes account, not ten transferable wallet credits; reset is
+00:00 UTC (05:30 in India). At the limit, updated apps offer waiting for reset or,
+only with explicit consent, spending a purchased credit. Failure and retry billing
+follow the idempotent generation protocol.
+
+Confirm the actual flags in `/api/config` after the switch. No live configuration
+was changed by the mandatory-update source fix. Android and iOS share this policy,
+so switching strict billing before Android is updated will block its legacy AI
+requests too, even if its update message has not appeared.

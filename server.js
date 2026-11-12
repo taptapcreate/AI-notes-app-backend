@@ -30,6 +30,7 @@ if (process.env.TRUST_PROXY_HOPS !== undefined) {
 const DB_NAME = 'ai_notes_app';
 
 const AppConfig = require('./models/AppConfig');
+const { releaseConfig } = require('./services/release-config');
 
 const CreditRegistration = require('./models/CreditRegistration');
 const PurchaseClaim = require('./models/PurchaseClaim');
@@ -1163,7 +1164,8 @@ app.post('/api/webhooks/revenuecat', createRevenueCatHandler({
 app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
-        res.json({ ...config.toObject(), welcomePackCredits: getWelcomeCredits(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true });
+        res.set('Cache-Control', 'no-store');
+        res.json({ ...config.toObject(), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

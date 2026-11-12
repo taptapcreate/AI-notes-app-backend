@@ -667,3 +667,23 @@ test('the config schema accepts zero and rejects fractional or out-of-range welc
     for (const amount of [-1, 2.5, 10001])
         assert.ok(new AppConfig({ welcomePackCredits: amount }).validateSync());
 });
+
+
+test('restored receipt keeps old packs with their owner and syncs a new Mac pack once', async () => {
+    const { recoveryCode: first } = await register('first-mac-account');
+    const { recoveryCode: second } = await register('second-mac-account');
+    await credits.grantPurchase(first, ['old-apple-store'], 100, 'test');
+    const purchases = createPurchases({ credits, apiKey: 'test', axios: { get: async () => ({ data: {
+        subscriber: { non_subscriptions: { ai_notes_lite_pack_credits: [
+            { store_transaction_id: 'old-apple-store' },
+            { store_transaction_id: 'new-mac-store' },
+        ] } },
+    } }) } });
+    const user = await User.findOne({ recoveryCode: second }).lean();
+    assert.equal((await purchases.sync(user, { required: true })).credits, 100);
+    assert.equal((await purchases.sync(user, { required: true })).credits, 0);
+    assert.equal((await credits.balance(first)).credits, 100);
+    assert.equal((await credits.balance(second)).credits, 100);
+    await assert.rejects(credits.grantPurchase(second, ['old-apple-store'], 100, 'test'),
+        error => error.status === 409 && error.details.code === 'PURCHASE_OWNED_BY_ANOTHER_ACCOUNT');
+});

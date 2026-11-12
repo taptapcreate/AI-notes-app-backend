@@ -144,12 +144,20 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
                     continue;
                 const aliases = purchaseAliases(product, purchase);
                 if (!aliases.length) continue;
-                const result = await credits.grantPurchase(
-                    user.recoveryCode,
-                    aliases,
-                    value,
-                    'revenuecat_sync',
-                );
+                let result;
+                try {
+                    result = await credits.grantPurchase(
+                        user.recoveryCode,
+                        aliases,
+                        value,
+                        'revenuecat_sync',
+                    );
+                } catch (error) {
+                    // A restored Apple receipt may include historical packs already consumed
+                    // by another AI Notes account. Keep their ownership; sync newer purchases.
+                    if (error.status === 409 && error.details?.code === 'PURCHASE_OWNED_BY_ANOTHER_ACCOUNT') continue;
+                    throw error;
+                }
                 if (result.applied) {
                     synced++;
                     amount += value;

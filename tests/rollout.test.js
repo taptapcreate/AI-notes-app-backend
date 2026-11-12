@@ -147,6 +147,9 @@ test('the real application boots and mounts fixed routes without AI or external 
     assert.equal(config.body.dailyFreeCreditsEnabled, false);
     assert.equal(config.body.welcomePackCredits, 8);
     assert.equal(config.body.welcomeCreditsConfigurable, true);
+    assert.equal(config.body.ios.storeUrl, 'https://apps.apple.com/app/id6757496314');
+    assert.equal(config.body.android.latestVersion, '1.0.0');
+    assert.equal(config.body.android.forceUpdate, false);
     assert.equal(config.body.creditPolicyVersion, 'one-time-v1');
     assert.equal(config.body.generationBillingRequired, true);
     assert.equal(
