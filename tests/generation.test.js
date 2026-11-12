@@ -365,6 +365,46 @@ test('concurrent devices share one allowance and paid fallback requires an expli
     await request(code, id, body);
     assert.equal((await credits.balance(code)).credits, 2);
 });
+test('a Pro limit override applies only to that account and removing it keeps the usage count', async (t) => {
+    const custom = await account();
+    const standard = await account();
+    member = { isPro: true };
+    const request = await api(t);
+    assert.equal((await request(custom, randomUUID())).status, 200);
+    await User.updateOne({ recoveryCode: custom }, { $set: { subscriberDailyLimitOverride: 3 } });
+
+    const balance = await credits.balance(custom);
+    assert.equal(balance.subscriberDailyLimit, 3);
+    assert.equal(balance.subscriberDailyRemaining, 2);
+    assert.equal((await request(custom, randomUUID())).status, 200);
+    const third = await request(custom, randomUUID());
+    assert.equal(third.status, 200);
+    assert.equal(third.body.billing.subscriberDailyLimit, 3);
+    assert.equal(third.body.billing.subscriberDailyRemaining, 0);
+    assert.equal(third.body.billing.creditBalance.freeCreditsRemaining, 7);
+    const blocked = await request(custom, randomUUID());
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.subscriberDailyLimit, 3);
+
+    assert.equal((await credits.balance(standard)).subscriberDailyLimit, 2);
+    assert.equal((await credits.balance(standard)).subscriberDailyUsage, 0);
+
+    await User.updateOne({ recoveryCode: custom }, { $unset: { subscriberDailyLimitOverride: '' } });
+    const inherited = await credits.balance(custom);
+    assert.equal(inherited.subscriberDailyLimit, 2);
+    assert.equal(inherited.subscriberDailyUsage, 3);
+    assert.equal(inherited.subscriberDailyRemaining, 0);
+    assert.equal((await request(custom, randomUUID())).status, 429);
+
+    member = { isPro: false };
+    await User.updateOne({ recoveryCode: custom }, { $set: { subscriberDailyLimitOverride: 20 } });
+    const nonPro = await request(custom, randomUUID());
+    assert.equal(nonPro.status, 200);
+    assert.equal(nonPro.body.billing.hasProSubscription, false);
+    assert.equal(nonPro.body.billing.creditBalance.freeCreditsRemaining, 6);
+    assert.equal(nonPro.body.billing.subscriberDailyUsage, 3);
+});
+
 test('failed paid fallback refunds only the purchased credit and preserves daily usage', async () => {
     const code = await account();
     member = { isPro: true };

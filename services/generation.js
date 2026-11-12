@@ -1,4 +1,4 @@
-const { subscriptionUsage, getSubscriberDailyLimit } = require('./subscription-usage');
+const { subscriptionUsage } = require('./subscription-usage');
 const { createHash } = require('node:crypto');
 const { context } = require('./generation-context');
 const {
@@ -274,7 +274,6 @@ function createGeneration({
         const rules = policy(config);
         const membership = await entitlement(await credits.byCode(code));
         const pro = membership.isPro === true;
-        const limit = getSubscriberDailyLimit(config);
         try {
             return await transaction(async (session) => {
                 const duplicate = await GenerationRequest.findById(id)
@@ -287,12 +286,12 @@ function createGeneration({
                 if (!user)
                     throw new CreditError(401, 'Reconnect your AI account');
                 const timestamp = now();
+                const usage = subscriptionUsage(user, config, timestamp);
                 let reservation;
                 if (pro && body.billingMode !== 'purchased') {
                     const day = new Date(timestamp);
                     day.setUTCHours(0, 0, 0, 0);
-                    const usage = subscriptionUsage(user, config, timestamp);
-                    const count = usage.subscriberDailyUsage;
+                    const { subscriberDailyUsage: count, subscriberDailyLimit: limit } = usage;
                     const previous = user.lastRequestReset && new Date(user.lastRequestReset);
                     const sameDay = previous && previous >= day && previous < new Date(usage.subscriberResetAt);
                     if (count >= limit)

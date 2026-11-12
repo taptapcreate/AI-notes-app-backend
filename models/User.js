@@ -29,6 +29,12 @@ const UserSchema = new mongoose.Schema({
         default: Date.now,
     },
     // Rate limiting for subscribers
+    subscriberDailyLimitOverride: {
+        type: Number,
+        min: 1,
+        max: 10000,
+        validate: Number.isSafeInteger,
+    },
     dailyRequestCount: {
         type: Number,
         default: 0,
