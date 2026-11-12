@@ -104,7 +104,13 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
                 Date.parse(expiry) > Date.now() ||
                 Date.parse(grace) > Date.now()
             )
-                return { isPro: true };
+                return {
+                    isPro: true,
+                    plan: value.product_identifier.includes('monthly') ? 'monthly' : 'weekly',
+                    expiresAt: Number.isFinite(Date.parse(expiry))
+                        ? new Date(expiry).toISOString()
+                        : null,
+                };
         }
         return { isPro: false };
     }

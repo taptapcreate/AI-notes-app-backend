@@ -43,7 +43,7 @@ beforeEach(async () => {
     config = {
         dailyFreeCreditsEnabled: false,
         freeDailyCredits: 2,
-        welcomePackCredits: 8,
+        welcomePackCredits: 7,
         welcomePackVersion: 1,
         adRewards: { enabled: false, active: false, standardReward: 2 },
     };
@@ -56,8 +56,7 @@ beforeEach(async () => {
         now: () => new Date(time),
     });
 });
-const register = (deviceId = 'device-1') =>
-    credits.register({ platform: 'ios', deviceId });
+const register = (deviceId = 'device-1') => credits.register({ platform: 'ios', deviceId });
 const rejectsStatus = (promise, status) =>
     assert.rejects(promise, (error) => error.status === status);
 
@@ -75,8 +74,7 @@ async function withAPI(
             User,
             PendingPurchase,
             credits,
-            reconcilePurchases: (user) =>
-                purchases.sync(user, { required: true }),
+            reconcilePurchases: (user) => purchases.sync(user, { required: true }),
             secret: webhookSecret,
             logger,
         }),
@@ -100,17 +98,14 @@ async function withAPI(
             }),
     );
     return async (endpoint, body, authorization) => {
-        const response = await fetch(
-            `http://127.0.0.1:${server.address().port}${endpoint}`,
-            {
-                method: body === undefined ? 'GET' : 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(authorization ? { Authorization: authorization } : {}),
-                },
-                ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        const response = await fetch(`http://127.0.0.1:${server.address().port}${endpoint}`, {
+            method: body === undefined ? 'GET' : 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(authorization ? { Authorization: authorization } : {}),
             },
-        );
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
         return { status: response.status, body: await response.json() };
     };
 }
@@ -123,17 +118,12 @@ test('new accounts receive exactly seven once, not the legacy configured eight',
     for (let day = 0; day < 3; day++) {
         time.setUTCDate(time.getUTCDate() + 1);
         assert.equal((await register()).freeCreditsRemaining, 4);
-        assert.equal(
-            (await credits.balance(account.recoveryCode)).freeCreditsRemaining,
-            4,
-        );
+        assert.equal((await credits.balance(account.recoveryCode)).freeCreditsRemaining, 4);
     }
 });
 
 test('simultaneous registration of the same device creates one account and one grant', async () => {
-    const accounts = await Promise.all(
-        Array.from({ length: 24 }, () => register()),
-    );
+    const accounts = await Promise.all(Array.from({ length: 24 }, () => register()));
     assert.equal(new Set(accounts.map((a) => a.recoveryCode)).size, 1);
     assert.equal(await User.countDocuments(), 1);
     assert.equal(await CreditRegistration.countDocuments(), 1);
@@ -164,12 +154,7 @@ test('daily-mode users migrate once while paid and ad credits remain intact', as
         Array.from({ length: 20 }, () => credits.balance('LEGACYAA')),
     );
     assert.ok(
-        results.every(
-            (r) =>
-                r.freeCreditsRemaining === 7 &&
-                r.credits === 90 &&
-                r.adCredits === 2,
-        ),
+        results.every((r) => r.freeCreditsRemaining === 7 && r.credits === 90 && r.adCredits === 2),
     );
     await credits.use('LEGACYAA', 7);
     assert.equal((await credits.balance('LEGACYAA')).freeCreditsRemaining, 0);
@@ -190,10 +175,7 @@ test('existing welcome packs keep their remaining balance, even above seven', as
             totalFreeCredits: remaining,
             welcomePackVersion: 1,
         });
-        assert.equal(
-            (await credits.balance(code)).freeCreditsRemaining,
-            remaining,
-        );
+        assert.equal((await credits.balance(code)).freeCreditsRemaining, remaining);
     }
 });
 
@@ -213,11 +195,7 @@ test('concurrent deductions never spend more than the seven available credits', 
         Array.from({ length: 35 }, () => credits.use(code, 1)),
     );
     assert.equal(results.filter((r) => r.status === 'fulfilled').length, 7);
-    assert.ok(
-        results
-            .filter((r) => r.status === 'rejected')
-            .every((r) => r.reason.status === 400),
-    );
+    assert.ok(results.filter((r) => r.status === 'rejected').every((r) => r.reason.status === 400));
     assert.equal((await credits.balance(code)).totalAvailable, 0);
 });
 
@@ -236,18 +214,7 @@ test('deductions consume free, ad, then purchased credits in that order', async 
 
 test('invalid or insufficient deductions never change a balance', async () => {
     const { recoveryCode: code } = await register();
-    for (const amount of [
-        0,
-        -1,
-        0.5,
-        '1',
-        null,
-        undefined,
-        NaN,
-        Infinity,
-        10001,
-        {},
-    ]) {
+    for (const amount of [0, -1, 0.5, '1', null, undefined, NaN, Infinity, 10001, {}]) {
         await rejectsStatus(credits.use(code, amount), 400);
     }
     await rejectsStatus(credits.use(code, 8), 400);
@@ -258,10 +225,7 @@ test('recovery shares the remaining allowance and preserves the previous account
     const first = await register('first');
     const second = await register('second');
     await credits.use(first.recoveryCode, 5);
-    const result = await credits.recover(
-        first.recoveryCode.toLowerCase(),
-        second.recoveryCode,
-    );
+    const result = await credits.recover(first.recoveryCode.toLowerCase(), second.recoveryCode);
     assert.equal(result.freeCreditsRemaining, 2);
     assert.equal(result.totalAvailable, 2);
     assert.equal(await User.countDocuments(), 2);
@@ -272,19 +236,12 @@ test('recovery shares the remaining allowance and preserves the previous account
 test('invalid configuration fails closed without resetting or granting credits', async () => {
     const { recoveryCode: code } = await register();
     await credits.use(code, 2);
-    for (const value of [
-        null,
-        {},
-        { dailyFreeCreditsEnabled: true, freeDailyCredits: -1 },
-    ]) {
+    for (const value of [null, {}, { dailyFreeCreditsEnabled: true, freeDailyCredits: -1 }]) {
         config = value;
         await rejectsStatus(credits.balance(code), 503);
         await rejectsStatus(register('new'), 503);
     }
-    assert.equal(
-        (await User.findOne({ recoveryCode: code })).totalFreeCredits,
-        5,
-    );
+    assert.equal((await User.findOne({ recoveryCode: code })).totalFreeCredits, 5);
 });
 
 test('existing daily mode continues working until the explicit policy switch', async () => {
@@ -292,9 +249,7 @@ test('existing daily mode continues working until the explicit policy switch', a
     const { recoveryCode: code } = await register();
     assert.equal((await credits.use(code, 2)).totalAvailable, 0);
     time.setUTCDate(time.getUTCDate() + 1);
-    const results = await Promise.all(
-        Array.from({ length: 10 }, () => credits.balance(code)),
-    );
+    const results = await Promise.all(Array.from({ length: 10 }, () => credits.balance(code)));
     assert.ok(results.every((r) => r.freeCreditsRemaining === 2));
     config.dailyFreeCreditsEnabled = false;
     assert.equal((await credits.balance(code)).freeCreditsRemaining, 7);
@@ -338,12 +293,7 @@ test('one verified purchase cannot credit two accounts', async () => {
     const b = await register('b');
     const results = await Promise.allSettled(
         [a, b].map((account) =>
-            credits.grantPurchase(
-                account.recoveryCode,
-                ['same-tx'],
-                100,
-                'test',
-            ),
+            credits.grantPurchase(account.recoveryCode, ['same-tx'], 100, 'test'),
         ),
     );
     assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
@@ -356,10 +306,7 @@ test('one verified purchase cannot credit two accounts', async () => {
 
 test('parallel purchases and deductions do not overwrite each other', async () => {
     const { recoveryCode: code } = await register();
-    await User.updateOne(
-        { recoveryCode: code },
-        { $set: { totalFreeCredits: 0, credits: 100 } },
-    );
+    await User.updateOne({ recoveryCode: code }, { $set: { totalFreeCredits: 0, credits: 100 } });
     const results = await Promise.allSettled([
         ...Array.from({ length: 12 }, (_, i) =>
             credits.grantPurchase(code, [`tx-${i}`], 100, 'test'),
@@ -375,9 +322,7 @@ test('ad claims respect the disabled flag and grant at most once per day', async
     await rejectsStatus(credits.claimAd(code), 403);
     config.adRewards.enabled = true;
     config.adRewards.active = true;
-    const results = await Promise.all(
-        Array.from({ length: 15 }, () => credits.claimAd(code)),
-    );
+    const results = await Promise.all(Array.from({ length: 15 }, () => credits.claimAd(code)));
     assert.equal(results.filter((r) => r.success).length, 1);
     assert.equal((await credits.balance(code)).adCredits, 2);
     assert.equal((await credits.balance(code)).totalAvailable, 9);
@@ -404,14 +349,8 @@ test('HTTP responses preserve mobile fields and ignore client welcome grant valu
         currentCode: null,
     });
     assert.equal(recovered.body.totalAvailable, 0);
-    assert.equal(
-        (await api('/api/credits/balance/' + code)).body.freeCreditsRemaining,
-        0,
-    );
-    assert.equal(
-        (await api('/api/credits/use', { code, amount: -1 })).status,
-        400,
-    );
+    assert.equal((await api('/api/credits/balance/' + code)).body.freeCreditsRemaining, 0);
+    assert.equal((await api('/api/credits/use', { code, amount: -1 })).status, 400);
 });
 
 test('purchase endpoint credits verified products, ignoring synthetic client IDs and amounts', async (t) => {
@@ -465,10 +404,7 @@ test('unavailable purchase verification never trusts the client or grants paid c
     });
     assert.equal(result.status, 503);
     assert.equal((await credits.balance(code)).credits, 0);
-    assert.equal(
-        (await api('/api/credits/balance/' + code)).body.freeCreditsRemaining,
-        7,
-    );
+    assert.equal((await api('/api/credits/balance/' + code)).body.freeCreditsRemaining, 7);
 });
 
 test('unknown, refunded, sandbox, and malformed verified purchases are not granted', async () => {
@@ -506,40 +442,19 @@ test('webhooks require a configured secret and never grant for TEST events', asy
         app_user_id: code,
         transaction_id: 'fake',
     };
+    assert.equal((await api('/api/webhooks/revenuecat', { event })).status, 401);
     assert.equal(
-        (await api('/api/webhooks/revenuecat', { event })).status,
+        (await api('/api/webhooks/revenuecat', { event }, 'Bearer your_secret_here')).status,
         401,
     );
     assert.equal(
-        (
-            await api(
-                '/api/webhooks/revenuecat',
-                { event },
-                'Bearer your_secret_here',
-            )
-        ).status,
-        401,
-    );
-    assert.equal(
-        (
-            await api(
-                '/api/webhooks/revenuecat',
-                { event },
-                'Bearer test-hook-secret',
-            )
-        ).status,
+        (await api('/api/webhooks/revenuecat', { event }, 'Bearer test-hook-secret')).status,
         200,
     );
     assert.equal((await credits.balance(code)).credits, 0);
     const unconfigured = await withAPI(t, undefined, '');
     assert.equal(
-        (
-            await unconfigured(
-                '/api/webhooks/revenuecat',
-                { event },
-                'your_secret_here',
-            )
-        ).status,
+        (await unconfigured('/api/webhooks/revenuecat', { event }, 'your_secret_here')).status,
         503,
     );
 });
@@ -642,8 +557,7 @@ test('legacy credited purchase learns store aliases without another grant', asyn
     );
     assert.equal(webhook.status, 200);
     assert.equal(
-        (await credits.grantPurchase(code, ['old-store-id'], 100, 'webhook'))
-            .applied,
+        (await credits.grantPurchase(code, ['old-store-id'], 100, 'webhook')).applied,
         false,
     );
     assert.equal((await credits.balance(code)).credits, 100);
@@ -695,4 +609,61 @@ test('pending purchases require admin authorization and link idempotently', asyn
     );
     assert.equal((await credits.balance(code)).credits, 100);
     assert.equal((await PendingPurchase.findOne()).status, 'processed');
+});
+
+test('changing the configured welcome grant affects new accounts without refilling existing users', async () => {
+    config.welcomePackCredits = 11;
+    const first = await register('configured-first');
+    assert.equal(first.freeCreditsRemaining, 11);
+    assert.equal(first.welcomePackCredits, 11);
+    await credits.use(first.recoveryCode, 4);
+    config.welcomePackCredits = 20;
+    const second = await register('configured-second');
+    assert.equal(second.freeCreditsRemaining, 20);
+    const existing = await credits.balance(first.recoveryCode);
+    assert.equal(existing.freeCreditsRemaining, 7);
+    assert.equal(existing.welcomePackCredits, 20);
+    config.welcomePackCredits = 2;
+    assert.equal((await credits.balance(second.recoveryCode)).freeCreditsRemaining, 20);
+    assert.equal((await register('configured-third')).freeCreditsRemaining, 2);
+});
+
+test('a zero welcome allowance is claimed once and is not granted later when the policy increases', async () => {
+    config.welcomePackCredits = 0;
+    const first = await register('zero-grant');
+    assert.equal(first.totalAvailable, 0);
+    const stored = await User.findOne({ recoveryCode: first.recoveryCode });
+    assert.ok(stored.welcomeGrantClaimedAt);
+    config.welcomePackCredits = 12;
+    assert.equal((await register('zero-grant')).totalAvailable, 0);
+    assert.equal((await register('new-grant')).freeCreditsRemaining, 12);
+});
+
+test('legacy configuration without a welcome amount uses the seven-credit default', async () => {
+    delete config.welcomePackCredits;
+    assert.equal((await register()).freeCreditsRemaining, 7);
+});
+
+test('invalid database welcome amounts fail before registering or granting credits', async () => {
+    for (const amount of [-1, 1.5, '12', null, 10001, NaN, Infinity]) {
+        config.welcomePackCredits = amount;
+        await rejectsStatus(register('bad-policy'), 503);
+    }
+    assert.equal(await User.countDocuments(), 0);
+});
+
+test('concurrent requests grant the configured amount once for one device', async () => {
+    config.welcomePackCredits = 13;
+    const accounts = await Promise.all(
+        Array.from({ length: 24 }, () => register('one-configured-grant')),
+    );
+    assert.equal(new Set(accounts.map((account) => account.recoveryCode)).size, 1);
+    assert.ok(accounts.every((account) => account.freeCreditsRemaining === 13));
+    assert.equal(await User.countDocuments(), 1);
+});
+
+test('the config schema accepts zero and rejects fractional or out-of-range welcome amounts', async () => {
+    assert.equal(new AppConfig({ welcomePackCredits: 0 }).validateSync(), undefined);
+    for (const amount of [-1, 2.5, 10001])
+        assert.ok(new AppConfig({ welcomePackCredits: amount }).validateSync());
 });

@@ -13,12 +13,11 @@ const AppConfig = require('../models/AppConfig');
 const User = require('../models/User');
 const exec = promisify(execFile);
 let mongo, temporary, configServer, configURL;
+let configurableWelcomeCredits = true;
 before(async () => {
     mongo = await MongoMemoryServer.create({ binary: { version: '8.0.17' } });
     await mongoose.connect(mongo.getUri(), { dbName: 'ai_notes_app' });
-    temporary = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'ai-notes-credit-rollout-'),
-    );
+    temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-notes-credit-rollout-'));
     await Promise.all([AppConfig.init(), User.init()]);
     configServer = http.createServer((req, res) => {
         res.setHeader('Content-Type', 'application/json');
@@ -26,6 +25,7 @@ before(async () => {
             JSON.stringify({
                 generationBillingVersion: 2,
                 creditPolicyVersion: 'one-time-v1',
+                welcomeCreditsConfigurable: configurableWelcomeCredits,
             }),
         );
     });
@@ -75,9 +75,7 @@ test('policy inspection is read-only; apply preserves versions, balances, and ot
             welcomePackVersion: 1,
         },
     ]);
-    const beforeUsers = JSON.stringify(
-        await User.find().sort({ recoveryCode: 1 }).lean(),
-    );
+    const beforeUsers = JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean());
     const script = path.resolve(__dirname, '../scripts/one-time-credits.js');
     const run = async (args) => {
         const { stdout } = await exec(process.execPath, [script, ...args], {
@@ -90,32 +88,27 @@ test('policy inspection is read-only; apply preserves versions, balances, and ot
     assert.equal(inspected.mode, 'dry-run');
     assert.equal(inspected.eligibleForOneTimeGrant, 1);
     assert.equal((await AppConfig.findOne()).dailyFreeCreditsEnabled, true);
-    assert.equal(
-        JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()),
-        beforeUsers,
-    );
+    assert.equal(JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()), beforeUsers);
     await assert.rejects(run(['--apply']), /clients-ready/);
+    configurableWelcomeCredits = false;
+    await assert.rejects(run(['--apply', '--clients-ready']), /Deploy the updated backend/);
+    assert.equal((await AppConfig.findOne()).dailyFreeCreditsEnabled, true);
+    configurableWelcomeCredits = true;
     const applied = await run(['--apply', '--clients-ready']);
     assert.equal(applied.applied, true);
     const config = await AppConfig.findOne();
     assert.equal(config.dailyFreeCreditsEnabled, false);
     assert.equal(config.generationBillingRequired, true);
-    assert.equal(config.welcomePackCredits, 7);
+    assert.equal(config.welcomePackCredits, 8);
     assert.equal(config.welcomePackVersion, 4);
     assert.equal(config.freeDailyCredits, 2);
     assert.equal(config.globalAlert.title, 'Keep me');
-    assert.equal(
-        JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()),
-        beforeUsers,
-    );
+    assert.equal(JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()), beforeUsers);
     const backup = JSON.parse(await fs.readFile(applied.backup, 'utf8'));
     assert.equal(backup.dailyFreeCreditsEnabled, true);
     assert.equal((await fs.stat(applied.backup)).mode & 0o777, 0o600);
     await run(['--apply', '--clients-ready']);
-    assert.equal(
-        JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()),
-        beforeUsers,
-    );
+    assert.equal(JSON.stringify(await User.find().sort({ recoveryCode: 1 }).lean()), beforeUsers);
 });
 
 test('the real application boots and mounts fixed routes without AI or external purchase calls', async (t) => {
@@ -152,20 +145,20 @@ test('the real application boots and mounts fixed routes without AI or external 
     assert.equal((await request('/api/health')).body.status, 'ok');
     const config = await request('/api/config');
     assert.equal(config.body.dailyFreeCreditsEnabled, false);
-    assert.equal(config.body.welcomePackCredits, 7);
+    assert.equal(config.body.welcomePackCredits, 8);
+    assert.equal(config.body.welcomeCreditsConfigurable, true);
     assert.equal(config.body.creditPolicyVersion, 'one-time-v1');
     assert.equal(config.body.generationBillingRequired, true);
     assert.equal(
-        (await request('/api/notes', { type: 'text', content: 'Must update' }))
-            .status,
+        (await request('/api/notes', { type: 'text', content: 'Must update' })).status,
         426,
     );
     const balance = await request('/api/credits/balance/DAILYAAA');
-    assert.equal(balance.body.freeCreditsRemaining, 7);
+    assert.equal(balance.body.freeCreditsRemaining, 8);
     assert.equal(balance.body.credits, 50);
     const used = await request('/api/credits/use', {
         code: 'DAILYAAA',
-        amount: 7,
+        amount: 8,
     });
     assert.equal(used.body.remainingFreeCredits, 0);
     const recovered = await request('/api/credits/recover', {
@@ -185,4 +178,39 @@ test('the real application boots and mounts fixed routes without AI or external 
         ).status,
         503,
     );
+    // Simulate editing master_config while this same server process stays running.
+    await AppConfig.updateOne({ key: 'master_config' }, { $set: { welcomePackCredits: 15 } });
+    assert.equal((await request('/api/config')).body.welcomePackCredits, 15);
+    const newUser = await request('/api/credits/register', {
+        platform: 'android',
+        deviceId: 'dynamic-policy-account',
+    });
+    assert.equal(newUser.body.freeCreditsRemaining, 15);
+    assert.equal(newUser.body.welcomePackCredits, 15);
+    assert.equal((await request('/api/credits/balance/DAILYAAA')).body.freeCreditsRemaining, 0);
+
+    await AppConfig.updateOne({ key: 'master_config' }, { $set: { welcomePackCredits: 0 } });
+    const zeroUser = await request('/api/credits/register', {
+        platform: 'android',
+        deviceId: 'zero-policy-account',
+    });
+    assert.equal(zeroUser.body.freeCreditsRemaining, 0);
+    await AppConfig.updateOne({ key: 'master_config' }, { $set: { welcomePackCredits: 12 } });
+    const zeroAgain = await request('/api/credits/register', {
+        platform: 'android',
+        deviceId: 'zero-policy-account',
+    });
+    assert.equal(zeroAgain.body.freeCreditsRemaining, 0);
+    assert.equal(zeroAgain.body.welcomePackCredits, 12);
+
+    await AppConfig.collection.updateOne(
+        { key: 'master_config' },
+        { $set: { welcomePackCredits: -5 } },
+    );
+    assert.equal((await request('/api/config')).status, 503);
+    assert.equal(
+        (await request('/api/credits/register', { deviceId: 'invalid-policy-account' })).status,
+        503,
+    );
+    await AppConfig.updateOne({ key: 'master_config' }, { $set: { welcomePackCredits: 12 } });
 });

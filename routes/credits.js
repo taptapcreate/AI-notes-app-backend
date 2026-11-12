@@ -46,6 +46,19 @@ function createCreditRouter({ credits, purchases, logger = console }) {
             return credits.balance(user.recoveryCode);
         }),
     );
+    // Read-only membership lookup. A failed provider check must not hide credit balances.
+    router.post(
+        '/subscription',
+        endpoint(async (req) => {
+            const user = await credits.byCode(req.body?.code);
+            const membership = await purchases.subscriptionStatus(user);
+            return {
+                status: membership.isPro ? 'active' : 'inactive',
+                plan: membership.plan || null,
+                expiresAt: membership.expiresAt || null,
+            };
+        }),
+    );
     // Legacy clients may still send version/credits. Neither can authorize a grant.
     router.post(
         '/sync-welcome-pack',

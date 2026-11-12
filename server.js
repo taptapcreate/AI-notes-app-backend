@@ -35,7 +35,7 @@ const CreditRegistration = require('./models/CreditRegistration');
 const PurchaseClaim = require('./models/PurchaseClaim');
 const { createCredits } = require('./services/credits');
 const { createPurchases } = require('./services/purchases');
-const { WELCOME_CREDITS } = require('./services/credit-policy');
+const { getWelcomeCredits } = require('./services/credit-policy');
 const { createCreditRouter } = require('./routes/credits');
 const { createRevenueCatHandler } = require('./routes/revenuecat');
 const { createPurchaseAdminRouter } = require('./routes/purchase-admin');
@@ -1163,9 +1163,9 @@ app.post('/api/webhooks/revenuecat', createRevenueCatHandler({
 app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
-        res.json({ ...config.toObject(), welcomePackCredits: WELCOME_CREDITS, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2 });
+        res.json({ ...config.toObject(), welcomePackCredits: getWelcomeCredits(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true });
     } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch config' });
+        res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }
 });
 

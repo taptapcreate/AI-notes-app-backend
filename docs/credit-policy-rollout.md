@@ -85,6 +85,10 @@ including `models`, `services`, `routes`, `scripts`, the lockfile and tests.
    }
    ```
 
+   The welcome amount above is an example. The script preserves the current
+   `master_config.welcomePackCredits` value instead of replacing it with seven.
+   Missing legacy values default to seven; zero is allowed.
+
    `welcomePackVersion`, purchased/ad balances, and existing welcome balances stay
    intact. The script never bulk-resets user balances. Keep the config backup
    outside an ephemeral Render filesystem if operational history is needed.
@@ -146,3 +150,48 @@ claims still stay spent if this code later switches back to one-time mode.
 References: [MongoDB transactions](https://mongoosejs.com/docs/transactions.html),
 [RevenueCat customer data](https://www.revenuecat.com/docs/api-v1/customer-info-model),
 [RevenueCat webhook fields](https://www.revenuecat.com/docs/integrations/webhooks/event-types-and-fields).
+
+
+## Database-managed welcome allowance
+
+After deploying the configurable-credit backend, edit `ai_notes_app.appconfigs`,
+document `{ key: "master_config" }`, field `welcomePackCredits`. Supported values
+are whole numbers from 0 to 10000; zero disables the initial free grant. Seven is
+only the default when the field is missing. The public config also reports `welcomeCreditsConfigurable: true`; the cutover
+script requires this capability before applying settings. The configured amount is read on each
+request and is returned by `/api/config` and credit balance responses, so later
+changes do not require another deployment or server restart.
+
+This setting controls future one-time grants when `dailyFreeCreditsEnabled` is
+false. The daily compatibility policy remains controlled separately by
+`dailyFreeCreditsEnabled` and `freeDailyCredits`. Follow the release sequence above
+before switching production out of daily mode. Verify the stored welcome amount
+before the switch; an existing database value now takes effect as written.
+
+Changing the amount does not reset existing remaining credits, remove purchased
+or ad credits, or re-grant a spent allowance. A user granted zero is still marked
+as having claimed the allowance, so increasing the global setting later does not
+refill that account. Do not clear claim markers to reset balances. Bulk balance
+changes are a separate operation and were not performed by this update.
+
+Invalid stored amounts fail with a configuration error instead of silently granting
+seven. The schema also validates amounts written through the Mongoose model.
+
+Validation: 50 isolated MongoDB/API tests pass. Tests change the configuration while
+the same server process runs and verify new grants, zero grants, existing balances,
+invalid values, concurrency and preservation of the selected amount during cutover.
+No production database values or deployment were changed by this code update.
+
+
+## Shared subscription allowance and purchased credits
+
+The default subscription allowance is 10 successful generations per account per UTC day. Existing databases keep their configured value until changed. Daily usage is shared across devices connected to the same recovery code. The balance endpoint returns the remaining allowance and the server's next reset timestamp. Explicit `billingMode: "purchased"` requests spend one purchased credit, preserve Pro access, and do not consume the daily allowance. Provider failures refund the reserved credit or daily slot.
+
+Deploy the updated backend and updated clients, then set the existing configuration to 10 using the database's `master_config.subscriberDailyLimit` field or run on a machine with the production `MONGODB_URI` configured:
+
+```sh
+node scripts/subscription-policy.js --dry-run
+node scripts/subscription-policy.js --apply
+```
+
+This changes only the limit. It preserves purchased balances, existing usage, welcome grants, and accounts. Users already over the new limit regain their daily allowance at the next UTC midnight. The public config reports `subscriptionUsageVersion: 1` and `purchasedCreditFallback: true` when the updated backend is deployed.

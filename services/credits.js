@@ -1,3 +1,4 @@
+const { subscriptionUsage } = require('./subscription-usage');
 const { createHash, randomInt } = require('node:crypto');
 const {
     CreditError,
@@ -234,7 +235,11 @@ function createCredits({
             { _id: user._id },
             { $set: { lastActive: now() } },
         );
-        return balance(await byCode(code), rules);
+        const confirmed = await byCode(code);
+        return {
+            ...balance(confirmed, rules),
+            ...subscriptionUsage(confirmed, await getAppConfig(), now()),
+        };
     }
 
     async function use(code, amount) {

@@ -324,3 +324,56 @@ test('purged result content leaves an idempotency record and cannot charge a lat
     assert.equal((await credits.balance(code)).totalAvailable, 6);
     assert.equal(await GenerationRequest.countDocuments(), 1);
 });
+
+test('shared subscription usage resets at the server UTC boundary without touching paid credits', async () => {
+    time = new Date('2026-11-12T23:59:59.000Z');
+    const code = await account();
+    member = { isPro: true };
+    await User.updateOne({ recoveryCode: code }, { $set: { credits: 5 } });
+    const { record } = await reserve(code);
+    await generation.finish(record._id, 200, { notes: 'Saved' });
+    const before = await credits.balance(code);
+    assert.equal(before.subscriberDailyUsage, 1);
+    assert.equal(before.subscriberDailyRemaining, 1);
+    assert.equal(before.subscriberResetAt, '2026-11-13T00:00:00.000Z');
+    time = new Date('2026-11-13T00:00:00.000Z');
+    const after = await credits.balance(code);
+    assert.equal(after.subscriberDailyUsage, 0);
+    assert.equal(after.subscriberDailyRemaining, 2);
+    assert.equal(after.credits, 5);
+});
+test('concurrent devices share one allowance and paid fallback requires an explicit request', async (t) => {
+    const code = await account();
+    member = { isPro: true };
+    await User.updateOne({ recoveryCode: code }, { $set: { credits: 3 } });
+    const request = await api(t);
+    const results = await Promise.all(Array.from({ length: 6 }, () => request(code, randomUUID())));
+    assert.equal(results.filter(result => result.status === 200).length, 2);
+    const blocked = results.find(result => result.status === 429).body;
+    assert.equal(blocked.code, 'SUBSCRIPTION_DAILY_LIMIT');
+    assert.equal(blocked.purchasedCreditsAvailable, 3);
+    assert.equal((await credits.balance(code)).credits, 3);
+    const id = randomUUID();
+    const body = { ...source, billingMode: 'purchased' };
+    const paid = await request(code, id, body);
+    assert.equal(paid.status, 200);
+    assert.equal(paid.body.billing.creditCost, 1);
+    assert.equal(paid.body.billing.hasProSubscription, true);
+    assert.equal(paid.body.pro, true);
+    assert.equal(paid.body.billing.subscriberDailyUsage, 2);
+    await request(code, id, body);
+    assert.equal((await credits.balance(code)).credits, 2);
+});
+test('failed paid fallback refunds only the purchased credit and preserves daily usage', async () => {
+    const code = await account();
+    member = { isPro: true };
+    await User.updateOne({ recoveryCode: code }, { $set: { credits: 1 } });
+    const before = await credits.balance(code);
+    const { record } = await reserve(code, randomUUID(), { ...source, billingMode: 'purchased' });
+    await generation.finish(record._id, 500, { error: 'Provider failed' });
+    const after = await credits.balance(code);
+    assert.equal(after.credits, before.credits);
+    assert.equal(after.freeCreditsRemaining, before.freeCreditsRemaining);
+    assert.equal(after.subscriberDailyUsage, before.subscriberDailyUsage);
+    await assert.rejects(reserve(code, randomUUID(), { ...source, billingMode: 'invalid' }), error => error.status === 400);
+});

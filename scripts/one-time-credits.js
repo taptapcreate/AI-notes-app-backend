@@ -5,19 +5,15 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const AppConfig = require('../models/AppConfig');
 const User = require('../models/User');
-const { WELCOME_CREDITS } = require('../services/credit-policy');
+const { getWelcomeCredits } = require('../services/credit-policy');
 
 async function main() {
     const args = process.argv.slice(2);
     if (
-        args.some(
-            (arg) => !['--apply', '--dry-run', '--clients-ready'].includes(arg),
-        ) ||
+        args.some((arg) => !['--apply', '--dry-run', '--clients-ready'].includes(arg)) ||
         (args.includes('--apply') && args.includes('--dry-run'))
     ) {
-        throw new Error(
-            'Usage: npm run credits:policy -- [--dry-run | --apply --clients-ready]',
-        );
+        throw new Error('Usage: npm run credits:policy -- [--dry-run | --apply --clients-ready]');
     }
     if (args.includes('--apply')) {
         if (!args.includes('--clients-ready'))
@@ -33,7 +29,8 @@ async function main() {
         const deployed = response.ok ? await response.json() : null;
         if (
             deployed?.generationBillingVersion !== 2 ||
-            deployed?.creditPolicyVersion !== 'one-time-v1'
+            deployed?.creditPolicyVersion !== 'one-time-v1' ||
+            deployed?.welcomeCreditsConfigurable !== true
         )
             throw new Error(
                 'Deploy the updated backend before switching credit policy. No policy was changed.',
@@ -45,10 +42,8 @@ async function main() {
         autoIndex: false,
     });
     const config = await AppConfig.findOne({ key: 'master_config' }).lean();
-    if (!config)
-        throw new Error(
-            'Existing master_config not found; no settings were changed',
-        );
+    if (!config) throw new Error('Existing master_config not found; no settings were changed');
+    const welcomeCredits = getWelcomeCredits(config);
     const report = {
         mode: args.includes('--apply') ? 'apply' : 'dry-run',
         database: 'ai_notes_app',
@@ -59,7 +54,7 @@ async function main() {
         },
         proposed: {
             dailyFreeCreditsEnabled: false,
-            welcomePackCredits: WELCOME_CREDITS,
+            welcomePackCredits: welcomeCredits,
             generationBillingRequired: true,
             welcomePackVersion: config.welcomePackVersion,
         },
@@ -98,23 +93,19 @@ async function main() {
                 dailyFreeCreditsEnabled: expected('dailyFreeCreditsEnabled'),
                 welcomePackCredits: expected('welcomePackCredits'),
                 welcomePackVersion: expected('welcomePackVersion'),
-                generationBillingRequired: expected(
-                    'generationBillingRequired',
-                ),
+                generationBillingRequired: expected('generationBillingRequired'),
             },
             {
                 $set: {
                     dailyFreeCreditsEnabled: false,
-                    welcomePackCredits: WELCOME_CREDITS,
+                    welcomePackCredits: welcomeCredits,
                     generationBillingRequired: true,
                     updatedAt: new Date(),
                 },
             },
         );
         if (!result.matchedCount)
-            throw new Error(
-                'Configuration changed during review; inspect again before applying',
-            );
+            throw new Error('Configuration changed during review; inspect again before applying');
         report.applied = true;
         report.backup = backup;
     }

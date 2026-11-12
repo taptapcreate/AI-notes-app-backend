@@ -1,3 +1,4 @@
+const { subscriptionUsage } = require('./subscription-usage');
 const { createHash } = require('node:crypto');
 const { context } = require('./generation-context');
 const {
@@ -22,6 +23,8 @@ function validateInput(endpoint, body) {
         throw new CreditError(400, 'Invalid AI request');
     if (Buffer.byteLength(JSON.stringify(body)) > 23 * 1024 * 1024)
         throw new CreditError(413, 'The source is too large');
+    if (body.billingMode !== undefined && body.billingMode !== 'purchased')
+        throw new CreditError(400, 'Invalid billing mode');
     const text = (value, max = 2000000) => {
         if (typeof value !== 'string' || !value.trim() || value.length > max)
             throw new CreditError(400, 'Enter valid source content');
@@ -271,7 +274,7 @@ function createGeneration({
         const rules = policy(config);
         const membership = await entitlement(await credits.byCode(code));
         const pro = membership.isPro === true;
-        const limit = config.subscriberDailyLimit ?? 100;
+        const limit = config.subscriberDailyLimit ?? 10;
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
             throw new CreditError(
                 503,
@@ -290,7 +293,7 @@ function createGeneration({
                     throw new CreditError(401, 'Reconnect your AI account');
                 const timestamp = now();
                 let reservation;
-                if (pro) {
+                if (pro && body.billingMode !== 'purchased') {
                     const day = new Date(timestamp);
                     day.setUTCHours(0, 0, 0, 0);
                     const previous = user.lastRequestReset
@@ -306,7 +309,8 @@ function createGeneration({
                     if (count >= limit)
                         throw new CreditError(
                             429,
-                            'Your subscription daily limit is reached. It resets at midnight UTC.',
+                            'Your daily subscription allowance is used. You can wait for the reset or choose to use a purchased credit.',
+                            { code: 'SUBSCRIPTION_DAILY_LIMIT', ...subscriptionUsage(user, config, timestamp), purchasedCreditsAvailable: user.credits || 0 },
                         );
                     const reset = sameDay ? previous : timestamp;
                     await User.updateOne(
@@ -331,8 +335,10 @@ function createGeneration({
                             402,
                             'No AI credits remain. Recover an existing account or purchase more credits.',
                         );
-                    const free = Math.min(current.freeCreditsRemaining, 1);
-                    const ad = Math.min(current.adCredits, 1 - free);
+                    if (body.billingMode === 'purchased' && current.credits < 1)
+                        throw new CreditError(402, 'No purchased credits remain. Your daily allowance will reset automatically.');
+                    const free = body.billingMode === 'purchased' ? 0 : Math.min(current.freeCreditsRemaining, 1);
+                    const ad = body.billingMode === 'purchased' ? 0 : Math.min(current.adCredits, 1 - free);
                     const paid = 1 - free - ad;
                     await User.updateOne(
                         { _id: user._id },
@@ -362,7 +368,7 @@ function createGeneration({
                             endpoint,
                             bodyHash,
                             state: 'pending',
-                            reservation,
+                            reservation: { ...reservation, membershipPro: pro },
                             leaseUntil: new Date(timestamp.getTime() + leaseMs),
                             expiresAt: new Date(timestamp.getTime() + 86400000),
                         },
@@ -398,14 +404,9 @@ function createGeneration({
                     : record.state === 'succeeded'
                       ? 1
                       : 0,
-                hasProSubscription: record.reservation.pro,
+                hasProSubscription: record.reservation.membershipPro ?? record.reservation.pro,
                 creditBalance: current,
-                subscriberDailyUsage: record.reservation.pro
-                    ? user.dailyRequestCount
-                    : 0,
-                subscriberDailyLimit: record.reservation.pro
-                    ? record.reservation.limit
-                    : undefined,
+                ...subscriptionUsage(user, await getAppConfig(), now()),
             },
         };
     }
@@ -465,7 +466,7 @@ function createGeneration({
                 res.status(record.httpStatus);
                 return send(await response(record));
             }
-            req.body.isPro = record.reservation.pro;
+            req.body.isPro = record.reservation.membershipPro ?? record.reservation.pro;
             if (endpoint === '/sentiment')
                 req.body.message = req.body.message ?? req.body.text;
             res.json = (value) => {
