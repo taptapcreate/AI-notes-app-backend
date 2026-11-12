@@ -32,10 +32,7 @@ function purchaseAliases(product, purchase) {
     return [...new Set(aliases)];
 }
 
-function createPurchases({ credits, axios, apiKey, allowSandbox = false, sandboxProTestAccounts = '' }) {
-    const sandboxProAccounts = new Set(
-        sandboxProTestAccounts.split(',').map(code => code.trim().toUpperCase()).filter(Boolean),
-    );
+function createPurchases({ credits, axios, apiKey, allowSandbox = false }) {
     async function customer(user, { required = false } = {}) {
         if (!apiKey) {
             if (required)
@@ -115,7 +112,10 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, sandbox
                 sandboxMembership = {
                     ...membership,
                     sandbox: true,
-                    isPro: allowSandbox || sandboxProAccounts.has(user.recoveryCode),
+                    isPro:
+                        allowSandbox ||
+                        subscription.store === 'app_store' ||
+                        subscription.store === 'mac_app_store',
                 };
             }
         }

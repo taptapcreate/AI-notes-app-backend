@@ -278,6 +278,7 @@ test('RevenueCat subscription status honors expiry, grace, known products and sa
         true,
     );
     subscriber.subscriptions[product].is_sandbox = true;
+    subscriber.subscriptions[product].store = 'play_store';
     assert.equal(
         (await purchases.subscriptionStatus({ recoveryCode: 'TESTCODE' }))
             .isPro,
@@ -379,24 +380,31 @@ test('failed paid fallback refunds only the purchased credit and preserves daily
 });
 
 
-test('only an explicitly enabled sandbox Pro account can generate from its daily allowance at zero credits', async (t) => {
-    const enabled = await account();
-    const unlisted = await account();
-    await User.updateMany({ recoveryCode: { $in: [enabled, unlisted] } }, {
-        $set: { totalFreeCredits: 0 },
-    });
+test('verified Apple sandbox Pro uses only its own daily allowance at zero credits', async (t) => {
+    const tester = await account();
+    const other = await account();
+    await User.updateOne({ recoveryCode: tester }, { $set: { totalFreeCredits: 0 } });
+
     const product = 'ai_notes_pro_monthly_subscription';
+    const subscription = { is_sandbox: true, store: 'mac_app_store' };
+    const entitlement = { product_identifier: product, expires_date: '2099-01-01' };
+    const subscriber = {
+        entitlements: { pro: entitlement },
+        subscriptions: { [product]: subscription },
+        non_subscriptions: {
+            ai_notes_lite_pack_credits: [{ id: 'sandbox-credit-pack', is_sandbox: true }],
+        },
+    };
     const purchases = createPurchases({
         credits,
         apiKey: 'test-key',
-        sandboxProTestAccounts: enabled,
-        axios: { get: async () => ({ data: { subscriber: {
-            entitlements: { pro: { product_identifier: product, expires_date: '2099-01-01' } },
-            subscriptions: { [product]: { is_sandbox: true } },
-            non_subscriptions: { ai_notes_lite_pack_credits: [{ id: 'sandbox-credit-pack', is_sandbox: true }] },
-        } } }) },
+        axios: {
+            get: async (url) => ({
+                data: { subscriber: url.endsWith('/' + tester) ? subscriber : {} },
+            }),
+        },
     });
-    assert.deepEqual(await purchases.sync({ recoveryCode: enabled }), { synced: 0, credits: 0 });
+    assert.deepEqual(await purchases.sync(await credits.byCode(tester)), { synced: 0, credits: 0 });
     const service = createGeneration({
         User, GenerationRequest, credits,
         getAppConfig: async () => config,
@@ -404,16 +412,22 @@ test('only an explicitly enabled sandbox Pro account can generate from its daily
         now: () => new Date(time),
     });
     const request = await api(t, null, service);
-    const blocked = await request(unlisted, randomUUID());
-    assert.equal(blocked.status, 402);
-    assert.equal(blocked.body.code, 'SANDBOX_PRO_ALLOWANCE_DISABLED');
-    const first = await request(enabled, randomUUID());
+    const first = await request(tester, randomUUID());
     assert.equal(first.status, 200);
     assert.equal(first.body.billing.creditCost, 0);
     assert.equal(first.body.billing.subscriberDailyRemaining, 1);
+
+    subscription.store = 'app_store';
     config.subscriberDailyLimit = 15;
-    const second = await request(enabled, randomUUID());
+    const second = await request(tester, randomUUID());
+    assert.equal(second.status, 200);
     assert.equal(second.body.billing.subscriberDailyLimit, 15);
     assert.equal(second.body.billing.subscriberDailyRemaining, 13);
-    assert.equal((await credits.balance(enabled)).totalAvailable, 0);
+    assert.equal((await credits.balance(tester)).totalAvailable, 0);
+    const otherBalance = await credits.balance(other);
+    assert.equal(otherBalance.totalAvailable, 7);
+    assert.equal(otherBalance.subscriberDailyUsage, 0);
+
+    entitlement.expires_date = '2000-01-01';
+    assert.equal((await request(tester, randomUUID())).status, 402);
 });

@@ -46,7 +46,6 @@ const creditService = createCredits({ User, CreditRegistration, PurchaseClaim, g
 const purchaseService = createPurchases({
     credits: creditService, axios, apiKey: process.env.REVENUECAT_API_SECRET_KEY,
     allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
-    sandboxProTestAccounts: process.env.REVENUECAT_SANDBOX_PRO_TEST_ACCOUNTS,
 });
 const GenerationRequest = require('./models/GenerationRequest');
 const { createGeneration } = require('./services/generation');
