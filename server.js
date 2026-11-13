@@ -237,15 +237,15 @@ const generateWithRetry = async (maxTokens, content, retries = 3, delay = 2000) 
 // Note length instructions with token limits
 const lengthGuides = {
     brief: {
-        instruction: 'Provide a concise but informative summary. Include 5-7 bullet points covering the core concepts and key highlights. Keep it short but ensure the main context and important details are clear.',
+        instruction: 'Provide a concise but informative summary. Aim for 5-7 useful points when the source supports them; use fewer for short material. Keep it short but ensure the main context and important details are clear.',
         maxTokens: 1200
     },
     standard: {
-        instruction: 'Provide a comprehensive and well-rounded summary. Include 10-15 bullet points covering the main themes with sufficient explanations and important details. Provide a good level of depth without being overly exhaustive.',
+        instruction: 'Provide a comprehensive and well-rounded summary. Cover the main themes with sufficient explanations and important details; aim for 10-15 points only when justified by the source. Provide a good level of depth without being overly exhaustive.',
         maxTokens: 2500
     },
     detailed: {
-        instruction: 'Provide a very thorough and comprehensive analysis. Include 20-25 detailed bullet points that capture all core insights, strategic takeaways, and supporting nuances without page-by-page recitation.',
+        instruction: 'Provide a very thorough and comprehensive analysis. Develop the core insights, supporting evidence, explanations, and nuances without page-by-page recitation. Use as many points as the material warrants, without padding.',
         maxTokens: 5000 // Increased further for depth per user request
     },
 };
@@ -318,9 +318,10 @@ const styleGuides = {
 
 // ==================== NOTES ENDPOINT ====================
 const { appendNarration } = require('./services/walkthrough');
+const { buildNotePrompt } = require('./services/note-prompts');
 app.post('/api/notes', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', isPro = false } = req.body;
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', sourceKind, isPro = false } = req.body;
         const instruction = await appendNarration(requestedInstruction, req.body.narration, transcribe, generationSignal());
 
         if (!content) {
@@ -340,339 +341,31 @@ app.post('/api/notes', async (req, res) => {
             ? `IMPORTANT: Generate ALL content in ${language}. Provide the SAME level of detail and number of points as you would in English. Do NOT shorten or summarize when translating. Use natural ${language} phrasing.`
             : 'Keep the output in English.';
 
-        // PRO: Smarter Prompt Logic
-        const proInstruction = isPro
-            ? `
-    🌟 **PRO MODE ACTIVE (High Intelligence Analysis)**
-    - Use **Chain-of-Thought** reasoning to structure your output.
-    - Go deeper than surface level: Analyze *implications*, *unspoken context*, and *strategic value*.
-    - If explaining a concept, assume the user is intelligent but wants clarity (like Feynman Technique).
-    - If summarizing, prioritize *synthesizing ideas* over just listing facts.
-    - Use richer vocabulary and more precise terminology suitable for an expert audience.
-    `
-            : '';
-
-        // PRO: Distinct Formatting Logic
-        const proFormatting = isPro
-            ? `
-FORMAT YOUR RESPONSE AS:
-# [Professional Title]
-
-⭐ **Executive Summary**
-[A high-level synthesis of the core message (2-3 sentences). Not just a summary, but the "Bottom Line".]
-
-🧐 **Context & Analysis**
-[Why this matters, underlying concepts, or strategic importance]
-
-📝 **Detailed Breakdown**
-• Section headers in bold
-• Organized content with strict hierarchy
-• Sub-points for depth
-
-🚀 **Strategic Implications / Actionable Insights**
-• What to do next or how to apply this knowledge
-• Potential impact or hidden opportunities
-
-📌 **Key Takeaways**
-• [Critical point 1]
-• [Critical point 2]
-`
-            : `
-FORMAT YOUR RESPONSE AS:
-# Appropriate Title Based on Content
-
-• Section headers in bold
-• Organized content with bullet points
-• Sub-points indented properly
-
-## Key Takeaways
-• Most important point 1
-• Most important point 2
-• Most important point 3
-`;
-
-        let prompt = '';
+        const promptFor = (sourceContent = content) => buildNotePrompt({
+            type, sourceKind, content: sourceContent, instruction,
+            lengthInstruction, formatInstruction, toneInstruction, languageInstruction, isPro,
+            url: ['website', 'youtube'].includes(type) ? content : undefined,
+        });
         let result;
-
         switch (type) {
             case 'text':
-                prompt = `You are an expert AI assistant. Your task depends on the input content:
-    ${proInstruction}
-
-    1. **IF INPUT IS A QUESTION/INSTRUCTION** (e.g., "Explain Quantum Physics", "Write a poem"):
-       - **ANSWER** the question or **EXECUTE** the instruction directly.
-       - Do NOT summarize the request (e.g., don't say "The user asked for...").
-       - Provide the actual detailed answer/content in the "Detailed Notes" section.
-
-    2. **IF INPUT IS CONTENT** (e.g., an article, notes, meeting transcript):
-       - Transform it into perfectly organized, professional notes as usual.
-
-    INPUT CONTENT:
-    """
-    ${content}
-    """
-
-    LENGTH REQUIREMENT: ${lengthInstruction}
-    FORMAT REQUIREMENT: ${formatInstruction}
-    TONE REQUIREMENT: ${toneInstruction}
-    LANGUAGE REQUIREMENT: ${languageInstruction}
-USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
-
-INSTRUCTIONS:
-1. Create a clear, hierarchical structure with sections
-2. Extract major insights and high-level information
-3. Use bullet points (•) for lists, not dashes
-4. Bold important terms by surrounding them with **asterisks**
-5. Focus on a high-level synthesis and avoid unnecessary granular detail
-6. Add a "📌 Key Takeaways" section at the end
-
-${proFormatting}
-
-Generate the notes now:`;
-
-                result = await generateWithRetry(maxTokens, prompt);
+                result = await generateWithRetry(maxTokens, promptFor());
                 break;
-
             case 'image':
-                prompt = `You are an expert at analyzing images. Your task depends on the image content:
-    ${proInstruction}
-
-    1. **IF IMAGE CONTAINS A QUESTION/PROBLEM** (e.g., homework, exam question):
-       - **SOLVE** or **ANSWER** it.
-       - Explain the solution step-by-step in the "Detailed Notes" section.
-
-    2. **IF IMAGE IS CONTENT** (e.g., a diagram, screenshot, photo of notes):
-       - Analyze and extract the information into satisfying notes.
-
-    LENGTH REQUIREMENT: ${lengthInstruction}
-    FORMAT REQUIREMENT: ${formatInstruction}
-    TONE REQUIREMENT: ${toneInstruction}
-    LANGUAGE REQUIREMENT: ${languageInstruction}
-    USER INTENT/INSTRUCTION: ${instruction || 'None provided.'}
-
-    INSTRUCTIONS:
-    1. If text/handwriting: Transcribe accurately.
-    2. If diagram/chart: Explain insights and data.
-    3. If question: Provide the solution.
-    4. Apply requested Tone/Format/Language.
-    5. Prioritize high-level insights and strategic takeaways over minor details.
-
-FORMAT YOUR RESPONSE AS:
-📷 **Image Analysis Notes**
-
-**What This Shows:**
-[Brief description]
-
-**Extracted Content:**
-• [Organized bullet points of all information]
-
-📌 **Key Points**
-• [Important observations]
-
-Generate the notes now following all requirements:`;
-
-                result = await generateWithRetry(maxTokens, [
-                    prompt,
-                    {
-                        inlineData: {
-                            mimeType: 'image/jpeg',
-                            data: content,
-                        },
-                    },
-                ]);
-                break;
-
-            case 'voice': {
-                const transcript = await transcribe(content, generationSignal());
-                prompt = `You are an expert AI assistant. Create notes from the transcript of a voice recording:
-    ${proInstruction}
-
-    1. **IF AUDIO IS A QUESTION/INSTRUCTION** (e.g., "Tell me about the Event Loop", "How do I make pasta?"):
-       - **ANSWER** the question or **FULFILL** the request directly.
-       - The "Summary" should state the topic (e.g., "Explanation of Event Loop").
-       - The "Detailed Notes" MUST contain the **ACTUAL ANSWER/EXPLANATION**, NOT a description of the request (e.g., do NOT say "The speaker asked about...").
-       - Treat the audio as a prompt for you to answer.
-
-    2. **IF AUDIO IS RECORDED CONTENT** (e.g., meeting, lecture, voice memo):
-       - **TRANSCRIBE** and **SUMMARIZE** the content into organized notes.
-
-    LENGTH REQUIREMENT: ${lengthInstruction}
-    FORMAT REQUIREMENT: ${formatInstruction}
-    TONE REQUIREMENT: ${toneInstruction}
-    LANGUAGE REQUIREMENT: ${languageInstruction}
-    USER INTENT/INSTRUCTION: ${instruction || 'None provided.'}
-
-    INSTRUCTIONS:
-    1. Detect if this is a User Question vs. Recorded Content.
-    2. If Question: Provide the answer.
-    3. If Content: Summarize the transcript without inventing details.
-    4. Clean up filler words.
-    5. Apply requested Tone/Format/Language.
-    6. Keep summaries high-level and focus on the most impactful takeaways.
-
-FORMAT YOUR RESPONSE AS:
-🎙️ **Audio Notes**
-
-**Summary:**
-[2-3 sentence summary of what was discussed]
-
-**Detailed Notes:**
-• [Organized content by topic]
-
-📌 **Key Points & Action Items**
-• [Important takeaways]
-
-RECORDING TRANSCRIPT (JSON string):
-${JSON.stringify(transcript)}
-
-Generate the notes now following all requirements:`;
-
-                result = await generateWithRetry(maxTokens, prompt);
-                break;
-            }
-
             case 'pdf':
-                prompt = `You are an expert at analyzing documents. Analyze this PDF document thoroughly and create comprehensive notes.
-    ${proInstruction}
-
-LENGTH REQUIREMENT: ${lengthInstruction}
-FORMAT REQUIREMENT: ${formatInstruction}
-TONE REQUIREMENT: ${toneInstruction}
-LANGUAGE REQUIREMENT: ${languageInstruction}
-USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
-
-INSTRUCTIONS:
-1. Provide a clear high-level summary of the document's core message
-2. Extract major findings, strategic data, and key arguments
-3. Organize the content logically (headers, bullet points)
-4. Highlight critical requirements or milestones
-5. Avoid granular or page-by-page recitation; focus on the "Bottom Line"
-
-FORMAT YOUR RESPONSE AS:
-📄 **Document Analysis**
-
-**Overview:**
-[Brief summary of the document]
-
-**Detailed Content:**
-• [Organized detailed notes]
-
-**Key Takeaways:**
-• [Important points]
-
-Generate the notes now:`;
-
-                result = await generateWithRetry(maxTokens, [
-                    prompt,
-                    {
-                        inlineData: {
-                            mimeType: 'application/pdf',
-                            data: content,
-                        },
-                    },
-                ]);
+                result = await generateWithRetry(maxTokens, [promptFor(), {
+                    inlineData: { mimeType: type === 'pdf' ? 'application/pdf' : 'image/jpeg', data: content },
+                }]);
                 break;
-
+            case 'voice':
+                result = await generateWithRetry(maxTokens, promptFor(await transcribe(content, generationSignal())));
+                break;
             case 'website':
-                const websiteText = await fetchWebsiteContent(content);
-                prompt = `You are an expert web researcher. Summarize the following website content into clear, organized notes.
-    ${proInstruction}
-
-URL: ${content}
-
-WEBSITE CONTENT:
-"""
-${websiteText}
-"""
-
-LENGTH REQUIREMENT: ${lengthInstruction}
-FORMAT REQUIREMENT: ${formatInstruction}
-TONE REQUIREMENT: ${toneInstruction}
-LANGUAGE REQUIREMENT: ${languageInstruction}
-USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
-
-INSTRUCTIONS:
-1. Provide a high-level summary of the website's core arguments
-2. Extract only the most important data, dates, or quotes
-3. Ignore navigation elements, ads, or footer text
-4. Organize into 3-4 logical sections with clear headers
-
-FORMAT YOUR RESPONSE AS:
-🌐 **Website Summary**
-
-**Source:** [${content}](${content})
-
-# Title of Article/Page
-
-**Overview**
-[Brief summary of what this page is about]
-
-**Key Notes**
-• Point 1
-• Point 2
-• Point 3
-
-**Important Details**
-• Detail A
-• Detail B
-
-Generate the notes now:`;
-
-                result = await generateWithRetry(maxTokens, prompt);
+                result = await generateWithRetry(maxTokens, promptFor(await fetchWebsiteContent(content)));
                 break;
-
             case 'youtube':
-                const transcript = await fetchYouTubeTranscript(content);
-                prompt = `You are an expert video summarizer. Create detailed notes from this YouTube video transcript.
-    ${proInstruction}
-
-VIDEO URL: ${content}
-
-TRANSCRIPT:
-"""
-${transcript}
-"""
-
-LENGTH REQUIREMENT: ${lengthInstruction}
-FORMAT REQUIREMENT: ${formatInstruction}
-TONE REQUIREMENT: ${toneInstruction}
-LANGUAGE REQUIREMENT: ${languageInstruction}
-USER INTENT/INSTRUCTION: ${instruction || 'None provided. Generate standard professional notes.'}
-
-INSTRUCTIONS:
-1. Provide a clear high-level summary of the video's core message
-2. Group major themes and strategic insights into sections
-3. Identify the "Bottom Line" takeaways
-4. Ignore filler speech and avoid granular page-by-page or timestamp-by-timestamp recitation
-
-FORMAT YOUR RESPONSE AS:
-📺 **Video Notes**
-
-**Source:** [Watch Video](${content})
-
-# Video Title / Topic
-
-**Executive Summary**
-[Concise summary of the video]
-
-**Key Topics**
-## Topic 1
-• Detail
-• Detail
-
-## Topic 2
-• Detail
-• Detail
-
-**Key Takeaways**
-• Takeaway 1
-• Takeaway 2
-
-Generate the notes now:`;
-
-                result = await generateWithRetry(maxTokens, prompt);
+                result = await generateWithRetry(maxTokens, promptFor(await fetchYouTubeTranscript(content)));
                 break;
-
             default:
                 return res.status(400).json({ error: 'Invalid input type' });
         }

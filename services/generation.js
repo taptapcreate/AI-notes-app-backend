@@ -32,6 +32,7 @@ function validateInput(endpoint, body) {
     };
     if (body.narration !== undefined && (endpoint !== '/notes' || body.type !== 'image')) throw new CreditError(400, 'Narration requires walkthrough image frames');
     if (endpoint === '/notes') {
+        if (body.sourceKind !== undefined && (!['compare', 'walkthrough', 'screenshot', 'sketch', 'image'].includes(body.sourceKind) || body.type !== 'image')) throw new CreditError(400, 'Invalid visual source kind');
         try { validateNarration(body.narration); } catch (e) { throw new CreditError(400, e.message); }
         if (
             !['text', 'image', 'voice', 'pdf', 'website', 'youtube'].includes(
