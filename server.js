@@ -90,12 +90,19 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 // Helper: Fetch Website Content
 const fetchWebsiteContent = async (url) => {
     try {
-        const { data } = await axios.get(url, {
+        const { data, headers } = await axios.get(url, {
+            timeout: 15000,
+            maxContentLength: 2 * 1024 * 1024,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         });
+        if (typeof data !== 'string' || !/^text\/(html|plain)(?:;|$)/i.test(headers['content-type'] || ''))
+            throw new Error('Unsupported page content');
         const $ = cheerio.load(data);
+        if ($('meta[name="robots"]').attr('content')?.split(/[\s,]+/).includes('noai') ||
+            /just a moment|access denied|verify (?:that )?you are human|attention required/i.test($('title').text()))
+            throw new Error('Restricted page');
 
         // Remove scripts, styles, and ads
         $('script').remove();
@@ -113,12 +120,11 @@ const fetchWebsiteContent = async (url) => {
             }
         });
 
-        return content.substring(0, 10000); // Limit context window (Optimized from 20k)
-    } catch (error) {
-        if (error.response && error.response.status === 403) {
-            throw new Error('WEB_ACCESS_BLOCKED: This website blocks automated access. Please copy/paste content manually.');
-        }
-        throw new Error(`Failed to fetch website: ${error.message}`);
+        if (headers['content-type'].startsWith('text/plain')) content = data.trim();
+        if (!content.trim()) throw new Error('Empty page');
+        return content.substring(0, 10000);
+    } catch {
+        throw new Error('WEB_ACCESS_BLOCKED: AI Notes couldn’t read this page. Paste the article text instead.');
     }
 };
 

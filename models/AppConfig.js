@@ -68,6 +68,7 @@ const AppConfigSchema = new mongoose.Schema({
     },
     ios: { type: PlatformReleaseSchema, default: undefined },
     android: { type: PlatformReleaseSchema, default: undefined },
+    macos: { type: PlatformReleaseSchema, default: undefined },
     // 4. Version Control
     minAppVersion: { type: String, default: '1.0.0' },
     latestAppVersion: { type: String, default: '1.0.0' },

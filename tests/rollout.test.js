@@ -2,12 +2,13 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { fork, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const { randomUUID } = require('node:crypto');
 const { once } = require('node:events');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const http = require('node:http');
 const AppConfig = require('../models/AppConfig');
 const User = require('../models/User');
@@ -15,7 +16,7 @@ const exec = promisify(execFile);
 let mongo, temporary, configServer, configURL;
 let configurableWelcomeCredits = true;
 before(async () => {
-    mongo = await MongoMemoryServer.create({ binary: { version: '8.0.17' } });
+    mongo = await MongoMemoryReplSet.create({ binary: { version: '8.0.17' }, replSet: { count: 1 } });
     await mongoose.connect(mongo.getUri(), { dbName: 'ai_notes_app' });
     temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-notes-credit-rollout-'));
     await Promise.all([AppConfig.init(), User.init()]);
@@ -113,7 +114,7 @@ test('policy inspection is read-only; apply preserves versions, balances, and ot
 test('the real application boots and mounts fixed routes without AI or external purchase calls', async (t) => {
     const child = fork(path.resolve(__dirname, 'fixtures/server.cjs'), [], {
         cwd: temporary,
-        env: environment(),
+        env: { ...environment(), AI_NOTES_TEST_WEB: '1', REVENUECAT_API_SECRET_KEY: 'fixture-key' },
         silent: true,
     });
     let errors = '';
@@ -180,6 +181,32 @@ test('the real application boots and mounts fixed routes without AI or external 
         ).status,
         503,
     );
+    // A restricted article must fail before AI runs, with no net wallet debit.
+    for (const path of ['blocked', 'interstitial']) {
+        const blocked = await fetch(`http://127.0.0.1:${port}/api/notes`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer DAILYAAA',
+                'Idempotency-Key': randomUUID(),
+            },
+            body: JSON.stringify({ type: 'website', content: `https://example.com/${path}` }),
+        });
+        const rejected = await blocked.json();
+        assert.equal(blocked.status, 502, rejected.error);
+        assert.match(rejected.error, /^WEB_ACCESS_BLOCKED:/);
+        assert.equal(rejected.billing.charged, false);
+        assert.equal(rejected.billing.creditBalance.credits, 50);
+        assert.equal((await User.findOne({ recoveryCode: 'DAILYAAA' })).credits, 50);
+    }
+    await AppConfig.updateOne(
+        { key: 'master_config' },
+        { $set: { macos: { minVersion: '1.0.1', latestVersion: '1.0.2' } } },
+    );
+    const versions = (await request('/api/config')).body;
+    assert.equal(versions.macos.minVersion, '1.0.1');
+    assert.equal(versions.macos.latestVersion, '1.0.2');
+    assert.equal(versions.ios.minVersion, '1.0.0');
     // Simulate editing master_config while this same server process stays running.
     await AppConfig.updateOne({ key: 'master_config' }, { $set: { welcomePackCredits: 15 } });
     assert.equal((await request('/api/config')).body.welcomePackCredits, 15);

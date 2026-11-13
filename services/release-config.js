@@ -17,7 +17,7 @@ function storeURL(value, platform) {
     return STORES[platform];
 }
 function releaseConfig(config) {
-    return Object.fromEntries(['ios', 'android'].map(platform => {
+    const platforms = Object.fromEntries(['ios', 'android'].map(platform => {
         const settings = config[platform] || {};
         const minVersion = validVersion(settings.minVersion) ? settings.minVersion
             : validVersion(config.minAppVersion) ? config.minAppVersion : '1.0.0';
@@ -34,5 +34,20 @@ function releaseConfig(config) {
             releaseNotes: Array.isArray(settings.releaseNotes) ? settings.releaseNotes.filter(note => typeof note === 'string' && note.trim()).slice(0, 10) : [],
         }];
     }));
+    // A mobile rollout must never force an update on the Mac.
+    if (config.macos) {
+        const { minVersion, latestVersion, storeUrl, forceUpdate, releaseNotes } = config.macos;
+        const minimum = validVersion(minVersion) ? minVersion : '0.0.0';
+        const latest = validVersion(latestVersion) && compare(latestVersion, minimum) >= 0
+            ? latestVersion : minimum;
+        platforms.macos = {
+            minVersion: minimum,
+            latestVersion: latest,
+            forceLatest: forceUpdate === true,
+            storeUrl: storeURL(storeUrl, 'ios'),
+            releaseNotes: Array.isArray(releaseNotes) ? releaseNotes.filter(note => typeof note === 'string' && note.trim()).slice(0, 10) : [],
+        };
+    }
+    return platforms;
 }
 module.exports = { releaseConfig };
