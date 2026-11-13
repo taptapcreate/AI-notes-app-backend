@@ -1,4 +1,5 @@
 const { subscriptionUsage } = require('./subscription-usage');
+const { validateNarration } = require('./walkthrough');
 const { createHash } = require('node:crypto');
 const { context } = require('./generation-context');
 const {
@@ -29,7 +30,9 @@ function validateInput(endpoint, body) {
         if (typeof value !== 'string' || !value.trim() || value.length > max)
             throw new CreditError(400, 'Enter valid source content');
     };
+    if (body.narration !== undefined && (endpoint !== '/notes' || body.type !== 'image')) throw new CreditError(400, 'Narration requires walkthrough image frames');
     if (endpoint === '/notes') {
+        try { validateNarration(body.narration); } catch (e) { throw new CreditError(400, e.message); }
         if (
             !['text', 'image', 'voice', 'pdf', 'website', 'youtube'].includes(
                 body.type,

@@ -317,9 +317,11 @@ const styleGuides = {
 };
 
 // ==================== NOTES ENDPOINT ====================
+const { appendNarration } = require('./services/walkthrough');
 app.post('/api/notes', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction = '', isPro = false } = req.body;
+        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', isPro = false } = req.body;
+        const instruction = await appendNarration(requestedInstruction, req.body.narration, transcribe, generationSignal());
 
         if (!content) {
             return res.status(400).json({ error: 'Content is required' });
@@ -1046,7 +1048,7 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true });
+        res.json({ ...config.toObject(), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true, desktopWalkthroughNarration: true });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }
