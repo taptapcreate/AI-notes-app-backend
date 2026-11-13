@@ -1,8 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const OpenAI = require('openai');
-const { pdfPart, InvalidPdf } = require('./services/openrouter-pdf');
+const { MODEL, InvalidSource, createOpenRouter } = require('./services/openrouter');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -78,105 +77,12 @@ app.use(express.json({ limit: '25mb' }));
 app.use('/api', createMaintenanceGate({ getAppConfig }));
 app.use('/api', generationService.middleware);
 
-// Legacy audio processing still uses Gemini.
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// Initialize OpenAI client for OpenRouter
-const openai = new OpenAI({
-    baseURL: "https://openrouter.ai/api/v1",
+const { complete, transcribe } = createOpenRouter(new OpenAI({
+    baseURL: 'https://openrouter.ai/api/v1',
     apiKey: process.env.OPEN_ROUTER_API_KEY,
     timeout: 60000,
     maxRetries: 0,
-});
-
-// Get the model with configuration
-const getModel = (maxTokens = 2048, modelName = 'openai/gpt-4o-mini') => {
-    // If the model is an OpenRouter/OpenAI model
-    if (modelName.startsWith('openai/') || modelName === 'gpt-4o-mini') {
-        const actualModelName = modelName.startsWith('openai/') ? modelName : `openai/${modelName}`;
-        return {
-            isOpenRouter: true,
-            modelName: actualModelName,
-            maxTokens: maxTokens,
-            generateContent: async (content) => {
-                let messages = [];
-                let hasPdf = false;
-                if (typeof content === 'string') {
-                    messages = [{ role: 'user', content: content }];
-                } else if (Array.isArray(content)) {
-                    let userContent = [];
-                    for (const item of content) {
-                        if (typeof item === 'string') {
-                            userContent.push({ type: 'text', text: item });
-                        } else if (item.inlineData) {
-                            const mimeType = item.inlineData.mimeType;
-                            const base64Data = item.inlineData.data;
-                            if (mimeType === 'application/pdf') {
-                                userContent.push(pdfPart(base64Data));
-                                hasPdf = true;
-                            } else if (mimeType.startsWith('image/')) {
-                                userContent.push({
-                                    type: 'image_url',
-                                    image_url: { url: `data:${mimeType};base64,${base64Data}` }
-                                });
-                            }
-                        }
-                    }
-                    messages = [{ role: 'user', content: userContent }];
-                }
-
-                const response = await openai.chat.completions.create({
-                    model: actualModelName,
-                    messages: messages,
-                    max_tokens: maxTokens,
-                    temperature: 0.7,
-                    top_p: 0.9,
-                    ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: 'mistral-ocr' } }] } : {}),
-                }, { signal: generationSignal() });
-
-                return {
-                    response: {
-                        text: () => response.choices[0]?.message?.content || ""
-                    }
-                };
-            },
-            generateContentStream: async (prompt) => {
-                const stream = await openai.chat.completions.create({
-                    model: actualModelName,
-                    messages: [{ role: 'user', content: prompt }],
-                    max_tokens: maxTokens,
-                    temperature: 0.7,
-                    top_p: 0.9,
-                    stream: true,
-                });
-                async function* geminiLikeStream() {
-                    for await (const chunk of stream) {
-                        const textContent = chunk.choices[0]?.delta?.content || "";
-                        if (textContent) {
-                            yield { text: () => textContent };
-                        }
-                    }
-                }
-                return { stream: geminiLikeStream() };
-            }
-        };
-    }
-
-    // Fallback to Gemini API
-    return genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-            temperature: 0.7,
-            topP: 0.9,
-            maxOutputTokens: maxTokens,
-        },
-    });
-};
-
-// Get the model for streaming responses
-const getStreamingModel = (maxTokens = 4096, modelName = 'openai/gpt-4o-mini') => {
-    return getModel(maxTokens, modelName);
-};
+}));
 
 // Helper: Sleep function for delays
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -303,10 +209,10 @@ const fetchYouTubeTranscript = async (url) => {
 };
 
 // Helper: API Call with Retry Logic (Exponential Backoff)
-const generateWithRetry = async (model, content, retries = 3, delay = 2000) => {
+const generateWithRetry = async (maxTokens, content, retries = 3, delay = 2000) => {
     try {
         generationSignal()?.throwIfAborted();
-        return await model.generateContent(content, { timeout: 60000, signal: generationSignal() });
+        return await complete(content, maxTokens, generationSignal());
     } catch (error) {
         const isRateLimit = error.message.includes('429') || error.message.includes('Too Many Requests');
         const isServiceUnavailable = error.message.includes('503') || error.message.includes('Overloaded');
@@ -314,7 +220,7 @@ const generateWithRetry = async (model, content, retries = 3, delay = 2000) => {
         if (retries > 0 && (isRateLimit || isServiceUnavailable)) {
             console.log(`⚠️ API Busy (Rate Limit). Retrying in ${delay / 1000}s... (${retries} attempts left)`);
             await sleep(delay);
-            return generateWithRetry(model, content, retries - 1, delay * 2);
+            return generateWithRetry(maxTokens, content, retries - 1, delay * 2);
         }
         throw error;
     }
@@ -516,8 +422,7 @@ ${proFormatting}
 
 Generate the notes now:`;
 
-                const textModel = getModel(maxTokens);
-                result = await generateWithRetry(textModel, prompt);
+                result = await generateWithRetry(maxTokens, prompt);
                 break;
 
             case 'image':
@@ -558,8 +463,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now following all requirements:`;
 
-                const visionModel = getModel(maxTokens);
-                result = await generateWithRetry(visionModel, [
+                result = await generateWithRetry(maxTokens, [
                     prompt,
                     {
                         inlineData: {
@@ -570,8 +474,9 @@ Generate the notes now following all requirements:`;
                 ]);
                 break;
 
-            case 'voice':
-                prompt = `You are an expert AI assistant. Your task depends on the audio content:
+            case 'voice': {
+                const transcript = await transcribe(content, generationSignal());
+                prompt = `You are an expert AI assistant. Create notes from the transcript of a voice recording:
     ${proInstruction}
 
     1. **IF AUDIO IS A QUESTION/INSTRUCTION** (e.g., "Tell me about the Event Loop", "How do I make pasta?"):
@@ -592,7 +497,7 @@ Generate the notes now following all requirements:`;
     INSTRUCTIONS:
     1. Detect if this is a User Question vs. Recorded Content.
     2. If Question: Provide the answer.
-    3. If Content: Transcribe and summarize.
+    3. If Content: Summarize the transcript without inventing details.
     4. Clean up filler words.
     5. Apply requested Tone/Format/Language.
     6. Keep summaries high-level and focus on the most impactful takeaways.
@@ -609,61 +514,14 @@ FORMAT YOUR RESPONSE AS:
 📌 **Key Points & Action Items**
 • [Important takeaways]
 
+RECORDING TRANSCRIPT (JSON string):
+${JSON.stringify(transcript)}
+
 Generate the notes now following all requirements:`;
 
-                const audioModel = getModel(maxTokens, 'gemini-1.5-flash');
-
-                // Try different mime types based on what Expo typically records
-                // iOS uses .m4a (audio/m4a), Android may use .3gp or .m4a
-                let audioMimeType = 'audio/mp4'; // Default fallback
-
-                // Try to detect from content or use common mobile formats
-                const supportedMimeTypes = ['audio/mp4', 'audio/m4a', 'audio/mpeg', 'audio/wav'];
-
-                try {
-                    result = await generateWithRetry(audioModel, [
-                        prompt,
-                        {
-                            inlineData: {
-                                mimeType: audioMimeType,
-                                data: content,
-                            },
-                        },
-                    ]);
-                } catch (audioError) {
-                    // If audio processing fails, try with a transcription-only approach
-                    console.log('Direct audio failed, attempting text-based processing');
-
-                    // Fall back to asking for help with the audio
-                    const fallbackPrompt = `The user has recorded an audio note but we couldn't process the audio directly.
-
-Please provide a template they can use to organize their voice notes:
-
-# Voice Notes Template
-
-**Recording Date:** Today's date
-
-**Main Topic:**
-Describe what the recording was about
-
-**Key Points Discussed:**
-• First key point
-• Second key point
-• Third key point
-
-**Action Items:**
-• ⏳ Task 1
-• ⏳ Task 2
-
-**Additional Notes:**
-Any other observations
-
----
-Tip: Try recording in a quieter environment for better results!`;
-
-                    result = await generateWithRetry(audioModel, fallbackPrompt);
-                }
+                result = await generateWithRetry(maxTokens, prompt);
                 break;
+            }
 
             case 'pdf':
                 prompt = `You are an expert at analyzing documents. Analyze this PDF document thoroughly and create comprehensive notes.
@@ -696,8 +554,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const pdfModel = getModel(maxTokens);
-                result = await generateWithRetry(pdfModel, [
+                result = await generateWithRetry(maxTokens, [
                     prompt,
                     {
                         inlineData: {
@@ -753,8 +610,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const webModel = getModel(maxTokens);
-                result = await generateWithRetry(webModel, prompt);
+                result = await generateWithRetry(maxTokens, prompt);
                 break;
 
             case 'youtube':
@@ -806,21 +662,20 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const ytModel = getModel(maxTokens);
-                result = await generateWithRetry(ytModel, prompt);
+                result = await generateWithRetry(maxTokens, prompt);
                 break;
 
             default:
                 return res.status(400).json({ error: 'Invalid input type' });
         }
 
-        let notes = result.response.text();
+        let notes = result.text;
 
         // Check if response was truncated (cut off mid-sentence)
-        const finishReason = result.response.candidates?.[0]?.finishReason;
+        const finishReason = result.finishReason;
 
         // Truncation cleanup instead of continuation (Saves tokens/cost)
-        if (finishReason === 'MAX_TOKENS') {
+        if (finishReason === 'length') {
             console.log('Notes truncated. Trimming last incomplete sentence to save cost.');
             const lastCompleteEnd = Math.max(
                 notes.lastIndexOf('. '),
@@ -836,12 +691,17 @@ Generate the notes now:`;
         res.json({ notes });
 
     } catch (error) {
-        if (error instanceof InvalidPdf) return res.status(400).json({ error: error.message });
+        if (error instanceof InvalidSource) return res.status(400).json({ error: error.message });
+        if (/^(WEB_ACCESS_BLOCKED|YOUTUBE_BLOCK):/.test(error.message)) {
+            return res.status(502).json({ error: error.message });
+        }
         console.error('Notes generation error:', { type: req.body?.type, status: error.status, code: error.code, name: error.name });
         res.status(502).json({
             error: req.body?.type === 'pdf'
                 ? 'AI Notes could not process this PDF. Try again, or choose an unlocked PDF with fewer pages.'
-                : 'AI Notes could not generate notes right now. Please try again.',
+                : req.body?.type === 'voice'
+                    ? 'AI Notes could not process this recording. Try again, or choose a shorter recording.'
+                    : 'AI Notes could not generate notes right now. Please try again.',
         });
     }
 });
@@ -951,9 +811,8 @@ IMPORTANT RULES:
 Generate ${replyCount} replies now:`;
         }
 
-        const model = getModel();
-        const result = await generateWithRetry(model, prompt);
-        const responseText = result.response.text();
+        const result = await generateWithRetry(2048, prompt);
+        const responseText = result.text;
 
         // Split the response into separate replies
         let replies = responseText.split('---REPLY---')
@@ -983,8 +842,8 @@ Generate ${replyCount} replies now:`;
         res.json({ replies });
 
     } catch (error) {
-        console.error('Reply generation error:', error);
-        res.status(500).json({ error: 'Failed to generate reply', details: error.message });
+        console.error('Reply generation error:', { status: error.status, code: error.code, name: error.name });
+        res.status(502).json({ error: 'AI Notes could not generate replies right now. Please try again.' });
     }
 });
 
@@ -1046,22 +905,21 @@ FORMAT YOUR RESPONSE AS:
 Generate the follow-up response now:`;
         }
 
-        const model = getModel(2048, 'openai/gpt-4o-mini');
-        const result = await generateWithRetry(model, prompt);
-        const response = result.response.text();
+        const result = await generateWithRetry(2048, prompt);
+        const response = result.text;
 
         res.json({ response });
 
     } catch (error) {
-        console.error('Follow-up generation error:', error);
-        res.status(500).json({ error: 'Failed to generate follow-up', details: error.message });
+        console.error('Follow-up generation error:', { status: error.status, code: error.code, name: error.name });
+        res.status(502).json({ error: 'AI Notes could not generate a follow-up right now. Please try again.' });
     }
 });
 
 // ==================== SENTIMENT ENDPOINT ====================
 app.post('/api/sentiment', async (req, res) => {
     try {
-        const { text } = req.body;
+        const { text = req.body.message } = req.body;
         if (!text) return res.status(400).json({ error: 'Text is required' });
 
         const prompt = `Analyze the sentiment of this text.
@@ -1082,9 +940,8 @@ FORMAT AS JSON:
 }
 `;
 
-        const model = getModel(512, 'openai/gpt-4o-mini');
-        const result = await generateWithRetry(model, prompt);
-        const textResponse = result.response.text();
+        const result = await generateWithRetry(512, prompt);
+        const textResponse = result.text;
 
         // Extract JSON from response
         const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
@@ -1096,7 +953,7 @@ FORMAT AS JSON:
         }
 
     } catch (error) {
-        console.error('Sentiment error:', error);
+        console.error('Sentiment error:', { status: error.status, code: error.code, name: error.name });
         res.status(500).json({ error: 'Failed' });
     }
 });
@@ -1119,12 +976,11 @@ RULES:
 - Do not add explanations or notes
 `;
 
-        const model = getModel(2048, 'openai/gpt-4o-mini');
-        const result = await generateWithRetry(model, prompt);
-        res.json({ translatedText: result.response.text() });
+        const result = await generateWithRetry(2048, prompt);
+        res.json({ translatedText: result.text });
 
     } catch (error) {
-        console.error('Translate error:', error);
+        console.error('Translate error:', { status: error.status, code: error.code, name: error.name });
         res.status(500).json({ error: 'Failed' });
     }
 });
@@ -1146,12 +1002,11 @@ RULES:
 - Return ONLY the rewritten text, no explanations.
 `;
 
-        const model = getModel(2048, 'openai/gpt-4o-mini');
-        const result = await generateWithRetry(model, prompt);
-        res.json({ polishedText: result.response.text() });
+        const result = await generateWithRetry(2048, prompt);
+        res.json({ polishedText: result.text });
 
     } catch (error) {
-        console.error('Polish error:', error);
+        console.error('Polish error:', { status: error.status, code: error.code, name: error.name });
         res.status(500).json({ error: 'Failed' });
     }
 });
@@ -1392,7 +1247,7 @@ app.use('/api/admin', createPurchaseAdminRouter({
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'AI App Backend is running', version: '2.0.0' });
+    res.json({ status: 'ok', message: 'AI App Backend is running', version: '2.0.0', generationModel: MODEL });
 });
 
 // Recover abandoned reservations after a process restart and on a bounded timer.

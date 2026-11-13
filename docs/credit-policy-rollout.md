@@ -43,7 +43,7 @@ including `models`, `services`, `routes`, `scripts`, the lockfile and tests.
 1. Run `npm ci` and `npm test` with Node 22. Tests use an isolated MongoDB server and
    replica set; they do not contact production, AI providers or real payment APIs.
 2. Confirm the deployed environment has real `REVENUECAT_API_SECRET_KEY`,
-   `REVENUECAT_WEBHOOK_SECRET`, `OPEN_ROUTER_API_KEY` and `GEMINI_API_KEY` values.
+   `REVENUECAT_WEBHOOK_SECRET` and `OPEN_ROUTER_API_KEY` values.
    `ADMIN_API_SECRET` is additionally required for support purchase linking.
    Set `TRUST_PROXY_HOPS` to the deployment's verified proxy depth. Multi-instance
    rate limiting requires a shared rate-limit store.

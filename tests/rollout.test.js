@@ -43,7 +43,6 @@ const environment = () => ({
     ...process.env,
     MONGODB_URI: mongo.getUri(),
     CREDIT_POLICY_API_URL: configURL,
-    GEMINI_API_KEY: 'test-key',
     OPEN_ROUTER_API_KEY: 'test-key',
     REVENUECAT_API_SECRET_KEY: '',
     REVENUECAT_WEBHOOK_SECRET: '',

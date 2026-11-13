@@ -1,6 +1,6 @@
 # AI App Backend
 
-Backend server for AI Notes & Reply App using Gemini API.
+Backend server for AI Notes & Reply App using OpenRouter.
 
 ## Deploy to Render
 
@@ -20,7 +20,7 @@ npm install
 
 # Create .env file
 cp .env.example .env
-# Add your GEMINI_API_KEY to .env
+# Add your OPEN_ROUTER_API_KEY to .env
 
 # Start server
 npm start
@@ -30,7 +30,7 @@ npm start
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/notes` | POST | Generate notes from text/image/voice |
+| `/api/notes` | POST | Generate notes from text, images, voice, PDFs, websites, and YouTube transcripts |
 | `/api/reply` | POST | Generate reply options |
 | `/api/health` | GET | Health check |
 
