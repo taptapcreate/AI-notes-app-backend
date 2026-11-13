@@ -1,4 +1,5 @@
 const { CreditError } = require('./credit-policy');
+const { appleVerifier, BUNDLE_ID } = require('./apple-subscriptions');
 
 const CREDIT_PACK_PRODUCTS = Object.freeze({
     ai_notes_lite_pack_credits: 100,
@@ -32,7 +33,7 @@ function purchaseAliases(product, purchase) {
     return [...new Set(aliases)];
 }
 
-function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions }) {
+function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions, verifyApple }) {
     async function customer(user, { required = false } = {}) {
         if (!apiKey) {
             if (required)
@@ -188,7 +189,27 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
         }
         return { synced, credits: amount, ...(expected ? { purchase: confirmation } : {}) };
     }
-    return { sync, subscriptionStatus };
+    async function confirmApple(user, signed, expected) {
+        verifyApple ||= appleVerifier();
+        const proof = await verifyApple(signed);
+        const amount = CREDIT_PACK_PRODUCTS[proof.productId];
+        if (!amount || proof.bundleId !== BUNDLE_ID || proof.type !== 'Consumable' ||
+            proof.revocationDate || !['Sandbox', 'Production'].includes(proof.environment) ||
+            !/^\d{1,40}$/.test(proof.transactionId || '') ||
+            !Number.isSafeInteger(proof.purchaseDate) || proof.purchaseDate <= 0 ||
+            proof.purchaseDate > Date.now() + 300000 ||
+            expected?.productId !== proof.productId || expected?.transactionId !== proof.transactionId)
+            throw new CreditError(400, 'Apple credit transaction does not match this purchase');
+        const aliases = purchaseAliases(proof.productId, {
+            store_transaction_id: proof.transactionId, purchased_at_ms: proof.purchaseDate,
+        });
+        const result = await credits.grantPurchase(user.recoveryCode, aliases, amount, 'apple_verified');
+        return { credits: result.applied ? amount : 0, purchase: {
+            productId: proof.productId, transactionId: proof.transactionId, status: 'credited',
+            credits: amount, alreadyProcessed: !result.applied, sandbox: proof.environment === 'Sandbox',
+        } };
+    }
+    return { sync, subscriptionStatus, confirmApple };
 }
 
 module.exports = { createPurchases, CREDIT_PACK_PRODUCTS, purchaseAliases };

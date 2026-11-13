@@ -789,3 +789,32 @@ test('verified Apple sandbox packs grant once via balance sync and webhook witho
     await api('/api/webhooks/revenuecat', { event }, 'Bearer test-hook-secret');
     assert.equal((await credits.balance(code)).credits, 200);
 });
+
+test('signed Apple credit grant survives repeat verification and matches later RevenueCat sync', async t => {
+    const { recoveryCode: code } = await register();
+    const purchase = { productId: 'ai_notes_lite_pack_credits', transactionId: '1234500001' };
+    const date = Date.now() - 10000;
+    const payload = { bundleId: 'com.taptapcreate.ainotes', type: 'Consumable',
+        environment: 'Sandbox', productId: purchase.productId, transactionId: purchase.transactionId, purchaseDate: date };
+    const options = { credits, apiKey: 'test', verifyApple: async signed => {
+        assert.equal(signed, 'verified-signed-transaction'); return payload;
+    }, axios: { get: async () => ({ data: { subscriber: { non_subscriptions: {
+        [purchase.productId]: [{ id: 'revenuecat-alias', store: 'app_store', is_sandbox: true, purchase_date: new Date(date).toISOString() }],
+    } } } }) } };
+    const purchases = createPurchases(options);
+    const api = await withAPI(t, purchases);
+    const body = { code, purchase, signedAppleTransaction: 'verified-signed-transaction' };
+    const first = await api('/api/credits/add', body);
+    assert.equal(first.body.purchase.status, 'credited');
+    assert.equal(first.body.newBalance, 100);
+    // Simulate the client losing the response and replaying after relaunch.
+    const replay = await api('/api/credits/add', body);
+    assert.equal(replay.body.purchase.alreadyProcessed, true);
+    assert.equal(replay.body.newBalance, 100);
+    await purchases.sync(await User.findOne({ recoveryCode: code }).lean());
+    assert.equal((await credits.balance(code)).credits, 100);
+    const mismatch = await api('/api/credits/add', { ...body, purchase: { ...purchase, transactionId: '999999999' } });
+    assert.equal(mismatch.status, 400);
+    payload.revocationDate = Date.now();
+    assert.equal((await api('/api/credits/add', body)).status, 400);
+});
