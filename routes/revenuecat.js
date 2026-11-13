@@ -44,7 +44,7 @@ function createRevenueCatHandler({
                 return res.json({ success: true, message: 'Event ignored' });
             }
             const amount = CREDIT_PACK_PRODUCTS[event.product_id];
-            if (!amount || (event.environment === 'SANDBOX' && !allowSandbox)) {
+            if (!amount || (event.environment === 'SANDBOX' && !allowSandbox && !['APP_STORE', 'MAC_APP_STORE'].includes(event.store))) {
                 return res.json({ success: true, message: 'Event ignored' });
             }
             if (

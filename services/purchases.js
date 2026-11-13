@@ -160,7 +160,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                 if (!aliases.length) continue;
                 const matches = expected && expected.productId === product &&
                     aliases.includes(expected.transactionId);
-                if (purchase.is_sandbox && !allowSandbox) {
+                if (purchase.is_sandbox && !allowSandbox && !['app_store', 'mac_app_store'].includes(purchase.store)) {
                     if (matches) confirmation = { ...expected, status: 'sandbox_disabled', sandbox: true };
                     continue;
                 }

@@ -764,3 +764,28 @@ test('sandbox pack acknowledgement reports the server policy and permits an isol
     assert.equal(allowed.purchase.sandbox, true);
     assert.equal((await credits.balance(code)).credits, 100);
 });
+
+test('verified Apple sandbox packs grant once via balance sync and webhook without an environment switch', async t => {
+    const { recoveryCode: code } = await register();
+    const product = 'ai_notes_lite_pack_credits';
+    const purchases = createPurchases({ credits, apiKey: 'test', axios: {
+        get: async () => ({ data: { subscriber: { non_subscriptions: {
+            [product]: [{ store_transaction_id: 'apple-sandbox-topup', is_sandbox: true, store: 'app_store' }],
+        } } } }),
+    } });
+    const api = await withAPI(t, purchases);
+    const purchase = { productId: product, transactionId: 'apple-sandbox-topup' };
+    const applied = await api('/api/credits/add', { code, purchase });
+    assert.equal(applied.body.purchase.status, 'credited');
+    assert.equal(applied.body.newBalance, 100);
+    const duplicate = await api('/api/credits/add', { code, purchase });
+    assert.equal(duplicate.body.newBalance, 100);
+    const event = { type: 'NON_RENEWING_PURCHASE', environment: 'SANDBOX', store: 'APP_STORE',
+        app_user_id: code, product_id: product, transaction_id: 'apple-sandbox-topup' };
+    await api('/api/webhooks/revenuecat', { event }, 'Bearer test-hook-secret');
+    assert.equal((await credits.balance(code)).credits, 100);
+    event.transaction_id = 'second-apple-sandbox-pack';
+    await api('/api/webhooks/revenuecat', { event }, 'Bearer test-hook-secret');
+    await api('/api/webhooks/revenuecat', { event }, 'Bearer test-hook-secret');
+    assert.equal((await credits.balance(code)).credits, 200);
+});
