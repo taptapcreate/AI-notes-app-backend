@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const OpenAI = require('openai');
+const { pdfPart, InvalidPdf } = require('./services/openrouter-pdf');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -77,7 +78,7 @@ app.use(express.json({ limit: '25mb' }));
 app.use('/api', createMaintenanceGate({ getAppConfig }));
 app.use('/api', generationService.middleware);
 
-// Initialize Gemini AI (for Audio/PDF fallback)
+// Legacy audio processing still uses Gemini.
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Initialize OpenAI client for OpenRouter
@@ -99,6 +100,7 @@ const getModel = (maxTokens = 2048, modelName = 'openai/gpt-4o-mini') => {
             maxTokens: maxTokens,
             generateContent: async (content) => {
                 let messages = [];
+                let hasPdf = false;
                 if (typeof content === 'string') {
                     messages = [{ role: 'user', content: content }];
                 } else if (Array.isArray(content)) {
@@ -109,7 +111,10 @@ const getModel = (maxTokens = 2048, modelName = 'openai/gpt-4o-mini') => {
                         } else if (item.inlineData) {
                             const mimeType = item.inlineData.mimeType;
                             const base64Data = item.inlineData.data;
-                            if (mimeType.startsWith('image/')) {
+                            if (mimeType === 'application/pdf') {
+                                userContent.push(pdfPart(base64Data));
+                                hasPdf = true;
+                            } else if (mimeType.startsWith('image/')) {
                                 userContent.push({
                                     type: 'image_url',
                                     image_url: { url: `data:${mimeType};base64,${base64Data}` }
@@ -126,6 +131,7 @@ const getModel = (maxTokens = 2048, modelName = 'openai/gpt-4o-mini') => {
                     max_tokens: maxTokens,
                     temperature: 0.7,
                     top_p: 0.9,
+                    ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: 'mistral-ocr' } }] } : {}),
                 }, { signal: generationSignal() });
 
                 return {
@@ -690,7 +696,7 @@ FORMAT YOUR RESPONSE AS:
 
 Generate the notes now:`;
 
-                const pdfModel = getModel(maxTokens, 'gemini-1.5-flash');
+                const pdfModel = getModel(maxTokens);
                 result = await generateWithRetry(pdfModel, [
                     prompt,
                     {
@@ -830,8 +836,13 @@ Generate the notes now:`;
         res.json({ notes });
 
     } catch (error) {
-        console.error('Notes generation error:', error);
-        res.status(500).json({ error: 'Failed to generate notes', details: error.message });
+        if (error instanceof InvalidPdf) return res.status(400).json({ error: error.message });
+        console.error('Notes generation error:', { type: req.body?.type, status: error.status, code: error.code, name: error.name });
+        res.status(502).json({
+            error: req.body?.type === 'pdf'
+                ? 'AI Notes could not process this PDF. Try again, or choose an unlocked PDF with fewer pages.'
+                : 'AI Notes could not generate notes right now. Please try again.',
+        });
     }
 });
 // ==================== REPLY ENDPOINT ====================
