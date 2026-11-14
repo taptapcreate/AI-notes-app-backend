@@ -21,6 +21,12 @@ const date = (value) =>
     Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000
         ? new Date(value)
         : null;
+// An omitted scope preserves compatibility with existing clients. An empty
+// scope is an explicit StoreKit check that found no current sandbox entitlement.
+function canUseAppleRecord(record, sandboxIds) {
+    return record.environment !== 'Sandbox' || sandboxIds === undefined || sandboxIds.includes(record._id);
+}
+
 function appleVerifier() {
     const roots = ['AppleRootCA-G2.cer', 'AppleRootCA-G3.cer'].map((name) =>
         readFileSync(path.join(__dirname, '../certificates', name)),
@@ -87,22 +93,23 @@ function createAppleSubscriptions({
             new Date(record.expiresAt || 0).getTime(),
             new Date(record.graceExpiresAt || 0).getTime(),
         ) > timestamp.getTime();
-    async function recordFor(user, session) {
+    async function recordFor(user, session, sandboxIds) {
         const ids = user.appleSubscriptionIds || [];
         if (!ids.length) return null;
         const query = Subscription.find({ _id: { $in: ids } }).sort({
             expiresAt: -1,
         });
         if (session) query.session(session);
-        const records = await query.lean();
+        const records = (await query.lean()).filter(record => canUseAppleRecord(record, sandboxIds));
         return records.find((record) => active(record)) || records[0] || null;
     }
-    async function status(user) {
+    async function status(user, sandboxIds) {
         if (!user.appleSubscriptionIds?.length) return null;
-        const record = await recordFor(user);
+        const record = await recordFor(user, undefined, sandboxIds);
         return {
             isPro: !!active(record),
             appleSubscriptionBound: true,
+            sandboxExcluded: !record && sandboxIds !== undefined,
             subscriptionIdentityVersion: 1,
             quotaId: record?._id,
             plan: record?.productId
@@ -114,10 +121,14 @@ function createAppleSubscriptions({
             ...(record?.environment === 'Sandbox' ? { sandbox: true } : {}),
         };
     }
-    async function usage(user, config, timestamp = now()) {
-        const record = await recordFor(user);
+    async function usage(user, config, timestamp = now(), sandboxIds) {
+        const record = await recordFor(user, undefined, sandboxIds);
         return {
-            ...subscriptionUsage(record || user, config, timestamp),
+            ...subscriptionUsage(
+                record || (user.appleSubscriptionIds?.length ? {} : user),
+                config ?? await getAppConfig(),
+                timestamp,
+            ),
             subscriptionIdentityVersion: 1,
             appleSubscriptionBound: !!record,
         };
@@ -202,30 +213,29 @@ function createAppleSubscriptions({
             )
                 set.revokedAt = date(payload.revocationDate);
             const walletHash = code && hash(code);
-            const link =
-                user &&
-                (user.appleSubscriptionIds?.includes(id) ||
-                    active({ ...current, ...set }, timestamp));
-            const migrate =
-                link && !(current.migratedWallets || []).includes(walletHash);
-            if (migrate) {
+            const alreadyLinked = user?.appleSubscriptionIds?.includes(id);
+            const link = user && (alreadyLinked || active({ ...current, ...set }, timestamp));
+            const markWallet = link && !(current.migratedWallets || []).includes(walletHash);
+            if (markWallet && !alreadyLinked) {
                 const config = await getAppConfig();
                 let used = subscriptionUsage(
                     current,
                     config,
                     timestamp,
                 ).subscriberDailyUsage;
-                used += subscriptionUsage(
-                    user,
-                    config,
-                    timestamp,
-                ).subscriberDailyUsage;
-                // A genuinely new subscription family must not replenish an existing same-day allowance.
+                const legacyUsage = !user.appleSubscriptionIds?.length
+                    ? subscriptionUsage(user, config, timestamp).subscriberDailyUsage
+                    : 0;
+                used += legacyUsage;
+                // Preserve same-day usage when a production subscription changes.
+                // Different sandbox testers each have their own allowance.
                 if (
+                    payload.environment === 'Production' &&
                     !current.migratedWallets?.length &&
                     user.appleSubscriptionIds?.length
                 ) {
                     const older = await Subscription.find({
+                        environment: 'Production',
                         _id: {
                             $in: user.appleSubscriptionIds.filter(
                                 (value) => value !== id,
@@ -250,11 +260,7 @@ function createAppleSubscriptions({
                     previousReset < new Date(midnight.getTime() + 86400000)
                         ? previousReset
                         : midnight;
-                if (
-                    GenerationRequest &&
-                    subscriptionUsage(user, config, timestamp)
-                        .subscriberDailyUsage > 0
-                ) {
+                if (GenerationRequest && legacyUsage > 0) {
                     // Pending legacy requests must refund the counter that inherited their reservation.
                     await GenerationRequest.updateMany(
                         {
@@ -269,6 +275,7 @@ function createAppleSubscriptions({
                         {
                             $set: {
                                 'reservation.subscriptionId': id,
+                                ...(current.quotaEpoch ? { 'reservation.quotaEpoch': current.quotaEpoch } : {}),
                                 'reservation.day':
                                     set.lastRequestReset.toISOString(),
                             },
@@ -278,6 +285,7 @@ function createAppleSubscriptions({
                 }
                 if (
                     !current.migratedWallets?.length &&
+                    !user.appleSubscriptionIds?.length &&
                     user.subscriberDailyLimitOverride != null
                 )
                     set.subscriberDailyLimitOverride =
@@ -287,7 +295,7 @@ function createAppleSubscriptions({
                 $set: set,
                 $addToSet: { revokedTransactions: { $each: [...revoked] } },
             };
-            if (migrate) update.$addToSet.migratedWallets = walletHash;
+            if (markWallet) update.$addToSet.migratedWallets = walletHash;
             await Subscription.updateOne({ _id: id }, update, { session });
             if (link)
                 await User.updateOne(
@@ -405,9 +413,45 @@ function createAppleSubscriptions({
             return true;
         });
     }
-    return { attach, status, usage, webhook, active, recordFor };
+    async function resolveStoreKitScope(proofs, user) {
+        if (proofs === undefined) return undefined;
+        if (!Array.isArray(proofs) || proofs.length > 4)
+            throw new CreditError(400, 'Provide up to four StoreKit subscription proofs');
+        const decoded = await Promise.all(proofs.map(proof => verify(proof)));
+        const linked = new Set(user?.appleSubscriptionIds || []);
+        if (linked.size) {
+            const recoverable = decoded.filter(payload =>
+                validID(payload.originalTransactionId) &&
+                linked.has(identity(payload.environment, payload.originalTransactionId)) &&
+                active({
+                    expiresAt: date(payload.expiresDate),
+                    revokedAt: payload.revocationDate,
+                    isUpgraded: payload.isUpgraded,
+                }),
+            );
+            const ids = recoverable.map(payload => identity(payload.environment, payload.originalTransactionId));
+            if (ids.length) {
+                const existing = await Subscription.find({ _id: { $in: ids } }).lean();
+                const ready = new Set(existing.filter(record => record.transactionId).map(record => record._id));
+                for (const payload of recoverable) {
+                    if (!ready.has(identity(payload.environment, payload.originalTransactionId)))
+                        await savePayload(payload, user.recoveryCode);
+                }
+            }
+        }
+        return [...new Set(decoded.filter(payload =>
+            payload.environment === 'Sandbox' &&
+            payload.bundleId === BUNDLE_ID &&
+            PRODUCTS.has(payload.productId) &&
+            validID(payload.originalTransactionId) &&
+            !payload.revocationDate &&
+            payload.isUpgraded !== true
+        ).map(payload => identity(payload.environment, payload.originalTransactionId)))];
+    }
+    return { attach, status, usage, webhook, active, recordFor, resolveStoreKitScope };
 }
 module.exports = {
+    canUseAppleRecord,
     createAppleSubscriptions,
     appleVerifier,
     identity,

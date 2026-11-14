@@ -91,7 +91,8 @@ beforeEach(async () => {
         GenerationRequest,
         credits,
         getAppConfig: async () => config,
-        entitlement: (user) => service.status(user),
+        entitlement: service.status,
+        resolveStoreKitScope: service.resolveStoreKitScope,
         now: () => new Date(time),
     });
     await User.create(
@@ -412,4 +413,80 @@ test('an Apple subscription expiring after status lookup still permits approved 
     assert.equal(record.reservation.free, 0);
     assert.equal((await credits.balance(codes[0])).credits, 19);
     assert.equal((await credits.balance(codes[0])).freeCreditsRemaining, 7);
+});
+
+test('the same wallet uses only the current sandbox tester’s verified allowance', async () => {
+    const code = codes[0];
+    const testerA = JSON.stringify(proof());
+    await service.attach(code, [testerA]);
+    const a = await status(code);
+    await Subscription.updateOne({ _id: a.quotaId }, {
+        $set: { dailyRequestCount: 10, lastRequestReset: time },
+    });
+
+    const noProofs = await service.resolveStoreKitScope([]);
+    const wallet = await credits.byCode(code);
+    assert.equal((await service.status(wallet, noProofs)).isPro, false);
+    const free = await generation.begin(code, randomUUID(), '/notes', source, []);
+    assert.equal(free.record.reservation.membershipPro, false);
+    assert.equal(free.record.reservation.free, 1);
+
+    const testerB = JSON.stringify(proof({
+        originalTransactionId: '200000000001',
+        transactionId: '200000000002',
+        expiresDate: time.getTime() + 1600000,
+    }));
+    await service.attach(code, [testerB]);
+    const scopeB = await service.resolveStoreKitScope([testerB]);
+    assert.equal((await service.status(await credits.byCode(code), scopeB)).quotaId, scopeB[0]);
+    assert.equal((await credits.balance(code, scopeB)).subscriberDailyRemaining, 10);
+    const paidByB = await generation.begin(code, randomUUID(), '/notes', source, [testerB]);
+    assert.equal(paidByB.record.reservation.subscriptionId, scopeB[0]);
+    assert.equal((await credits.balance(code, scopeB)).subscriberDailyRemaining, 9);
+    assert.equal((await credits.balance(code, [a.quotaId])).subscriberDailyRemaining, 0);
+});
+
+test('a StoreKit sandbox scope preserves the linked production subscription and its own usage', async () => {
+    const code = codes[0];
+    await attach(code);
+    const sandbox = await status(code);
+    await Subscription.updateOne({ _id: sandbox.quotaId }, {
+        $set: { dailyRequestCount: 10, lastRequestReset: time },
+    });
+    await attach(code, { environment: 'Production', expiresDate: time.getTime() + 1800000 });
+    const production = await service.status(await credits.byCode(code), []);
+    assert.equal(production.isPro, true);
+    assert.notEqual(production.quotaId, sandbox.quotaId);
+    assert.equal((await credits.balance(code, [])).subscriberDailyRemaining, 10);
+    const begun = await generation.begin(code, randomUUID(), '/notes', source, []);
+    assert.equal(begun.record.reservation.subscriptionId, production.quotaId);
+});
+
+
+test('restoring after collection deletion gives a previously linked subscription its full configured allowance', async () => {
+    const code = codes[0];
+    await User.updateOne({ recoveryCode: code }, { $set: { dailyRequestCount: 10 } });
+    await attach(code);
+    const membership = await status(code);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 0);
+    await Subscription.collection.drop();
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 10);
+    assert.equal((await attach(code)).subscriberDailyRemaining, 10);
+    assert.equal((await status(code)).quotaId, membership.quotaId);
+    const wallet = await credits.byCode(code);
+    assert.equal(wallet.credits, 20);
+    assert.equal(wallet.totalFreeCredits, 7);
+});
+
+test('verified StoreKit proof rebuilds a missing linked record and a prior request cannot refund its new count', async () => {
+    const code = codes[0];
+    const payload = JSON.stringify(proof());
+    await service.attach(code, [payload]);
+    const before = await generation.begin(code, randomUUID(), '/notes', source, [payload]);
+    await Subscription.deleteMany({});
+    const after = await generation.begin(code, randomUUID(), '/notes', source, [payload]);
+    assert.equal(after.record.reservation.subscriptionId, before.record.reservation.subscriptionId);
+    assert.notEqual(after.record.reservation.quotaEpoch, before.record.reservation.quotaEpoch);
+    await generation.finish(before.record._id, 500, { error: 'AI unavailable' });
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 9);
 });

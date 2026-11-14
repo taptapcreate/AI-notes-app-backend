@@ -229,7 +229,7 @@ function createCredits({
         );
     }
 
-    async function getBalance(code) {
+    async function getBalance(code, sandboxIds) {
         const rules = await currentPolicy();
         const user = await prepared(code, rules);
         await User.updateOne(
@@ -239,7 +239,7 @@ function createCredits({
         const confirmed = await byCode(code);
         return {
             ...balance(confirmed, rules),
-            ...await subscriptionUsageFor(confirmed, await getAppConfig(), now()),
+            ...await subscriptionUsageFor(confirmed, await getAppConfig(), now(), sandboxIds),
         };
     }
 

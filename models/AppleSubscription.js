@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { randomUUID } = require('node:crypto');
 const schema = new mongoose.Schema(
     {
         _id: String,
@@ -24,6 +25,7 @@ const schema = new mongoose.Schema(
             max: 10000,
             validate: Number.isSafeInteger,
         },
+        quotaEpoch: { type: String, default: randomUUID },
         dailyRequestCount: { type: Number, default: 0 },
         lastRequestReset: Date,
         lastEventAt: Date,

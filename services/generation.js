@@ -1,3 +1,4 @@
+const { canUseAppleRecord } = require('./apple-subscriptions');
 const { subscriptionUsage } = require('./subscription-usage');
 const { validateNarration } = require('./walkthrough');
 const { createHash } = require('node:crypto');
@@ -139,6 +140,7 @@ function createGeneration({
     credits,
     getAppConfig,
     entitlement,
+    resolveStoreKitScope = async () => undefined,
     now = () => new Date(),
     leaseMs = 180000,
 }) {
@@ -194,6 +196,7 @@ function createGeneration({
                     await (held.subscriptionId ? Subscription : User).updateOne(
                         {
                             ...(held.subscriptionId ? { _id: held.subscriptionId } : { recoveryCode: record.recoveryCode }),
+                            ...(held.subscriptionId ? { quotaEpoch: held.quotaEpoch ?? { $exists: false } } : {}),
                             lastRequestReset: new Date(held.day),
                             dailyRequestCount: { $gt: 0 },
                         },
@@ -249,7 +252,7 @@ function createGeneration({
                 error: 'The AI request expired. Your credit was returned; please try again.',
             });
     }
-    async function begin(code, requestId, endpoint, body) {
+    async function begin(code, requestId, endpoint, body, storeKitProofs) {
         if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId))
             throw new CreditError(400, 'A unique AI request ID is required');
         validateInput(endpoint, body);
@@ -277,7 +280,9 @@ function createGeneration({
         await credits.balance(code); // Initialize any legacy allowance once before reserving.
         const config = await getAppConfig();
         const rules = policy(config);
-        const membership = await entitlement(await credits.byCode(code));
+        const account = await credits.byCode(code);
+        const sandboxIds = await resolveStoreKitScope(storeKitProofs, account);
+        const membership = await entitlement(account, sandboxIds);
         try {
             return await transaction(async (session) => {
                 const duplicate = await GenerationRequest.findById(id)
@@ -302,6 +307,7 @@ function createGeneration({
                         _id: { $in: user.appleSubscriptionIds },
                     }).sort({ expiresAt: -1 }).session(session).lean();
                     const active = records.find(record =>
+                        canUseAppleRecord(record, sandboxIds) &&
                         !record.revokedAt && !record.isUpgraded &&
                         Math.max(
                             new Date(record.expiresAt || 0).getTime(),
@@ -309,7 +315,7 @@ function createGeneration({
                         ) > timestamp.getTime(),
                     );
                     pro = !!active;
-                    quota = active || records[0] || user;
+                    quota = active || user;
                     quotaId = active?._id;
                 } else if (pro && quotaId) {
                     // This wallet was unlinked while the provider lookup ran.
@@ -338,7 +344,7 @@ function createGeneration({
                     );
                     reservation = {
                         pro: true,
-                        ...(quotaId ? { subscriptionId: quotaId } : {}),
+                        ...(quotaId ? { subscriptionId: quotaId, ...(quota.quotaEpoch ? { quotaEpoch: quota.quotaEpoch } : {}) } : {}),
                         day: reset.toISOString(),
                         limit,
                     };
@@ -401,7 +407,11 @@ function createGeneration({
                             endpoint,
                             bodyHash,
                             state: 'pending',
-                            reservation: { ...reservation, membershipPro: pro },
+                            reservation: {
+                                ...reservation,
+                                membershipPro: pro,
+                                ...(sandboxIds === undefined ? {} : { sandboxIds }),
+                            },
                             leaseUntil: new Date(timestamp.getTime() + leaseMs),
                             expiresAt: new Date(timestamp.getTime() + 86400000),
                         },
@@ -424,12 +434,12 @@ function createGeneration({
                 410,
                 'This request completed earlier, but its saved result expired. No additional credit was charged. Start a new generation if you need another result.',
             );
-        const current = await credits.balance(record.recoveryCode);
-        const user = await credits.byCode(record.recoveryCode);
+        const current = await credits.balance(record.recoveryCode, record.reservation.sandboxIds);
         return {
             ...record.result,
             billing: {
                 version: 2,
+                ...(record.reservation.sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),
                 requestId: record.requestId,
                 charged: record.state === 'succeeded',
                 creditCost: record.reservation.pro
@@ -489,11 +499,14 @@ function createGeneration({
             )
                 return next();
             const code = await authenticate(req.headers.authorization);
+            validateInput(endpoint, req.body);
+            const { storeKitProofs, ...body } = req.body;
             const { record, cached } = await begin(
                 code,
                 req.headers['idempotency-key'],
                 endpoint,
-                req.body,
+                body,
+                storeKitProofs,
             );
             if (cached) {
                 res.status(record.httpStatus);

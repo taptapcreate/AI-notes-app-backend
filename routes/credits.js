@@ -52,16 +52,22 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
         await credits.byCode(code);
         return appleSubscriptions.attach(code, req.body?.transactions);
     }));
-    // Read-only membership lookup. A failed provider check must not hide credit balances.
+    // Verify current membership and recover missing linked records from signed StoreKit proof.
     router.post(
         '/subscription',
         endpoint(async (req) => {
             const user = await credits.byCode(req.body?.code);
-            const membership = await purchases.subscriptionStatus(user);
+            const sandboxIds = await appleSubscriptions?.resolveStoreKitScope(req.body?.storeKitProofs, user);
+            const membership = await purchases.subscriptionStatus(user, sandboxIds);
+            const scopedUsage = sandboxIds === undefined ? {} :
+                await appleSubscriptions.usage(user, undefined, undefined, sandboxIds);
             return {
+                ...scopedUsage,
+                ...(sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),
                 status: membership.isPro ? 'active' : 'inactive',
                 ...(membership.appleSubscriptionBound ? { appleSubscriptionBound: true, subscriptionIdentityVersion: 1 } : {}),
                 ...(membership.sandbox ? { sandbox: true, allowanceEnabled: membership.isPro } : {}),
+                ...(membership.sandboxExcluded ? { sandboxExcluded: true } : {}),
                 plan: membership.plan || null,
                 expiresAt: membership.expiresAt || null,
             };

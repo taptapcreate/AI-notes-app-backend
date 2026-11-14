@@ -74,8 +74,8 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
             );
         return subscriber;
     }
-    async function subscriptionStatus(user) {
-        const shared = await appleSubscriptions?.status(user);
+    async function subscriptionStatus(user, sandboxIds) {
+        const shared = await appleSubscriptions?.status(user, sandboxIds);
         if (shared) return shared;
         const subscriber = await customer(user, { required: true });
         if (!subscriber) return { isPro: false };
@@ -112,6 +112,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                         : null,
                 };
                 if (subscription?.is_sandbox !== true) return membership;
+                if (sandboxIds !== undefined) continue;
                 sandboxMembership = {
                     ...membership,
                     sandbox: true,

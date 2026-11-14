@@ -47,7 +47,7 @@ const GenerationRequest = require('./models/GenerationRequest');
 const { createAppleSubscriptions } = require('./services/apple-subscriptions');
 const appleSubscriptions = createAppleSubscriptions({ User, Subscription: AppleSubscription, GenerationRequest, getAppConfig: () => getAppConfig() });
 const creditService = createCredits({ User, CreditRegistration, PurchaseClaim, getAppConfig: () => getAppConfig(),
-    subscriptionUsageFor: (user, config, timestamp) => appleSubscriptions.usage(user, config, timestamp) });
+    subscriptionUsageFor: appleSubscriptions.usage });
 const purchaseService = createPurchases({
     credits: creditService, appleSubscriptions, axios, apiKey: process.env.REVENUECAT_API_SECRET_KEY,
     allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
@@ -55,7 +55,7 @@ const purchaseService = createPurchases({
 const { createGeneration } = require('./services/generation');
 const { signal: generationSignal } = require('./services/generation-context');
 const generationService = createGeneration({ User, GenerationRequest, Subscription: AppleSubscription, credits: creditService,
-    getAppConfig: () => getAppConfig(), entitlement: user => purchaseService.subscriptionStatus(user) });
+    getAppConfig: () => getAppConfig(), entitlement: purchaseService.subscriptionStatus, resolveStoreKitScope: appleSubscriptions.resolveStoreKitScope });
 
 
 // Helper: Get App Config (Singleton)
