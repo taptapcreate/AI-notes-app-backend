@@ -40,6 +40,8 @@ const { createPurchases } = require('./services/purchases');
 const { getWelcomeCredits } = require('./services/credit-policy');
 const { getSubscriberDailyLimit } = require('./services/subscription-usage');
 const { createCreditRouter } = require('./routes/credits');
+const { createAccountDeletion } = require('./services/account-deletion');
+const { CreditError } = require('./services/credit-policy');
 const { createRevenueCatHandler } = require('./routes/revenuecat');
 const { createPurchaseAdminRouter } = require('./routes/purchase-admin');
 const AppleSubscription = require('./models/AppleSubscription');
@@ -713,12 +715,46 @@ RULES:
 });
 
 // ==================== CREDITS SYSTEM ENDPOINTS ====================
-app.use('/api/credits', createCreditRouter({ credits: creditService, purchases: purchaseService, appleSubscriptions }));
+const NotificationTokenSchema = new mongoose.Schema({
+    token: { type: String, required: true, unique: true, index: true },
+    platform: { type: String, default: 'unknown' },
+    recoveryCode: { type: String, default: null },
+    appVersion: { type: String, default: '1.0.0' },
+    enabled: { type: Boolean, default: true },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+});
+
+const NotificationToken = mongoose.model('NotificationToken', NotificationTokenSchema);
+
+const DeletedAccount = mongoose.model('DeletedAccount', new mongoose.Schema({ _id: String }));
+const accountDeletion = createAccountDeletion({
+    User, CreditRegistration, GenerationRequest, PurchaseClaim, PendingPurchase, AppleSubscription,
+    NotificationToken, DeletedAccount,
+    async deleteCustomer(code) {
+        const apiKey = process.env.REVENUECAT_API_SECRET_KEY;
+        if (!apiKey) throw new CreditError(503, 'Account deletion is temporarily unavailable. Please try again.');
+        try {
+            await axios.delete(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(code)}`, {
+                timeout: 10000,
+                headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            });
+        } catch (error) {
+            if (error.response?.status !== 404)
+                throw new CreditError(503, 'Account deletion could not reach our purchase provider. Please try again.');
+        }
+    },
+});
+
+app.use('/api/credits', createCreditRouter({
+    credits: creditService, purchases: purchaseService, appleSubscriptions, accountDeletion,
+}));
 
 // ==================== REVENUECAT WEBHOOK ====================
 
 app.post('/api/webhooks/revenuecat', createRevenueCatHandler({
     User, PendingPurchase, credits: creditService,
+    accountWasDeleted: accountDeletion.wasDeleted,
     reconcilePurchases: user => purchaseService.sync(user, { required: true }),
     subscriptionEvent: event => appleSubscriptions.webhook(event),
     secret: process.env.REVENUECAT_WEBHOOK_SECRET,
@@ -765,18 +801,6 @@ app.get('/api/config/ad-offer', async (req, res) => {
 // ==========================================
 
 // Notification Token Schema (using mongoose for consistency)
-const NotificationTokenSchema = new mongoose.Schema({
-    token: { type: String, required: true, unique: true, index: true },
-    platform: { type: String, default: 'unknown' },
-    recoveryCode: { type: String, default: null },
-    appVersion: { type: String, default: '1.0.0' },
-    enabled: { type: Boolean, default: true },
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now }
-});
-
-const NotificationToken = mongoose.model('NotificationToken', NotificationTokenSchema);
-
 // Register push token
 app.post('/api/notifications/register', async (req, res) => {
     try {
@@ -788,6 +812,10 @@ app.post('/api/notifications/register', async (req, res) => {
 
         if (!Expo.isExpoPushToken(token)) {
             return res.status(400).json({ error: 'Invalid Expo push token format' });
+        }
+
+        if (await accountDeletion.wasDeleted(recoveryCode)) {
+            return res.status(410).json({ error: 'This AI Notes account has been deleted' });
         }
 
         await NotificationToken.findOneAndUpdate(

@@ -19,6 +19,7 @@ function createRevenueCatHandler({
     credits,
     reconcilePurchases = async () => {},
     subscriptionEvent = async () => false,
+    accountWasDeleted = async () => false,
     allowSandbox = false,
     secret,
     notify = async () => {},
@@ -63,6 +64,8 @@ function createRevenueCatHandler({
                 recoveryCode: event.app_user_id.toUpperCase(),
             }).lean();
             if (!user) {
+                if (await accountWasDeleted(event.app_user_id))
+                    return res.json({ success: true, message: 'Deleted account ignored' });
                 // The unique transaction index makes duplicate webhook delivery safe.
                 try {
                     await PendingPurchase.updateOne(
