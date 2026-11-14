@@ -3,7 +3,7 @@ const { createHash } = require('node:crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const { CreditError, recoveryCode } = require('../services/credit-policy');
 
-function createCreditRouter({ credits, purchases, appleSubscriptions, accountDeletion, logger = console }) {
+function createCreditRouter({ credits, purchases, appleSubscriptions, logger = console }) {
     const router = express.Router();
     const endpoint = (handler) => async (req, res) => {
         try {
@@ -19,15 +19,6 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, accountDel
             });
         }
     };
-    if (accountDeletion) router.post('/delete-account',
-        rateLimit({ windowMs: 60000, limit: 10, standardHeaders: true, legacyHeaders: false }),
-        endpoint((req) => {
-            const header = req.get('authorization');
-            if (!header?.startsWith('Bearer ')) throw new CreditError(401, 'Connect your AI Notes account first');
-            if (req.body?.confirm !== true) throw new CreditError(400, 'Confirm account deletion');
-            return accountDeletion.remove(header.slice(7));
-        }),
-    );
     router.post(
         '/register',
         rateLimit({
