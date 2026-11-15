@@ -19,3 +19,20 @@ test('purchase categories can be disabled independently and persist as schema fi
         }
     }
 });
+
+
+test('platform visibility fields persist and serialize independently with backward-compatible defaults', () => {
+    const { platformBillingControls } = require('../services/billing-controls');
+    const document = new AppConfig({ billingControls: { showSubscriptions: false },
+        platformBillingControls: { windows: { showSubscriptions: false }, ios: { showTopUpPacks: false } } });
+    assert.equal(document.validateSync(), undefined);
+    const reloaded = new AppConfig(JSON.parse(JSON.stringify(document)));
+    const controls = platformBillingControls(reloaded);
+    assert.deepEqual(controls.windows, { showSubscriptions: false, showTopUpPacks: true });
+    assert.deepEqual(controls.ios, { showSubscriptions: true, showTopUpPacks: false });
+    assert.deepEqual(controls.macos, { showSubscriptions: true, showTopUpPacks: true });
+    assert.deepEqual(controls.android, controls.macos);
+    assert.equal(billingControls(reloaded).showSubscriptions, false);
+    assert.equal(platformBillingControls({}).windows.showSubscriptions, true);
+    assert.equal(reloaded.platformBillingControls.windows.usePrimarySubscriptionTracking, undefined);
+});

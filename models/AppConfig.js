@@ -10,6 +10,11 @@ const PlatformReleaseSchema = new mongoose.Schema({
     releaseNotes: [{ type: String, maxlength: 500 }],
 }, { _id: false });
 
+const PlatformBillingSchema = new mongoose.Schema({
+    showSubscriptions: { type: Boolean, default: true },
+    showTopUpPacks: { type: Boolean, default: true },
+}, { _id: false });
+
 const AppConfigSchema = new mongoose.Schema({
     key: {
         type: String,
@@ -28,6 +33,14 @@ const AppConfigSchema = new mongoose.Schema({
             showTopUpPacks: { type: Boolean, default: true },
             usePrimarySubscriptionTracking: { type: Boolean, default: true },
         }, { _id: false }),
+        default: () => ({}),
+    },
+    // These switches narrow global purchase visibility; they never override a global false.
+    platformBillingControls: {
+        type: new mongoose.Schema(Object.fromEntries(
+            ['ios', 'android', 'macos', 'windows'].map(platform =>
+                [platform, { type: PlatformBillingSchema, default: () => ({}) }]),
+        ), { _id: false }),
         default: () => ({}),
     },
     // 1. General Alerts

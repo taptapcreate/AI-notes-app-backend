@@ -17,17 +17,22 @@ async function main() {
     if (config.billingControls !== undefined &&
         (!config.billingControls || typeof config.billingControls !== 'object' || Array.isArray(config.billingControls)))
         throw new Error('The existing billingControls field needs review');
-    const missing = keys.filter(key => config.billingControls?.[key] === undefined);
+    const fields = keys.map(key => 'billingControls.' + key);
+    for (const platform of ['ios', 'android', 'macos', 'windows']) {
+        for (const key of ['showSubscriptions', 'showTopUpPacks']) {
+            fields.push('platformBillingControls.' + platform + '.' + key);
+        }
+    }
+    const missing = fields.filter(field => field.split('.').reduce((value, key) => value?.[key], config) === undefined);
     const apply = args.includes('--apply');
     if (apply) {
-        for (const key of missing) {
-            const field = 'billingControls.' + key;
+        for (const field of missing) {
             await collection.updateOne({ _id: config._id, [field]: { $exists: false } },
                 { $set: { [field]: true } });
         }
     }
     const updated = await collection.findOne({ _id: config._id });
-    console.log(JSON.stringify({ applied: apply, missing, billingControls: updated.billingControls || {} }));
+    console.log(JSON.stringify({ applied: apply, missing, billingControls: updated.billingControls || {}, platformBillingControls: updated.platformBillingControls || {} }));
 }
 main().catch(error => {
     console.error(error.message);

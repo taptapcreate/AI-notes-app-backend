@@ -5,4 +5,10 @@ function billingControls(config) {
         usePrimarySubscriptionTracking: config?.billingControls?.usePrimarySubscriptionTracking !== false,
     };
 }
-module.exports = { billingControls };
+function platformBillingControls(config) {
+    return Object.fromEntries(['ios', 'android', 'macos', 'windows'].map(platform => [platform, {
+        showSubscriptions: config?.platformBillingControls?.[platform]?.showSubscriptions !== false,
+        showTopUpPacks: config?.platformBillingControls?.[platform]?.showTopUpPacks !== false,
+    }]));
+}
+module.exports = { billingControls, platformBillingControls };
