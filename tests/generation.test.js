@@ -611,3 +611,44 @@ test('pending purchased charge and refund survive wallet deletion exactly once',
     assert.equal((await credits.balance(code)).credits, 20);
     assert.equal((await credits.balance(code)).freeCreditsRemaining, 0);
 });
+
+
+async function streamAPI(t, handler) {
+ const app=express();app.use(express.json());app.use('/api',generation.middleware);
+ app.post('/api/notes',async(req,res)=>{calls++;await handler(req,res);});
+ const server=app.listen(0,'127.0.0.1');await once(server,'listening');
+ t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
+ return `http://127.0.0.1:${server.address().port}/api/notes`;
+}
+test('streamed previews commit once and JSON retry replays the same paid result',async t=>{
+ const code=await account(),id=randomUUID();let release,started;
+ const proceed=new Promise(r=>release=r),ready=new Promise(r=>started=r);
+ const url=await streamAPI(t,async(req,res)=>{req.noteStream.delta('Live ');started();await proceed;req.noteStream.delta('note');res.json({notes:'Live note'});});
+ const result=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${code}`,'Idempotency-Key':id,Accept:'text/event-stream'},body:JSON.stringify(source)});
+ assert.match(result.headers.get('content-type'),/text\/event-stream/);const reader=result.body.getReader(),decoder=new TextDecoder();await ready;
+ let text='';while(!text.includes('Live ')){text+=decoder.decode((await reader.read()).value);}
+ assert.equal(text.includes('complete'),false);assert.equal((await GenerationRequest.findOne({requestId:id})).state,'pending');release();
+ while(true){const part=await reader.read();if(part.done)break;text+=decoder.decode(part.value);}
+ const frames=text.split('\n\n').filter(x=>x.startsWith('data:')).map(x=>JSON.parse(x.slice(5)));
+ const final=frames.find(x=>x.type==='complete');assert.equal(final.status,200);assert.equal(final.body.notes,'Live note');assert.equal(final.body.billing.charged,true);assert.equal(final.body.billing.creditCost,1);
+ assert.equal((await GenerationRequest.findOne({requestId:id})).state,'succeeded');
+ const again=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${code}`,'Idempotency-Key':id},body:JSON.stringify(source)});
+ assert.equal((await again.json()).notes,'Live note');assert.equal(calls,1);assert.equal((await credits.balance(code)).freeCreditsRemaining,6);
+});
+test('stream failure refunds the held credit and returns a terminal failure receipt',async t=>{
+ const code=await account(),id=randomUUID();const before=await credits.balance(code);
+ const url=await streamAPI(t,async(req,res)=>{req.noteStream.delta('Incomplete');res.status(502).json({error:'Upstream disconnected'});});
+ const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${code}`,'Idempotency-Key':id,Accept:'text/event-stream'},body:JSON.stringify(source)});
+ const frames=(await response.text()).split('\n\n').filter(x=>x.startsWith('data:')).map(x=>JSON.parse(x.slice(5)));const final=frames.find(x=>x.type==='complete');
+ assert.equal(final.status,502);assert.equal(final.body.billing.charged,false);assert.equal((await credits.balance(code)).freeCreditsRemaining,before.freeCreditsRemaining);
+});
+test('a disconnected preview still saves the paid result for a same-ID retry',async t=>{
+ const code=await account(),id=randomUUID();let release;const wait=new Promise(r=>release=r);
+ const url=await streamAPI(t,async(req,res)=>{req.noteStream?.delta('First');await wait;res.json({notes:'Recovered final note'});});
+ const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${code}`,'Idempotency-Key':id,Accept:'text/event-stream'},body:JSON.stringify(source)});
+ const reader=response.body.getReader();await reader.read();await reader.cancel();release();
+ for(let tries=0;tries<100;tries++){if((await GenerationRequest.findOne({requestId:id})).state==='succeeded')break;await new Promise(r=>setTimeout(r,10));}
+ const replay=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${code}`,'Idempotency-Key':id,Accept:'text/event-stream'},body:JSON.stringify(source)});
+ const final=(await replay.text()).split('\n\n').filter(x=>x.startsWith('data:')).map(x=>JSON.parse(x.slice(5))).find(x=>x.type==='complete');
+ assert.equal(final.body.notes,'Recovered final note');assert.equal(final.body.billing.charged,true);assert.equal(calls,1);assert.equal((await credits.balance(code)).freeCreditsRemaining,6);
+});

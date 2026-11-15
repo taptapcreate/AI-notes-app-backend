@@ -3,6 +3,7 @@ const { requestHistoryUsage } = require('./subscription-usage');
 const { validateNarration } = require('./walkthrough');
 const { createHash } = require('node:crypto');
 const { context } = require('./generation-context');
+const { createNoteStream } = require('./note-stream');
 const {
     CreditError,
     policy,
@@ -481,7 +482,7 @@ function createGeneration({
         )
             return next();
         const send = res.json.bind(res);
-        let timer;
+        let timer, stream;
         const abort = new AbortController();
         let finishing = false;
         const complete = async (status, value, id) => {
@@ -492,15 +493,13 @@ function createGeneration({
             try {
                 const record = await finish(id, status, value);
                 const body = await response(record);
-                if (!res.destroyed && !res.writableEnded)
-                    res.status(record.httpStatus);
-                if (!res.destroyed && !res.writableEnded) send(body);
+                if (stream) stream.finish(record.httpStatus, body);
+                else if (!res.destroyed && !res.writableEnded) { res.status(record.httpStatus); send(body); }
             } catch (error) {
                 if (!res.destroyed && !res.writableEnded) {
-                    res.status(503);
-                    send({
-                        error: 'Your AI request is being reconciled. Retry with the same request ID to check its result.',
-                    });
+                    const body = { error: 'Your AI request is being reconciled. Retry with the same request ID to check its result.' };
+                    if (stream) stream.finish(503, body);
+                    else { res.status(503); send(body); }
                 }
             }
         };
@@ -528,9 +527,15 @@ function createGeneration({
                 body,
                 storeKitProofs,
             );
+            if (endpoint === '/notes' && req.get('Accept')?.includes('text/event-stream')) {
+                stream = createNoteStream(res, record.requestId);
+                req.noteStream = stream;
+            }
             if (cached) {
+                const body = await response(record);
+                if (stream) return stream.finish(record.httpStatus, body);
                 res.status(record.httpStatus);
-                return send(await response(record));
+                return send(body);
             }
             req.body.isPro = record.reservation.membershipPro ?? record.reservation.pro;
             if (endpoint === '/sentiment')
@@ -560,13 +565,10 @@ function createGeneration({
             timer.unref?.();
             context.run({ signal: abort.signal }, () => next());
         })().catch((error) => {
-            res.status(error.status || 503);
-            send({
-                error: error.status
-                    ? error.message
-                    : 'AI charging is temporarily unavailable. Please try again.',
-                ...(error.details || {}),
-            });
+            const status = error.status || 503;
+            const body = { error: error.status ? error.message : 'AI charging is temporarily unavailable. Please try again.', ...(error.details || {}) };
+            if (stream) stream.finish(status, body);
+            else { res.status(status); send(body); }
         });
     }
     return {

@@ -49,7 +49,7 @@ function audioFormat(data) {
 
 function createOpenRouter(client) {
     return {
-        async complete(content, maxTokens, signal) {
+        async complete(content, maxTokens, signal, onDelta) {
             let hasPdf = false;
             const parts = typeof content === 'string' ? content : content.map(item => {
                 if (typeof item === 'string') return { type: 'text', text: item };
@@ -63,8 +63,25 @@ function createOpenRouter(client) {
                 messages: [{ role: 'user', content: parts }],
                 max_completion_tokens: maxTokens,
                 reasoning: { effort: 'none' },
+                ...(onDelta && { stream: true }),
                 ...(hasPdf && { plugins: [{ id: 'file-parser', pdf: { engine: 'mistral-ocr' } }] }),
             }, { signal });
+            if (onDelta) {
+                let text = '', finishReason;
+                for await (const chunk of response) {
+                    const choice = chunk.choices?.[0];
+                    if (chunk.error || choice?.finish_reason === 'error') throw new Error('AI stream failed');
+                    const delta = choice?.delta?.content;
+                    if (typeof delta === 'string' && delta) {
+                        text += delta;
+                        if (text.length > 2000000) throw new Error('AI completion is too large');
+                        onDelta(delta);
+                    }
+                    if (choice?.finish_reason) finishReason = choice.finish_reason;
+                }
+                if (!text.trim() || !finishReason || !['stop', 'length'].includes(finishReason)) throw new Error('Incomplete AI stream');
+                return { text, finishReason };
+            }
             const choice = response.choices?.[0];
             const text = choice?.message?.content;
             if (typeof text !== 'string' || !text.trim()) throw new Error('Empty AI completion');

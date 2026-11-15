@@ -5,6 +5,9 @@ const { CreditError, recoveryCode } = require('../services/credit-policy');
 
 function createCreditRouter({ credits, purchases, appleSubscriptions, logger = console }) {
     const router = express.Router();
+    const readAnnouncement = require('../services/user-announcements').createUserAnnouncements({
+        Messages: require('../models/UserAnnouncement'), credits,
+    });
     const endpoint = (handler) => async (req, res) => {
         try {
             res.json(await handler(req));
@@ -19,6 +22,10 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
             });
         }
     };
+    router.get('/announcement', endpoint(req => {
+        req.res.set('Cache-Control', 'no-store');
+        return readAnnouncement(req.get('Authorization'), require('../services/platform').requestPlatform(req));
+    }));
     router.post(
         '/register',
         rateLimit({

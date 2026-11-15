@@ -63,3 +63,30 @@ test('invalid attachments and empty upstream results fail instead of returning a
     await assert.rejects(router.transcribe(b64('not audio')), InvalidSource);
     await assert.rejects(router.transcribe(b64('RIFF0000WAVE')), /No speech was detected/);
 });
+
+
+test('live completion publishes provider deltas before its final response using the same model', async () => {
+    const requests=[], previews=[];
+    let release;const waiting=new Promise(resolve=>release=resolve);
+    const router=createOpenRouter({chat:{completions:{create:async body=>{
+        requests.push(body);
+        return (async function*(){
+            yield {choices:[{delta:{content:'Hello '}}]};
+            await waiting;
+            yield {choices:[{delta:{content:'world 🌍'},finish_reason:'stop'}]};
+        })();
+    }}}});
+    const result=router.complete('Source',512,undefined,text=>previews.push(text));
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(previews,['Hello ']);release();
+    assert.deepEqual(await result,{text:'Hello world 🌍',finishReason:'stop'});
+    assert.equal(requests.length,1);assert.equal(requests[0].stream,true);assert.equal(requests[0].model,'openai/gpt-6-luna');
+});
+test('upstream EOF or in-stream failure cannot become a successful note', async()=>{
+    for(const ending of [null,{error:{message:'Provider failed'}},{choices:[{finish_reason:'error'}]}]){
+        const router=createOpenRouter({chat:{completions:{create:async()=> (async function*(){
+            yield {choices:[{delta:{content:'Partial'}}]};if(ending)yield ending;
+        })()}}});
+        await assert.rejects(router.complete('Source',100,undefined,()=>{}),/stream/);
+    }
+});

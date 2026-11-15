@@ -23,6 +23,15 @@ const AppConfigSchema = new mongoose.Schema({
         default: 'master_config',
     },
     maintenance: { type: new mongoose.Schema({
+        platforms: { type: new mongoose.Schema(Object.fromEntries(
+            ['ios', 'android', 'macos'].map(platform => [platform, {
+                type: new mongoose.Schema({
+                    enabled: { type: Boolean, default: false },
+                    title: { type: String, maxlength: 120 },
+                    message: { type: String, maxlength: 2000 },
+                }, { _id: false }), default: () => ({}),
+            }]),
+        ), { _id: false }), default: () => ({}) },
         enabled: { type: Boolean, default: false },
         title: { type: String, maxlength: 120, default: 'We’ll be back soon' },
         message: { type: String, maxlength: 2000, default: 'AI Notes is undergoing maintenance. Please try again shortly.' },

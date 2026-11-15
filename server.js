@@ -5,6 +5,7 @@ const { MODEL, InvalidSource, createOpenRouter } = require('./services/openroute
 const mongoose = require('mongoose');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const { cleanSourceText, websiteText } = require('./services/source-cleanup');
 const { YoutubeTranscript } = require('youtube-transcript');
 const { Expo } = require('expo-server-sdk');
 require('dotenv').config();
@@ -72,6 +73,10 @@ const getAppConfig = async () => {
 let accountRecoveryReady = false;
 const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
     .then(async () => {
+        await getAppConfig();
+        await require('./services/message-controls-init').initializeMessageControls({
+            Config: AppConfig, Messages: require('./models/UserAnnouncement'),
+        }).catch(error => console.error('Message controls initialization deferred:', error.message));
         const result = await require('./services/recovery-cutover').backfillAccountRecovery({
             User, Subscription: AppleSubscription, Backup: require('./models/AccountRecovery'),
         });
@@ -113,30 +118,9 @@ const fetchWebsiteContent = async (url) => {
         });
         if (typeof data !== 'string' || !/^text\/(html|plain)(?:;|$)/i.test(headers['content-type'] || ''))
             throw new Error('Unsupported page content');
-        const $ = cheerio.load(data);
-        if ($('meta[name="robots"]').attr('content')?.split(/[\s,]+/).includes('noai') ||
-            /just a moment|access denied|verify (?:that )?you are human|attention required/i.test($('title').text()))
-            throw new Error('Restricted page');
-
-        // Remove scripts, styles, and ads
-        $('script').remove();
-        $('style').remove();
-        $('nav').remove();
-        $('footer').remove();
-        $('.ads').remove();
-
-        // Extract meaningful text
-        let content = '';
-        $('h1, h2, h3, p, li').each((i, el) => {
-            const text = $(el).text().trim();
-            if (text.length > 20) {
-                content += text + '\n';
-            }
-        });
-
-        if (headers['content-type'].startsWith('text/plain')) content = data.trim();
+        const content = websiteText(data, { plainText: /^text\/plain(?:;|$)/i.test(headers['content-type']) });
         if (!content.trim()) throw new Error('Empty page');
-        return content.substring(0, 10000);
+        return content;
     } catch {
         throw new Error('WEB_ACCESS_BLOCKED: AI Notes couldn’t read this page. Paste the article text instead.');
     }
@@ -229,18 +213,19 @@ const fetchYouTubeTranscript = async (url) => {
 };
 
 // Helper: API Call with Retry Logic (Exponential Backoff)
-const generateWithRetry = async (maxTokens, content, retries = 3, delay = 2000) => {
+const generateWithRetry = async (maxTokens, content, retries = 3, delay = 2000, onDelta) => {
+    let emitted = false;
     try {
         generationSignal()?.throwIfAborted();
-        return await complete(content, maxTokens, generationSignal());
+        return await complete(content, maxTokens, generationSignal(), onDelta && (text => { emitted = true; onDelta(text); }));
     } catch (error) {
         const isRateLimit = error.message.includes('429') || error.message.includes('Too Many Requests');
         const isServiceUnavailable = error.message.includes('503') || error.message.includes('Overloaded');
 
-        if (retries > 0 && (isRateLimit || isServiceUnavailable)) {
+        if (!emitted && retries > 0 && (isRateLimit || isServiceUnavailable)) {
             console.log(`⚠️ API Busy (Rate Limit). Retrying in ${delay / 1000}s... (${retries} attempts left)`);
             await sleep(delay);
-            return generateWithRetry(maxTokens, content, retries - 1, delay * 2);
+            return generateWithRetry(maxTokens, content, retries - 1, delay * 2, onDelta);
         }
         throw error;
     }
@@ -356,29 +341,30 @@ app.post('/api/notes', async (req, res) => {
             : 'Keep the output in English.';
 
         const promptFor = (sourceContent = content) => buildNotePrompt({
-            type, sourceKind, content: sourceContent, instruction,
+            type, sourceKind, content: ['text', 'voice', 'website', 'youtube'].includes(type) ? cleanSourceText(sourceContent) : sourceContent, instruction,
             lengthInstruction, formatInstruction, toneInstruction, languageInstruction, isPro,
             url: ['website', 'youtube'].includes(type) ? content : undefined,
         });
+        const generate = value => generateWithRetry(maxTokens, value, 3, 2000, req.noteStream?.delta);
         let result;
         switch (type) {
             case 'text':
-                result = await generateWithRetry(maxTokens, promptFor());
+                result = await generate(promptFor());
                 break;
             case 'image':
             case 'pdf':
-                result = await generateWithRetry(maxTokens, [promptFor(), {
+                result = await generate([promptFor(), {
                     inlineData: { mimeType: type === 'pdf' ? 'application/pdf' : 'image/jpeg', data: content },
                 }]);
                 break;
             case 'voice':
-                result = await generateWithRetry(maxTokens, promptFor(await transcribe(content, generationSignal())));
+                result = await generate(promptFor(await transcribe(content, generationSignal())));
                 break;
             case 'website':
-                result = await generateWithRetry(maxTokens, promptFor(await fetchWebsiteContent(content)));
+                result = await generate(promptFor(await fetchWebsiteContent(content)));
                 break;
             case 'youtube':
-                result = await generateWithRetry(maxTokens, promptFor(await fetchYouTubeTranscript(content)));
+                result = await generate(promptFor(await fetchYouTubeTranscript(content)));
                 break;
             default:
                 return res.status(400).json({ error: 'Invalid input type' });
