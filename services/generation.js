@@ -144,6 +144,9 @@ function createGeneration({
     now = () => new Date(),
     leaseMs = 180000,
 }) {
+    const subscriptionRecovery = Subscription && require('./account-recovery').createAccountRecovery({
+        Account: Subscription, Backup: require('../models/AccountRecovery'), kind: 'subscription', now,
+    });
     const key = (code, id) =>
         createHash('sha256').update(`${code}:${id}`).digest('hex');
     const transaction = async (work) => {
@@ -192,6 +195,10 @@ function createGeneration({
             }
             if (status >= 400) {
                 const held = record.reservation;
+                if (held.subscriptionId) {
+                    try { await subscriptionRecovery.ensure(held.subscriptionId, session); }
+                    catch (error) { if (error.status !== 404) throw error; }
+                } else await credits.ensureAccount(record.recoveryCode, session);
                 if (held.pro) {
                     await (held.subscriptionId ? Subscription : User).updateOne(
                         {
@@ -216,6 +223,12 @@ function createGeneration({
                         { session },
                     );
                 }
+            }
+            if (status >= 400) {
+                if (record.reservation.subscriptionId) {
+                    if (await Subscription.exists({ _id: record.reservation.subscriptionId }).session(session))
+                        await subscriptionRecovery.checkpoint(record.reservation.subscriptionId, session);
+                } else await credits.checkpointAccount(record.recoveryCode, session);
             }
             return GenerationRequest.findOneAndUpdate(
                 { _id: id, state: 'pending' },
@@ -289,9 +302,7 @@ function createGeneration({
                     .session(session)
                     .lean();
                 if (duplicate) return check(duplicate);
-                const user = await User.findOne({ recoveryCode: code })
-                    .session(session)
-                    .lean();
+                const user = await credits.ensureAccount(code, session);
                 if (!user)
                     throw new CreditError(401, 'Reconnect your AI account');
                 const timestamp = now();
@@ -303,6 +314,10 @@ function createGeneration({
                         throw new CreditError(503, 'Your subscription could not be checked. Please try again.');
                     // A restore, renewal or expiration can occur after the earlier
                     // provider lookup. Reserve against the current shared record.
+                    for (const id of user.appleSubscriptionIds) {
+                        try { await subscriptionRecovery.ensure(id, session); }
+                        catch (error) { if (error.status !== 404) throw error; }
+                    }
                     const records = await Subscription.find({
                         _id: { $in: user.appleSubscriptionIds },
                     }).sort({ expiresAt: -1 }).session(session).lean();
@@ -400,6 +415,9 @@ function createGeneration({
                         paid,
                     };
                 }
+                // The held credit/quota and its recovery snapshot commit atomically.
+                if (reservation.subscriptionId) await subscriptionRecovery.checkpoint(reservation.subscriptionId, session);
+                await credits.checkpointAccount(code, session);
                 const [record] = await GenerationRequest.create(
                     [
                         {

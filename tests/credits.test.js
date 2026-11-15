@@ -1,9 +1,10 @@
+const AccountRecovery = require('../models/AccountRecovery');
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const express = require('express');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const User = require('../models/User');
 const AppConfig = require('../models/AppConfig');
 const CreditRegistration = require('../models/CreditRegistration');
@@ -18,7 +19,7 @@ const { createPurchaseAdminRouter } = require('../routes/purchase-admin');
 let mongo, config, time, credits;
 const logger = { error() {}, warn() {} };
 before(async () => {
-    mongo = await MongoMemoryServer.create({ binary: { version: '8.0.17' } });
+    mongo = await MongoMemoryReplSet.create({ binary: { version: '8.0.17' }, replSet: { count: 1 } });
     await mongoose.connect(mongo.getUri(), { dbName: 'ai_notes_credit_tests' });
     await Promise.all([
         User.init(),
@@ -33,6 +34,7 @@ after(async () => {
     await mongo?.stop();
 });
 beforeEach(async () => {
+    await AccountRecovery.deleteMany({});
     await Promise.all([
         User.deleteMany({}),
         AppConfig.deleteMany({}),

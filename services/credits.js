@@ -16,21 +16,28 @@ function generateCode() {
 }
 
 function createCredits({
-    User,
-    CreditRegistration,
-    PurchaseClaim,
+    User: Account,
+    CreditRegistration: Registrations,
+    PurchaseClaim: Claims,
+    Backup = require('../models/AccountRecovery'),
     getAppConfig,
     subscriptionUsageFor = async (user, config, timestamp) => requestHistoryUsage(user, config, timestamp),
     now = () => new Date(),
 }) {
+    const recovery = require('./account-recovery').createAccountRecovery({ Account, Backup, kind: 'wallet', now });
+    const transactions = require('./account-transactions').createAccountTransactions(Account, Backup);
+    const User = transactions.bind(Account);
+    const CreditRegistration = transactions.bind(Registrations);
+    const PurchaseClaim = transactions.bind(Claims);
     const currentPolicy = async () => policy(await getAppConfig());
-    const byCode = async (value) => {
-        const user = await User.findOne({
-            recoveryCode: recoveryCode(value),
-        }).lean();
-        if (!user) throw new CreditError(404, 'User not found');
-        return user;
-    };
+    const byCode = async value => recovery.ensure(recoveryCode(value), transactions.session());
+    const withWallet = (value, work) => transactions.run(async () => {
+        const code = recoveryCode(value);
+        await byCode(code);
+        const result = await work();
+        await recovery.checkpoint(code, transactions.session());
+        return result;
+    });
     const expected = (user, field) =>
         user[field] === undefined ? { $exists: false } : user[field];
 
@@ -132,101 +139,44 @@ function createCredits({
             throw new CreditError(400, 'Invalid device identity');
         }
         const rules = await currentPolicy();
-        let existing = deviceId
-            ? await User.findOne({ deviceId }).lean()
-            : null;
+        let existing = deviceId ? await User.findOne({ deviceId }).lean() : null;
         let code = existing?.recoveryCode || generateCode();
-        let registration;
-        if (deviceId) {
-            const key = createHash('sha256').update(deviceId).digest('hex');
-            try {
-                registration = await CreditRegistration.findOneAndUpdate(
-                    { _id: key },
-                    {
-                        $setOnInsert: { recoveryCode: code, createdAt: now() },
-                    },
-                    { upsert: true, returnDocument: 'after' },
-                );
-            } catch (error) {
-                if (error.code !== 11000) throw error;
-                registration = await CreditRegistration.findById(key);
-                if (!registration) throw error;
-            }
+        let registration = deviceId ? await CreditRegistration.findById(createHash('sha256').update(deviceId).digest('hex')) : null;
+        // Recovery also works if only the device registration was accidentally deleted.
+        if (!registration && !existing && deviceId) {
+            const backup = await Backup.findOne({ kind: 'wallet', 'snapshot.deviceId': deviceId }).session(transactions.session()).lean();
+            if (backup) { code = backup.identity; existing = await byCode(code); }
+        }
+        if (registration) {
             code = registration.recoveryCode;
-        }
-        for (let attempt = 0; attempt < 10; attempt++) {
-            try {
-                const initial = {
-                    recoveryCode: code,
-                    deviceId: deviceId || null,
-                    platform: platform.toLowerCase(),
-                    credits: 0,
-                    adCredits: 0,
-                    freeCreditsRemaining: rules.daily ? rules.dailyLimit : 0,
-                    lastFreeCreditsReset: now(),
-                    totalFreeCredits: rules.daily ? 0 : rules.welcomeCredits,
-                    welcomePackVersion: rules.daily ? 0 : 1,
-                    welcomeGrantClaimedAt: rules.daily ? null : now(),
-                };
-                const inserted = deviceId
-                    ? await User.findOneAndUpdate(
-                          { recoveryCode: code, deviceId },
-                          {
-                              $setOnInsert: initial,
-                          },
-                          {
-                              upsert: true,
-                              returnDocument: 'after',
-                              setDefaultsOnInsert: true,
-                          },
-                      ).lean()
-                    : (await User.create(initial)).toObject();
-                const user = await ensureAllowance(inserted, rules);
-                return {
-                    ...balance(user, rules),
-                    recoveryCode: user.recoveryCode,
-                    isExistingDevice: !!existing,
-                };
-            } catch (error) {
-                if (error.code !== 11000) throw error;
-                // An identical device registration may have inserted the same user concurrently.
-                const registered = await User.findOne({
-                    recoveryCode: code,
-                }).lean();
-                if (
-                    deviceId &&
-                    registered &&
-                    registered.deviceId === deviceId
-                ) {
-                    return {
-                        ...balance(
-                            await ensureAllowance(registered, rules),
-                            rules,
-                        ),
-                        recoveryCode: code,
-                        isExistingDevice: true,
-                    };
-                }
-                // A rare generated-code collision must never expose another device's account.
-                const replacement = generateCode();
-                if (registration) {
-                    registration =
-                        (await CreditRegistration.findOneAndUpdate(
-                            { _id: registration._id, recoveryCode: code },
-                            {
-                                $set: { recoveryCode: replacement },
-                            },
-                            { returnDocument: 'after' },
-                        )) ||
-                        (await CreditRegistration.findById(registration._id));
-                    code = registration.recoveryCode;
-                } else code = replacement;
+            try { existing = await byCode(code); }
+            catch (error) {
+                if (error.status !== 404) throw error;
+                // This device is known. Missing financial history is never permission
+                // for another welcome grant or a zeroed purchased-credit balance.
+                throw new CreditError(503, 'Your account needs support recovery. No confirmed balance backup is available.');
             }
         }
-        throw new CreditError(
-            409,
-            'Could not finish registration; please try again',
-        );
+        await recovery.assertRecoverable(code, transactions.session());
+        if (!existing) {
+            for (let attempt = 0; await User.exists({ recoveryCode: code }); attempt++) {
+                if (attempt >= 10) throw new CreditError(409, 'Could not register; please retry');
+                code = generateCode();
+            }
+            existing = (await User.create({
+                recoveryCode: code, deviceId: deviceId || null, platform: platform.toLowerCase(),
+                credits: 0, adCredits: 0,
+                freeCreditsRemaining: rules.daily ? rules.dailyLimit : 0,
+                lastFreeCreditsReset: now(), totalFreeCredits: rules.daily ? 0 : rules.welcomeCredits,
+                welcomePackVersion: rules.daily ? 0 : 1, welcomeGrantClaimedAt: rules.daily ? null : now(),
+            })).toObject();
+        }
+        if (deviceId && !registration) await CreditRegistration.create({
+            _id: createHash('sha256').update(deviceId).digest('hex'), recoveryCode: code, createdAt: now(),
+        });
+        const user = await ensureAllowance(existing, rules);
+        await recovery.checkpoint(code, transactions.session());
+        return { ...balance(user, rules), recoveryCode: code, isExistingDevice: !!registration };
     }
 
     async function getBalance(code, sandboxIds) {
@@ -367,9 +317,7 @@ function createCredits({
                     { upsert: true, returnDocument: 'after' },
                 );
             } catch (error) {
-                if (error.code !== 11000) throw error;
-                claim = await PurchaseClaim.findById(key);
-                if (!claim) throw error;
+                throw error;
             }
             if (claim.recoveryCode !== clean)
                 throw new CreditError(
@@ -478,15 +426,18 @@ function createCredits({
     }
 
     return {
-        register,
-        balance: getBalance,
-        use,
-        recover,
-        grantPurchase,
-        claimAd,
-        byCode,
+        register: input => transactions.run(() => register(input)),
+        balance: (code, sandboxIds) => withWallet(code, () => getBalance(code, sandboxIds)),
+        use: (code, amount) => withWallet(code, () => use(code, amount)),
+        recover: (code, currentCode) => withWallet(code, () => recover(code, currentCode)),
+        grantPurchase: (code, ids, amount, source) => withWallet(code, () => grantPurchase(code, ids, amount, source)),
+        claimAd: code => withWallet(code, () => claimAd(code)),
+        byCode: code => withWallet(code, () => byCode(code)),
+        ensureAccount: recovery.ensure,
+        checkpointAccount: recovery.checkpoint,
+        async backfill(code) { return withWallet(code, () => byCode(code)); },
         async syncWelcomePack(code) {
-            const result = await getBalance(code);
+            const result = await withWallet(code, () => getBalance(code));
             return {
                 ...result,
                 newBalance: result.freeCreditsRemaining,

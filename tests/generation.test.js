@@ -1,3 +1,4 @@
+const AccountRecovery = require('../models/AccountRecovery');
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
@@ -31,6 +32,7 @@ after(async () => {
     await mongo?.stop();
 });
 beforeEach(async () => {
+    await AccountRecovery.deleteMany({});
     await Promise.all([
         User.deleteMany({}),
         GenerationRequest.deleteMany({}),
@@ -563,4 +565,33 @@ test('a client-provided counter cannot bypass the protected fallback', async () 
     member = { isPro: false };
     const paid = await reserve(code, randomUUID(), { ...source, isPro: true, localSubscriptionUsage: { used: 0 } });
     assert.equal(paid.record.reservation.pro, false);
+});
+
+
+test('request-history fallback preserves ten-per-day usage when the primary counter is deleted', async () => {
+    const code = await account();
+    member = { isPro: true };
+    config.subscriberDailyLimit = 10;
+    for (let i = 0; i < 3; i++) {
+        const request = await reserve(code);
+        await generation.finish(request.record._id, 200, { notes: 'Verified note' });
+    }
+    const before = await credits.balance(code);
+    assert.equal(before.subscriberDailyRemaining, 7);
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    await User.updateOne({ recoveryCode: code }, { $unset: { dailyRequestCount: 1 } });
+    const fallback = await credits.balance(code);
+    assert.equal(fallback.subscriptionTrackingSource, 'requestHistory');
+    assert.equal(fallback.subscriberDailyUsage, 3);
+    assert.equal(fallback.subscriberDailyRemaining, 7);
+    const next = await reserve(code);
+    await generation.finish(next.record._id, 200, { notes: 'Fourth note' });
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 6);
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 4);
+    await reserve(code, next.record.requestId);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 6);
+    config.billingControls.usePrimarySubscriptionTracking = true;
+    const primary = await credits.balance(code);
+    assert.equal(primary.subscriberDailyRemaining, 6);
+    assert.equal(primary.totalAvailable, before.totalAvailable);
 });

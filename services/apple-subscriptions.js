@@ -77,12 +77,16 @@ function createAppleSubscriptions({
     verify = appleVerifier(),
     now = () => new Date(),
 }) {
+    const Backup = require('../models/AccountRecovery');
+    const subscriptionRecovery = require('./account-recovery').createAccountRecovery({ Account: Subscription, Backup, kind: 'subscription', now });
+    const walletRecovery = require('./account-recovery').createAccountRecovery({ Account: User, Backup, kind: 'wallet', now });
     const transaction = async (work) => {
-        const session = await User.db.startSession();
-        try {
-            return await session.withTransaction(() => work(session));
-        } finally {
-            await session.endSession();
+        await Backup.init();
+        for (let attempt = 0; ; attempt++) {
+            const session = await User.db.startSession();
+            try { return await session.withTransaction(() => work(session)); }
+            catch (error) { if (error.code !== 11000 || attempt >= 9) throw error; }
+            finally { await session.endSession(); }
         }
     };
     const active = (record, timestamp = now()) =>
@@ -96,6 +100,13 @@ function createAppleSubscriptions({
     async function recordFor(user, session, sandboxIds) {
         const ids = user.appleSubscriptionIds || [];
         if (!ids.length) return null;
+        if (!session) return transaction(inner => recordFor(user, inner, sandboxIds));
+        for (const id of ids) {
+            try {
+                await subscriptionRecovery.ensure(id, session);
+                await subscriptionRecovery.checkpoint(id, session);
+            } catch (error) { if (error.status !== 404) throw error; }
+        }
         const query = Subscription.find({ _id: { $in: ids } }).sort({
             expiresAt: -1,
         });
@@ -153,32 +164,20 @@ function createAppleSubscriptions({
                 'This is not a valid AI Notes subscription',
             );
         const id = identity(payload.environment, payload.originalTransactionId);
-        // Create outside the transaction so a simultaneous first restore can safely retry.
-        try {
-            await Subscription.updateOne(
-                { _id: id },
-                {
-                    $setOnInsert: {
-                        environment: payload.environment,
-                        originalTransactionId: payload.originalTransactionId,
-                    },
-                },
-                { upsert: true },
-            );
-        } catch (error) {
-            if (error.code !== 11000) throw error;
-        }
         await transaction(async (session) => {
-            const user = code
-                ? await User.findOne({ recoveryCode: code })
-                      .session(session)
-                      .lean()
-                : null;
-            if (code && !user)
-                throw new CreditError(404, 'Recovery code not found');
-            const current = await Subscription.findById(id)
-                .session(session)
-                .lean();
+            const user = code ? await walletRecovery.ensure(code, session) : null;
+            let current;
+            try { current = await subscriptionRecovery.ensure(id, session); }
+            catch (error) {
+                if (error.status !== 404) throw error;
+                if (user?.appleSubscriptionIds?.includes(id))
+                    throw new CreditError(503, 'Subscription recovery needs support. No confirmed usage backup is available.');
+                const [created] = await Subscription.create([{
+                    _id: id, environment: payload.environment,
+                    originalTransactionId: payload.originalTransactionId,
+                }], { session });
+                current = created.toObject();
+            }
             const set = {};
             const revoked = new Set(current.revokedTransactions || []);
             if (payload.revocationDate) revoked.add(payload.transactionId);
@@ -305,6 +304,8 @@ function createAppleSubscriptions({
                     { $addToSet: { appleSubscriptionIds: id } },
                     { session },
                 );
+            await subscriptionRecovery.checkpoint(id, session);
+            if (user) await walletRecovery.checkpoint(code, session);
         });
         return id;
     }
@@ -352,10 +353,9 @@ function createAppleSubscriptions({
             return false;
         // The webhook updates only subscriptions already verified through StoreKit.
         return transaction(async (session) => {
-            const record = await Subscription.findById(id)
-                .session(session)
-                .lean();
-            if (!record) return false;
+            let record;
+            try { record = await subscriptionRecovery.ensure(id, session); }
+            catch (error) { if (error.status === 404) return false; throw error; }
             const refunded =
                 event.type === 'CANCELLATION' &&
                 event.cancel_reason === 'CUSTOMER_SUPPORT' &&
@@ -412,6 +412,7 @@ function createAppleSubscriptions({
                     revokedTransactions: event.transaction_id,
                 };
             await Subscription.updateOne({ _id: id }, update, { session });
+            await subscriptionRecovery.checkpoint(id, session);
             return true;
         });
     }

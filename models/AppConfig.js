@@ -45,6 +45,8 @@ const AppConfigSchema = new mongoose.Schema({
     },
     // 1. General Alerts
     globalAlert: {
+        id: { type: String, maxlength: 120 },
+        displayMode: { type: String, enum: ['popup', 'banner'], default: 'popup' },
         active: { type: Boolean, default: false },
         title: { type: String, default: 'Announcement' },
         message: { type: String, default: '' },

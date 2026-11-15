@@ -1,3 +1,4 @@
+const AccountRecovery = require('../models/AccountRecovery');
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
@@ -51,6 +52,7 @@ after(async () => {
     await mongo?.stop();
 });
 beforeEach(async () => {
+    await AccountRecovery.deleteMany({});
     await Promise.all(
         [
             User,
@@ -503,4 +505,33 @@ test('request-history fallback shares one allowance across Apple wallets and res
     await Subscription.deleteMany({});
     await attach(codes[0]);
     assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 2);
+});
+
+
+test('missing Apple daily counter uses verified shared history without changing subscription identity', async () => {
+    await Promise.all(codes.map(code => attach(code)));
+    for (let i = 0; i < 3; i++) {
+        const request = await generation.begin(codes[i % 2], randomUUID(), '/notes', source);
+        await generation.finish(request.record._id, 200, { notes: 'Verified shared note' });
+    }
+    const membership = await status(codes[0]);
+    const original = await Subscription.findById(membership.quotaId).lean();
+    const paidBefore = (await credits.balance(codes[0])).totalAvailable;
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    await Subscription.updateOne({ _id: membership.quotaId }, { $unset: { dailyRequestCount: 1 } });
+    for (const code of codes) {
+        const usage = await credits.balance(code);
+        assert.equal(usage.subscriptionTrackingSource, 'requestHistory');
+        assert.equal(usage.subscriberDailyUsage, 3);
+        assert.equal(usage.subscriberDailyRemaining, 7);
+    }
+    const next = await generation.begin(codes[1], randomUUID(), '/notes', source);
+    await generation.finish(next.record._id, 200, { notes: 'Fourth shared note' });
+    const repaired = await Subscription.findById(membership.quotaId).lean();
+    assert.equal(repaired.quotaEpoch, original.quotaEpoch);
+    assert.equal(repaired.dailyRequestCount, 4);
+    for (const code of codes) assert.equal((await credits.balance(code)).subscriberDailyRemaining, 6);
+    config.billingControls.usePrimarySubscriptionTracking = true;
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 6);
+    assert.equal((await credits.balance(codes[0])).totalAvailable, paidBefore);
 });
