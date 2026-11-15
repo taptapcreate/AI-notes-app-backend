@@ -667,17 +667,24 @@ app.post('/api/translate', async (req, res) => {
             return res.status(400).json({ error: 'Text and target language are required' });
         }
 
+        const hasMindmap = /^(?: {0,3})(?:`{3,}|~{3,})mermaid\s*\r?\n\s*mindmap\b/im.test(text);
+        const diagramRules = hasMindmap ? `
+- Preserve each fenced Mermaid mindmap, its indentation, node order, shape delimiters, and root identifier.
+- Translate all human-readable node labels into the target language, including the root label.
+- Keep the syntax identifiers mermaid, mindmap, and root. Do not add or remove nodes.
+- Keep Markdown headings, lists, tables, and code formatting.
+` : '';
         const prompt = `Translate the following text to ${targetLanguage}.
-        
-TEXT: "${text}"
+
+TEXT: ${JSON.stringify(text)}
 
 RULES:
 - Maintain the original tone and meaning
-- Return ONLY the translated text
+- Return only the translated text
 - Do not add explanations or notes
-`;
+${diagramRules}`;
 
-        const result = await generateWithRetry(2048, prompt);
+        const result = await generateWithRetry(hasMindmap ? 6500 : 2048, prompt);
         res.json({ translatedText: result.text });
 
     } catch (error) {
