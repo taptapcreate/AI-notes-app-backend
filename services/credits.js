@@ -182,8 +182,9 @@ function createCredits({
         return { ...balance(user, rules), recoveryCode: code, isExistingDevice: !!registration };
     }
 
-    async function getBalance(code, sandboxIds) {
-        const rules = await currentPolicy();
+    async function getBalance(code, sandboxIds, requestConfig) {
+        const config = requestConfig ?? await getAppConfig();
+        const rules = policy(config);
         const user = await prepared(code, rules);
         await User.updateOne(
             { _id: user._id },
@@ -192,7 +193,7 @@ function createCredits({
         const confirmed = await byCode(code);
         return {
             ...balance(confirmed, rules),
-            ...await subscriptionUsageFor(confirmed, await getAppConfig(), now(), sandboxIds),
+            ...await subscriptionUsageFor(confirmed, config, now(), sandboxIds),
         };
     }
 
@@ -434,7 +435,8 @@ function createCredits({
 
     return {
         register: input => transactions.run(() => register(input)),
-        balance: (code, sandboxIds) => withWallet(code, () => getBalance(code, sandboxIds)),
+        balance: (code, sandboxIds, requestConfig) =>
+            withWallet(code, () => getBalance(code, sandboxIds, requestConfig)),
         use: (code, amount) => withWallet(code, () => use(code, amount)),
         recover: (code, currentCode) => withWallet(code, () => recover(code, currentCode)),
         grantPurchase: (code, ids, amount, source) => withWallet(code, () => grantPurchase(code, ids, amount, source)),

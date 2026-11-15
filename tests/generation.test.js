@@ -317,13 +317,16 @@ test('purged result content leaves an idempotency record and cannot charge a lat
     const { record } = await reserve(code, id);
     await generation.finish(record._id, 200, { notes: 'Original result' });
     time = new Date(time.getTime() + 86400001);
-    await generation.recoverExpired();
     const retry = await reserve(code, id);
     assert.equal(retry.cached, true);
+    assert.deepEqual(retry.record.result, { notes: 'Original result' });
     await assert.rejects(
         generation.response(retry.record),
         (error) => error.status === 410,
     );
+    await generation.recoverExpired();
+    const purged = await GenerationRequest.findById(record._id).lean();
+    assert.equal(purged.result, undefined);
     assert.equal((await credits.balance(code)).totalAvailable, 6);
     assert.equal(await GenerationRequest.countDocuments(), 1);
 });

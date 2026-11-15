@@ -65,6 +65,8 @@ const generationService = createGeneration({ User, GenerationRequest, Subscripti
 const getAppConfig = async () => {
     // Preserve existing production settings. A missing database/configuration is
     // not permission to hand out a fallback allowance.
+    const config = await AppConfig.findOne({ key: 'master_config' });
+    if (config) return config;
     return AppConfig.findOneAndUpdate({ key: 'master_config' }, {
         $setOnInsert: { key: 'master_config' },
     }, { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true });

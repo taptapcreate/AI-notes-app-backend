@@ -246,14 +246,17 @@ function createGeneration({
         });
     }
     async function recoverExpired(code) {
-        await GenerationRequest.updateMany(
-            {
-                state: { $ne: 'pending' },
-                expiresAt: { $lte: now() },
-                result: { $exists: true },
-            },
-            { $unset: { result: 1, expiresAt: 1 } },
-        );
+        // The background sweep purges results. A request only reconciles its own wallet.
+        if (!code) {
+            await GenerationRequest.updateMany(
+                {
+                    state: { $ne: 'pending' },
+                    expiresAt: { $lte: now() },
+                    result: { $exists: true },
+                },
+                { $unset: { result: 1, expiresAt: 1 } },
+            );
+        }
         const records = await GenerationRequest.find({
             state: 'pending',
             leaseUntil: { $lte: now() },
@@ -266,7 +269,7 @@ function createGeneration({
                 error: 'The AI request expired. Your credit was returned; please try again.',
             });
     }
-    async function begin(code, requestId, endpoint, body, storeKitProofs) {
+    async function begin(code, requestId, endpoint, body, storeKitProofs, requestConfig) {
         if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId))
             throw new CreditError(400, 'A unique AI request ID is required');
         validateInput(endpoint, body);
@@ -291,8 +294,8 @@ function createGeneration({
         };
         const existing = await GenerationRequest.findById(id).lean();
         if (existing) return check(existing);
-        await credits.balance(code); // Initialize any legacy allowance once before reserving.
-        const config = await getAppConfig();
+        const config = requestConfig ?? await getAppConfig();
+        await credits.balance(code, undefined, config); // Initialize any legacy allowance before reserving.
         const rules = policy(config);
         const account = await credits.byCode(code);
         const sandboxIds = await resolveStoreKitScope(storeKitProofs, account);
@@ -450,7 +453,7 @@ function createGeneration({
         }
     }
     async function response(record) {
-        if (!record.result)
+        if (!record.result || (record.expiresAt && record.expiresAt <= now()))
             throw new CreditError(
                 410,
                 'This request completed earlier, but its saved result expired. No additional credit was charged. Start a new generation if you need another result.',
@@ -526,6 +529,7 @@ function createGeneration({
                 endpoint,
                 body,
                 storeKitProofs,
+                config,
             );
             if (endpoint === '/notes' && req.get('Accept')?.includes('text/event-stream')) {
                 stream = createNoteStream(res, record.requestId);
