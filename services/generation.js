@@ -1,5 +1,5 @@
 const { canUseAppleRecord } = require('./apple-subscriptions');
-const { subscriptionUsage } = require('./subscription-usage');
+const { requestHistoryUsage } = require('./subscription-usage');
 const { validateNarration } = require('./walkthrough');
 const { createHash } = require('node:crypto');
 const { context } = require('./generation-context');
@@ -322,7 +322,9 @@ function createGeneration({
                     pro = false;
                     quotaId = undefined;
                 }
-                const usage = subscriptionUsage(quota, config, timestamp);
+                // Both tracking modes serialize reservations by updating this quota document.
+                // The history count runs inside the same transaction, so parallel requests cannot overdraw.
+                const usage = await requestHistoryUsage(quota, config, timestamp, session, GenerationRequest);
                 const { billingMode } = body;
                 let reservation;
                 if (pro && usage.subscriberDailyRemaining > 0) {

@@ -490,3 +490,17 @@ test('verified StoreKit proof rebuilds a missing linked record and a prior reque
     await generation.finish(before.record._id, 500, { error: 'AI unavailable' });
     assert.equal((await credits.balance(code)).subscriberDailyRemaining, 9);
 });
+
+test('request-history fallback shares one allowance across Apple wallets and respects recreated quota epochs', async () => {
+    await Promise.all(codes.map(code => attach(code)));
+    config.subscriberDailyLimit = 2;
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    const results = await Promise.allSettled([codes[0], codes[1], codes[0], codes[1]].map(code =>
+        generation.begin(code, randomUUID(), '/notes', source)));
+    assert.equal(results.filter(result => result.status === 'fulfilled').length, 2);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 0);
+    assert.equal((await credits.balance(codes[1])).subscriberDailyRemaining, 0);
+    await Subscription.deleteMany({});
+    await attach(codes[0]);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 2);
+});

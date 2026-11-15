@@ -512,3 +512,55 @@ test('verified Apple sandbox Pro uses only its own daily allowance at zero credi
     entitlement.expires_date = '2000-01-01';
     assert.equal((await request(tester, randomUUID())).status, 402);
 });
+
+test('request-history fallback repairs an incorrect primary count and toggling modes cannot refill the allowance', async () => {
+    const code = await account();
+    member = { isPro: true };
+    const first = await reserve(code);
+    await generation.finish(first.record._id, 200, { notes: 'First note' });
+    await User.updateOne({ recoveryCode: code }, { $set: { dailyRequestCount: 9999, lastRequestReset: time } });
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 0);
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 1);
+    const second = await reserve(code);
+    await generation.finish(second.record._id, 200, { notes: 'Second note' });
+    await assert.rejects(reserve(code), error => error.status === 429);
+    config.billingControls.usePrimarySubscriptionTracking = true;
+    await assert.rejects(reserve(code), error => error.status === 429);
+    config.billingControls.usePrimarySubscriptionTracking = false;
+    const replay = await reserve(code, second.record.requestId);
+    assert.equal(replay.cached, true);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 0);
+    time = new Date(time);
+    time.setUTCDate(time.getUTCDate() + 1);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 2);
+});
+
+test('fallback reservations remain atomic and failures release their allowance exactly once', async () => {
+    const code = await account();
+    member = { isPro: true };
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    const results = await Promise.allSettled(Array.from({ length: 8 }, () => reserve(code)));
+    const granted = results.filter(result => result.status === 'fulfilled').map(result => result.value);
+    assert.equal(granted.length, 2);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 0);
+    await generation.finish(granted[0].record._id, 500, { error: 'Provider failed' });
+    await generation.finish(granted[0].record._id, 500, { error: 'Provider failed' });
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 1);
+    await reserve(code);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 0);
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
+});
+
+test('a client-provided counter cannot bypass the protected fallback', async () => {
+    const code = await account();
+    member = { isPro: true };
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    await reserve(code);
+    await reserve(code);
+    await assert.rejects(reserve(code, randomUUID(), { ...source, localSubscriptionUsage: { used: 0 } }),
+        error => error.status === 429);
+    member = { isPro: false };
+    const paid = await reserve(code, randomUUID(), { ...source, isPro: true, localSubscriptionUsage: { used: 0 } });
+    assert.equal(paid.record.reservation.pro, false);
+});

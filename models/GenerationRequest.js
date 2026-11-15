@@ -19,6 +19,8 @@ const schema = new mongoose.Schema({
     expiresAt: Date,
 });
 schema.index({ state: 1, leaseUntil: 1 });
+schema.index({ 'reservation.subscriptionId': 1, 'reservation.quotaEpoch': 1, 'reservation.day': 1, state: 1 });
+schema.index({ recoveryCode: 1, 'reservation.day': 1, state: 1 });
 // Retain the small idempotency record after purging result content. Deleting
 // the whole record would let a very late retry charge the same request again.
 schema.index({ expiresAt: 1 }, { sparse: true });

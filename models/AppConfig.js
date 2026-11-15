@@ -22,6 +22,14 @@ const AppConfigSchema = new mongoose.Schema({
         title: { type: String, maxlength: 120, default: 'We’ll be back soon' },
         message: { type: String, maxlength: 2000, default: 'AI Notes is undergoing maintenance. Please try again shortly.' },
     }, { _id: false }), default: undefined },
+    billingControls: {
+        type: new mongoose.Schema({
+            showSubscriptions: { type: Boolean, default: true },
+            showTopUpPacks: { type: Boolean, default: true },
+            usePrimarySubscriptionTracking: { type: Boolean, default: true },
+        }, { _id: false }),
+        default: () => ({}),
+    },
     // 1. General Alerts
     globalAlert: {
         active: { type: Boolean, default: false },

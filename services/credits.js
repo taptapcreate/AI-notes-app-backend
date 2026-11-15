@@ -1,4 +1,4 @@
-const { subscriptionUsage } = require('./subscription-usage');
+const { requestHistoryUsage } = require('./subscription-usage');
 const { createHash, randomInt } = require('node:crypto');
 const {
     CreditError,
@@ -20,7 +20,7 @@ function createCredits({
     CreditRegistration,
     PurchaseClaim,
     getAppConfig,
-    subscriptionUsageFor = async (user, config, timestamp) => subscriptionUsage(user, config, timestamp),
+    subscriptionUsageFor = async (user, config, timestamp) => requestHistoryUsage(user, config, timestamp),
     now = () => new Date(),
 }) {
     const currentPolicy = async () => policy(await getAppConfig());

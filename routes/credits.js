@@ -59,8 +59,8 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
             const user = await credits.byCode(req.body?.code);
             const sandboxIds = await appleSubscriptions?.resolveStoreKitScope(req.body?.storeKitProofs, user);
             const membership = await purchases.subscriptionStatus(user, sandboxIds);
-            const scopedUsage = sandboxIds === undefined ? {} :
-                await appleSubscriptions.usage(user, undefined, undefined, sandboxIds);
+            const scopedUsage = appleSubscriptions
+                ? await appleSubscriptions.usage(user, undefined, undefined, sandboxIds) : {};
             return {
                 ...scopedUsage,
                 ...(sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),

@@ -6,7 +6,7 @@ const {
     Environment,
 } = require('@apple/app-store-server-library');
 const { CreditError } = require('./credit-policy');
-const { subscriptionUsage } = require('./subscription-usage');
+const { subscriptionUsage, requestHistoryUsage } = require('./subscription-usage');
 const BUNDLE_ID = 'com.taptapcreate.ainotes';
 const PRODUCTS = new Set([
     'ai_notes_pro_weekly_subscription',
@@ -124,10 +124,12 @@ function createAppleSubscriptions({
     async function usage(user, config, timestamp = now(), sandboxIds) {
         const record = await recordFor(user, undefined, sandboxIds);
         return {
-            ...subscriptionUsage(
-                record || (user.appleSubscriptionIds?.length ? {} : user),
+            ...await requestHistoryUsage(
+                record || (user.appleSubscriptionIds?.length ? { recoveryCode: user.recoveryCode } : user),
                 config ?? await getAppConfig(),
                 timestamp,
+                undefined,
+                GenerationRequest,
             ),
             subscriptionIdentityVersion: 1,
             appleSubscriptionBound: !!record,

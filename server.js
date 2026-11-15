@@ -40,6 +40,7 @@ const { createPurchases } = require('./services/purchases');
 const { getWelcomeCredits } = require('./services/credit-policy');
 const { getSubscriberDailyLimit } = require('./services/subscription-usage');
 const { createCreditRouter } = require('./routes/credits');
+const { billingControls } = require('./services/billing-controls');
 const { createDeletedAccountLookup } = require('./services/account-deletion');
 const { createRevenueCatHandler } = require('./routes/revenuecat');
 const { createPurchaseAdminRouter } = require('./routes/purchase-admin');
@@ -760,7 +761,7 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true, desktopWalkthroughNarration: true });
+        res.json({ ...config.toObject(), billingControls: billingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true, desktopWalkthroughNarration: true });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }
