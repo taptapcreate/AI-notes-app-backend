@@ -149,7 +149,10 @@ function createCredits({
         }
         if (registration) {
             code = registration.recoveryCode;
-            try { existing = await byCode(code); }
+            try {
+                existing = await byCode(code);
+                if (existing.deviceId !== deviceId) throw new CreditError(503, 'Device registration needs support review');
+            }
             catch (error) {
                 if (error.status !== 404) throw error;
                 // This device is known. Missing financial history is never permission
@@ -299,7 +302,11 @@ function createCredits({
         })
             .select('recoveryCode')
             .lean();
-        if (previousOwner)
+        const backedOwner = await Backup.exists({ kind: 'wallet', identity: { $ne: clean }, $or: [
+            { 'snapshot.processedPurchaseAliases': { $in: aliases } },
+            { 'snapshot.processedTransactions.transactionId': { $in: aliases } },
+        ] }).session(transactions.session());
+        if (previousOwner || backedOwner)
             throw new CreditError(
                 409,
                 'This purchase is already linked to another account',

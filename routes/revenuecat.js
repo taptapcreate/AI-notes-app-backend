@@ -60,9 +60,12 @@ function createRevenueCatHandler({
                     .status(400)
                     .json({ error: 'Purchase identity is required' });
             }
-            const user = await User.findOne({
-                recoveryCode: event.app_user_id.toUpperCase(),
-            }).lean();
+            let user;
+            try { user = await credits.byCode(event.app_user_id.toUpperCase()); }
+            catch (error) {
+                if (error.status === 410) return res.json({ success: true, message: 'Deleted account ignored' });
+                if (![400, 404].includes(error.status)) throw error;
+            }
             if (!user) {
                 if (await accountWasDeleted(event.app_user_id))
                     return res.json({ success: true, message: 'Deleted account ignored' });

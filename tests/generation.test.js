@@ -595,3 +595,19 @@ test('request-history fallback preserves ten-per-day usage when the primary coun
     assert.equal(primary.subscriberDailyRemaining, 6);
     assert.equal(primary.totalAvailable, before.totalAvailable);
 });
+
+
+test('pending purchased charge and refund survive wallet deletion exactly once', async () => {
+    const code = await account();
+    await credits.grantPurchase(code, ['verified-topup'], 20, 'store');
+    await credits.use(code, 7);
+    const request = await reserve(code);
+    assert.equal((await credits.balance(code)).credits, 19);
+    await User.deleteOne({ recoveryCode: code });
+    await generation.finish(request.record._id, 500, { error: 'Provider failed' });
+    assert.equal((await credits.balance(code)).credits, 20);
+    await User.deleteOne({ recoveryCode: code });
+    await generation.finish(request.record._id, 500, { error: 'Duplicate failure' });
+    assert.equal((await credits.balance(code)).credits, 20);
+    assert.equal((await credits.balance(code)).freeCreditsRemaining, 0);
+});

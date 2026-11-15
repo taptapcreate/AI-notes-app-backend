@@ -69,13 +69,25 @@ const getAppConfig = async () => {
     }, { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true });
 };
 
-mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
-    .then(() => console.log(`✅ Connected to MongoDB Atlas (${DB_NAME})`))
-    .catch(err => console.error('❌ MongoDB connection error:', err));
+let accountRecoveryReady = false;
+const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
+    .then(async () => {
+        const result = await require('./services/recovery-cutover').backfillAccountRecovery({
+            User, Subscription: AppleSubscription, Backup: require('./models/AccountRecovery'),
+        });
+        accountRecoveryReady = true;
+        console.log('Account recovery ready:', result);
+    });
+accountStorageReady.catch(err => console.error('Account recovery initialization failed:', err.message));
 
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
+app.use('/api', (req, res, next) => {
+    if (req.path === '/config' || req.path.startsWith('/config/')) return next();
+    if (!accountRecoveryReady) return res.status(503).json({ error: 'Account recovery is initializing. Please retry shortly.' });
+    next();
+});
 app.use('/api', createMaintenanceGate({ getAppConfig }));
 app.use('/api', generationService.middleware);
 
@@ -761,7 +773,7 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, purchasedCreditFallback: true, desktopWalkthroughNarration: true });
+        res.json({ ...config.toObject(), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }
@@ -965,7 +977,7 @@ app.get('/api/health', (req, res) => {
 
 // Recover abandoned reservations after a process restart and on a bounded timer.
 if (require.main === module) {
-    mongoose.connection.asPromise().then(async () => {
+    accountStorageReady.then(async () => {
         await GenerationRequest.init();
         await generationService.recoverExpired();
         const sweep = setInterval(() => generationService.recoverExpired().catch(error => console.error('AI reconciliation deferred:', error.message)), 60000);
@@ -982,4 +994,4 @@ if (require.main === module) app.listen(PORT, () => {
     console.log(`💳 Credits endpoints: /api/credits/*`);
 });
 
-module.exports = { app };
+module.exports = { app, accountStorageReady };

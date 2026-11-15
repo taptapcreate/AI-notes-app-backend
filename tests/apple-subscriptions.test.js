@@ -465,22 +465,22 @@ test('a StoreKit sandbox scope preserves the linked production subscription and 
 });
 
 
-test('restoring after collection deletion gives a previously linked subscription its full configured allowance', async () => {
+test('restoring after collection deletion preserves a previously exhausted subscription allowance', async () => {
     const code = codes[0];
     await User.updateOne({ recoveryCode: code }, { $set: { dailyRequestCount: 10 } });
     await attach(code);
     const membership = await status(code);
     assert.equal((await credits.balance(code)).subscriberDailyRemaining, 0);
     await Subscription.collection.drop();
-    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 10);
-    assert.equal((await attach(code)).subscriberDailyRemaining, 10);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 0);
+    assert.equal((await attach(code)).subscriberDailyRemaining, 0);
     assert.equal((await status(code)).quotaId, membership.quotaId);
     const wallet = await credits.byCode(code);
     assert.equal(wallet.credits, 20);
     assert.equal(wallet.totalFreeCredits, 7);
 });
 
-test('verified StoreKit proof rebuilds a missing linked record and a prior request cannot refund its new count', async () => {
+test('verified StoreKit recovery preserves the quota epoch and refunds the original reservation', async () => {
     const code = codes[0];
     const payload = JSON.stringify(proof());
     await service.attach(code, [payload]);
@@ -488,12 +488,12 @@ test('verified StoreKit proof rebuilds a missing linked record and a prior reque
     await Subscription.deleteMany({});
     const after = await generation.begin(code, randomUUID(), '/notes', source, [payload]);
     assert.equal(after.record.reservation.subscriptionId, before.record.reservation.subscriptionId);
-    assert.notEqual(after.record.reservation.quotaEpoch, before.record.reservation.quotaEpoch);
+    assert.equal(after.record.reservation.quotaEpoch, before.record.reservation.quotaEpoch);
     await generation.finish(before.record._id, 500, { error: 'AI unavailable' });
     assert.equal((await credits.balance(code)).subscriberDailyRemaining, 9);
 });
 
-test('request-history fallback shares one allowance across Apple wallets and respects recreated quota epochs', async () => {
+test('request-history fallback retains shared allowance across Apple record deletion', async () => {
     await Promise.all(codes.map(code => attach(code)));
     config.subscriberDailyLimit = 2;
     config.billingControls = { usePrimarySubscriptionTracking: false };
@@ -504,7 +504,7 @@ test('request-history fallback shares one allowance across Apple wallets and res
     assert.equal((await credits.balance(codes[1])).subscriberDailyRemaining, 0);
     await Subscription.deleteMany({});
     await attach(codes[0]);
-    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 2);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 0);
 });
 
 
@@ -534,4 +534,33 @@ test('missing Apple daily counter uses verified shared history without changing 
     config.billingControls.usePrimarySubscriptionTracking = true;
     assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 6);
     assert.equal((await credits.balance(codes[0])).totalAvailable, paidBefore);
+});
+
+
+test('deleting wallet and subscription together preserves their shared remaining allowance', async () => {
+    await Promise.all(codes.map(code => attach(code)));
+    const membership = await status(codes[0]);
+    for (let i = 0; i < 3; i++) {
+        const request = await generation.begin(codes[i % 2], randomUUID(), '/notes', source);
+        await generation.finish(request.record._id, 200, { notes: 'Charged note' });
+    }
+    await credits.grantPurchase(codes[0], ['paid-order'], 10, 'store');
+    const before = await credits.byCode(codes[0]);
+    await User.deleteOne({ recoveryCode: codes[0] }); await Subscription.deleteMany({});
+    const restored = await credits.balance(codes[0]);
+    assert.equal(restored.subscriberDailyRemaining, 7);
+    assert.equal(restored.credits, before.credits);
+    assert.equal(restored.freeCreditsRemaining, before.totalFreeCredits);
+    assert.equal((await status(codes[0])).quotaId, membership.quotaId);
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    assert.equal((await credits.balance(codes[1])).subscriberDailyRemaining, 7);
+});
+test('subscription expiration webhook recovers missing record without reviving entitlement', async () => {
+    await attach(codes[0]); await Subscription.deleteMany({});
+    await service.webhook({ product_id: 'ai_notes_pro_monthly_subscription', store: 'APP_STORE', environment: 'SANDBOX',
+        original_transaction_id: '100000000001', transaction_id: '100000000002',
+        event_timestamp_ms: time.getTime(), expiration_at_ms: time.getTime() - 1, type: 'EXPIRATION' });
+    assert.equal((await status(codes[0])).isPro, false);
+    await Subscription.deleteMany({});
+    assert.equal((await status(codes[0])).isPro, false);
 });

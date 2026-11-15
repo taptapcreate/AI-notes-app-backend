@@ -83,3 +83,20 @@ test('missing or invalid backups never generate a new allowance', async () => {
     assert.equal(await User.countDocuments(), 0);
     await assert.rejects(wallet.checkpoint('TESTCODE', null), /active transaction/);
 });
+
+
+test('initial cutover snapshots existing records without changing balances or issuing grants', async () => {
+    const { backfillAccountRecovery } = require('../services/recovery-cutover');
+    await User.db.collection('accountrecoverycutovers').deleteMany({});
+    await seed();
+    await Subscription.create({ _id: 'apple-family', environment: 'Sandbox', originalTransactionId: '123456',
+        quotaEpoch: 'original-epoch', dailyRequestCount: 6, lastRequestReset: new Date('2026-11-15') });
+    const original = JSON.stringify(await User.findOne().lean());
+    const result = await backfillAccountRecovery({ User, Subscription, Backup });
+    assert.equal(result.wallets, 1); assert.equal(result.subscriptions, 1);
+    assert.equal(JSON.stringify(await User.findOne().lean()), original);
+    await User.deleteMany({}); await Subscription.deleteMany({});
+    assert.equal((await wallet.run('TESTCODE')).snapshot.credits, 12);
+    assert.equal((await subscription.run('apple-family')).snapshot.dailyRequestCount, 6);
+    assert.equal((await backfillAccountRecovery({ User, Subscription, Backup })).alreadyComplete, true);
+});

@@ -820,3 +820,60 @@ test('signed Apple credit grant survives repeat verification and matches later R
     payload.revocationDate = Date.now();
     assert.equal((await api('/api/credits/add', body)).status, 400);
 });
+
+
+test('deleted wallet restores spent balances and purchase deduplication under the same recovery code', async () => {
+    const account = await register();
+    const code = account.recoveryCode;
+    await credits.grantPurchase(code, ['verified-order-1', 'apple-order-alias'], 100, 'store');
+    await credits.use(code, 10); // 7 free, then 3 purchased credits.
+    const before = await credits.byCode(code);
+    assert.equal(before.totalFreeCredits, 0); assert.equal(before.credits, 97);
+    await User.deleteOne({ recoveryCode: code });
+    const restored = await register();
+    assert.equal(restored.recoveryCode, code);
+    assert.equal(restored.credits, 97); assert.equal(restored.freeCreditsRemaining, 0);
+    assert.equal(String((await credits.byCode(code))._id), String(before._id));
+    assert.equal((await credits.grantPurchase(code, ['apple-order-alias'], 100, 'retry')).applied, false);
+    await User.deleteOne({ recoveryCode: code });
+    assert.equal((await credits.recover(code)).credits, 97);
+    assert.equal((await credits.balance(code)).freeCreditsRemaining, 0);
+});
+test('ad claims and daily reset dates survive deletion without a second reward', async () => {
+    const { recoveryCode: code } = await register();
+    config.adRewards = { enabled: true, active: true, standardReward: 2 };
+    await credits.claimAd(code);
+    await User.deleteOne({ recoveryCode: code });
+    assert.equal((await credits.balance(code)).adCredits, 2);
+    assert.equal((await credits.claimAd(code)).alreadyClaimed, true);
+    config.dailyFreeCreditsEnabled = true; config.freeDailyCredits = 3;
+    await User.updateOne({ recoveryCode: code }, { $set: { lastFreeCreditsReset: new Date(time.getTime() - 86400000) } });
+    await credits.balance(code); await credits.use(code, 1);
+    await User.deleteOne({ recoveryCode: code });
+    assert.equal((await credits.balance(code)).freeCreditsRemaining, 2);
+    time.setUTCDate(time.getUTCDate() + 1);
+    assert.equal((await credits.balance(code)).freeCreditsRemaining, 3);
+});
+test('known registration without either wallet or backup cannot refill the welcome allowance', async () => {
+    const { recoveryCode: code } = await register();
+    await User.deleteOne({ recoveryCode: code }); await AccountRecovery.deleteMany({});
+    await rejectsStatus(register(), 503);
+    assert.equal(await User.countDocuments(), 0);
+});
+test('purchase ownership in a deleted wallet backup blocks another wallet from claiming it', async () => {
+    const first = await register('owner'); const second = await register('other');
+    // Simulate a legacy verified purchase that had no separate PurchaseClaim row.
+    await User.updateOne({ recoveryCode: first.recoveryCode }, { $set: { processedPurchaseAliases: ['legacy-order'] } });
+    await credits.byCode(first.recoveryCode);
+    await User.deleteOne({ recoveryCode: first.recoveryCode });
+    await rejectsStatus(credits.grantPurchase(second.recoveryCode, ['legacy-order'], 100, 'store'), 409);
+    assert.equal((await credits.balance(second.recoveryCode)).credits, 0);
+});
+test('deliberate account deletion markers prevent restoring an old backup', async () => {
+    const { recoveryCode: code } = await register();
+    await User.deleteOne({ recoveryCode: code });
+    const hash = require('node:crypto').createHash('sha256').update(code).digest('hex');
+    await User.db.collection('deletedaccounts').insertOne({ _id: hash });
+    try { await rejectsStatus(credits.balance(code), 410); assert.equal(await User.countDocuments(), 0); }
+    finally { await User.db.collection('deletedaccounts').deleteOne({ _id: hash }); }
+});

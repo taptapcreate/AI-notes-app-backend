@@ -1,17 +1,30 @@
-# Prepared account recovery layer — not active in production
+# Transactional account recovery
 
-`accountrecoveries` stores complete server-side snapshots of wallet and Apple subscription records, including remaining balances, original MongoDB IDs, processed purchase aliases, subscription links, quota epochs, reset dates and verification state. Local app data never authorizes a restored balance.
+The existing `users` and `applesubscriptions` collections remain the working records. `accountrecoveries` holds separate server-confirmed snapshots. No model collection is renamed or replaced.
 
-The existing `users` and `applesubscriptions` model targets remain unchanged. No startup migration or automatic production recovery is enabled. The new service is exercised only by isolated tests until integration is approved.
+## Protected operations
 
-`run(identity, operation)` restores a missing record from its confirmed snapshot, applies an operation, and checkpoints the resulting record in one MongoDB transaction. `ensure` and `checkpoint` support existing generation and Apple subscription transactions. Concurrent updates conflict and retry together, so a stale backup cannot restore spent credits. Unknown accounts without a trustworthy snapshot fail closed.
+Credit registration and starter grants, legacy welcome migration, daily resets, purchased credits and transaction aliases, ad rewards, legacy credit deductions, generation reservations and refunds, wallet subscription links, StoreKit verification, Apple quota counters, and expiration/refund webhooks checkpoint in the same MongoDB transaction as their working-record changes.
 
-## Required integration before release
+Restoration preserves original MongoDB IDs, recovery codes, device IDs, remaining purchased/free/ad balances, grant and reset dates, purchase history and aliases, Apple subscription links, quota epochs and verified expiration/revocation state. The app's local cache never authorizes a restored balance. Different Apple sandbox subscriptions retain separate identities and quotas.
 
-All registration grants, welcome migrations, daily resets, purchased credits and aliases, ad claims, legacy deductions, generation reservations/refunds, wallet subscription links, Apple proof updates/revocations and subscription daily counters must checkpoint in the same transaction. Backup all currently existing records during a controlled cutover with prior writers stopped; retain original IDs and values. The migration must not guess balances for already-missing records or replace newer snapshots. Device registration must check backup recovery before issuing a new starter allowance. Existing deletion markers must block restoration of deliberately erased accounts.
+Deleting a working record or collection does not erase its saved snapshot. A balance request, device re-registration, verified StoreKit update or generation refund can restore it. Repeated recovery cannot issue another starter grant or credit a processed purchase twice. Unknown accounts without a trusted snapshot fail closed; existing deliberate-deletion markers block resurrection. Deleting both the working record and its recovery record still requires an Atlas backup.
 
-Do not enable partially: an uncheckpointed credit-changing path can make recovery stale. Tests currently validate the transaction/restore primitive, not a deployed integration. Deleting both the live record and its recovery snapshot still requires a database backup.
+## Initial production cutover
 
-## Announcement configuration
+1. Stop all old backend writers during the initial deployment. A previous release cannot update the new snapshots.
+2. Deploy the complete updated backend. Startup runs an idempotent initial backup of existing wallet/subscription records; it does not modify balances or issue grants. Credits and generation return 503 until all snapshots are ready. Config remains readable.
+3. Check `/api/config` for `accountRecoveryVersion: 1`. This indicates the initial backup completed successfully. The completion marker and counts are stored in `accountrecoverycutovers` with key `transactional-recovery-v1`.
+4. Keep `accountrecoveries`, `accountrecoverycutovers`, `creditregistrations`, `purchaseclaims` and the working collections included in Atlas backups. Do not remove the snapshots during a deletion-recovery test.
 
-`globalAlert` supports `displayMode: "banner"` or `"popup"` (default preserves existing popup behavior), `id`, `active`, `title`, `message` and the existing `isBlocking`. Routine announcements should use a dismissible banner. Changing id/message shows a new campaign. Announcement text does not grant credits.
+For operator-controlled preparation, `node scripts/account-recovery.js --dry-run` reports record counts without changing data. `node scripts/account-recovery.js --apply --writers-stopped` performs the same initial backup. `MONGODB_URI` is required. The completed cutover is skipped on later starts; new records and every credit mutation continue to receive transactional checkpoints.
+
+If startup fails, financial operations remain unavailable and the server logs the cause. Partial initial snapshots are safe to retry. Do not deploy old writers after this cutover: they would allow snapshots to become stale. Already-missing predeployment records cannot be reconstructed without an earlier trustworthy backup.
+
+## Test procedure
+
+Use a sandbox account. Note its remaining balances, original code and today's allowance. Complete a generation or spend some credits, then delete only its `users` document. Reopen or refresh: the same code and unspent balances should return. Deleting the corresponding `applesubscriptions` record should preserve the same quota epoch and remaining allowance. Replaying a verified purchase or failed generation must not add credits twice.
+
+## Announcements
+
+`globalAlert` supports `displayMode: "banner"` or `"popup"`, optional `id`, `active`, `title`, `message` and existing `isBlocking`. Routine announcements should use a dismissible banner. Changing id/message shows a new campaign. Announcement text does not grant credits.

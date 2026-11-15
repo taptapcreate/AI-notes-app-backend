@@ -15,9 +15,9 @@ if (process.env.AI_NOTES_TEST_WEB === '1') {
         return original(url, options);
     };
 }
-const { app } = require('../../server');
+const { app, accountStorageReady } = require('../../server');
 (async () => {
-    await mongoose.connection.asPromise();
+    await accountStorageReady;
     const server = app.listen(0, '127.0.0.1', () =>
         process.send({ port: server.address().port }),
     );
