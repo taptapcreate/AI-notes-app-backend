@@ -3,17 +3,79 @@ const { billingControls } = require('./billing-controls');
 const { CreditError } = require('./credit-policy');
 const DEFAULT_SUBSCRIBER_DAILY_LIMIT = 10;
 const MONTHLY_PRODUCT = 'ai_notes_pro_monthly_subscription';
-const MONTHLY_ALLOWANCES = { trial: 60, monthly: 700 };
+const DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS = 600;
+const DEFAULT_FREE_TRIAL_CREDITS = 3;
+const DEFAULT_SUBSCRIPTION_MESSAGES = {
+    daily: 'Up to {credits} AI credits per day. Resets at midnight UTC.',
+    monthly: '{credits} AI credits per paid billing month.',
+    trial: 'Eligible customers get a {duration} free trial with Pro features and {credits} extra AI credits total. Unused trial credits expire when it ends.',
+    trialWithoutCredits: 'Eligible customers get a {duration} free trial with Pro features. The trial adds no extra credits. Your existing credits can be used during the trial.',
+};
+
+async function initializeSubscriptionControls(Config) {
+    const fields = {
+        dailySubscriptionAllowanceEnabled: false,
+        monthlySubscriptionCredits: DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS,
+        freeTrialCreditsEnabled: true,
+        freeTrialCredits: DEFAULT_FREE_TRIAL_CREDITS,
+        subscriptionMessages: DEFAULT_SUBSCRIPTION_MESSAGES,
+    };
+    await Config.collection.bulkWrite(
+        Object.entries(fields).map(([field, value]) => ({
+            updateOne: {
+                filter: { key: 'master_config', [field]: { $exists: false } },
+                update: { $set: { [field]: value } },
+            },
+        })),
+    );
+}
+
+function configuredCreditLimit(value, fallback, minimum) {
+    const limit = value ?? fallback;
+    if (!Number.isSafeInteger(limit) || limit < minimum || limit > 10000)
+        throw new CreditError(503, 'Subscription limits are temporarily unavailable');
+    return limit;
+}
 
 function monthlyAllowances(config) {
-    return config.monthlySubscriptionAllowanceEnabled === true ? MONTHLY_ALLOWANCES : null;
+    return {
+        monthly: config.dailySubscriptionAllowanceEnabled === true ? null :
+            configuredCreditLimit(config.monthlySubscriptionCredits, DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, 1),
+        trial: config.freeTrialCreditsEnabled === false ? 0 :
+            configuredCreditLimit(config.freeTrialCredits, DEFAULT_FREE_TRIAL_CREDITS, 0),
+    };
+}
+
+function subscriptionPlanMessages(config) {
+    const { monthly, trial } = monthlyAllowances(config);
+    const daily = getSubscriberDailyLimit(config);
+    const messages = config.subscriptionMessages;
+    const format = (template, fallback, credits) =>
+        (template?.trim() || fallback).replaceAll('{credits}', String(credits));
+    const dailyMessage = format(messages?.daily, DEFAULT_SUBSCRIPTION_MESSAGES.daily, daily);
+    return {
+        weekly: dailyMessage,
+        monthly: monthly === null ? dailyMessage :
+            format(messages?.monthly, DEFAULT_SUBSCRIPTION_MESSAGES.monthly, monthly),
+        trial: trial > 0
+            ? format(messages?.trial, DEFAULT_SUBSCRIPTION_MESSAGES.trial, trial)
+            : format(messages?.trialWithoutCredits, DEFAULT_SUBSCRIPTION_MESSAGES.trialWithoutCredits, 0),
+    };
 }
 
 function allowanceWindow(subscription, config) {
+    if (subscription.productId !== MONTHLY_PRODUCT) return null;
+    if (subscription.allowancePeriod === 'monthly' && config.dailySubscriptionAllowanceEnabled === true)
+        return null;
+    if (!subscription.transactionId || !['trial', 'monthly'].includes(subscription.allowancePeriod)) {
+        const reset = new Date(subscription.expiresAt);
+        if (!subscription.expiresAt || !Number.isFinite(reset.getTime()))
+            throw new CreditError(503, 'Subscription period needs support review');
+        // Wait for verified period data before granting a trial or paid allowance.
+        return { period: 'monthly', limit: 0, reset, transactionId: subscription.transactionId || null };
+    }
     const limits = monthlyAllowances(config);
     const period = subscription.allowancePeriod;
-    if (!limits || subscription.productId !== MONTHLY_PRODUCT ||
-        !subscription.transactionId || !['trial', 'monthly'].includes(period)) return null;
     const reset = new Date(subscription.expiresAt);
     if (!subscription.expiresAt || !Number.isFinite(reset.getTime()))
         throw new CreditError(503, 'Subscription period needs support review');
@@ -69,8 +131,9 @@ function subscriptionUsage(user, config, now = new Date()) {
 }
 
 async function requestHistoryUsage(user, config, now = new Date(), session, requests) {
-    if (billingControls(config).usePrimarySubscriptionTracking) return subscriptionUsage(user, config, now);
     const window = allowanceWindow(user, config);
+    if (billingControls(config).usePrimarySubscriptionTracking || (window && !window.transactionId))
+        return subscriptionUsage(user, config, now);
     const usage = window
         ? subscriptionUsage({ ...user, periodRequestCount: 0 }, config, now)
         : dailySubscriptionUsage({ ...user, lastRequestReset: null }, config, now);
@@ -111,5 +174,6 @@ async function requestHistoryUsage(user, config, now = new Date(), session, requ
 }
 module.exports = {
     requestHistoryUsage, subscriptionUsage, dailySubscriptionUsage, monthlyAllowances,
-    getSubscriberDailyLimit, DEFAULT_SUBSCRIBER_DAILY_LIMIT, MONTHLY_PRODUCT,
+    getSubscriberDailyLimit, subscriptionPlanMessages, initializeSubscriptionControls, DEFAULT_SUBSCRIBER_DAILY_LIMIT,
+    DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS, MONTHLY_PRODUCT,
 };

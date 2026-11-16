@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const { DEFAULT_WELCOME_CREDITS } = require('../services/credit-policy');
-const { DEFAULT_SUBSCRIBER_DAILY_LIMIT } = require('../services/subscription-usage');
+const { DEFAULT_SUBSCRIBER_DAILY_LIMIT, DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS } = require('../services/subscription-usage');
 
 const PlatformReleaseSchema = new mongoose.Schema({
     minVersion: { type: String, match: /^\d+\.\d+\.\d+$/ },
@@ -78,7 +78,16 @@ const AppConfigSchema = new mongoose.Schema({
     },
     welcomePackVersion: { type: Number, default: 1 },
     subscriberDailyLimit: { type: Number, default: DEFAULT_SUBSCRIBER_DAILY_LIMIT, min: 1, max: 10000, validate: Number.isSafeInteger },
-    monthlySubscriptionAllowanceEnabled: { type: Boolean, default: false },
+    dailySubscriptionAllowanceEnabled: { type: Boolean, default: false },
+    monthlySubscriptionCredits: { type: Number, default: DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, min: 1, max: 10000, validate: Number.isSafeInteger },
+    freeTrialCreditsEnabled: { type: Boolean, default: true },
+    freeTrialCredits: { type: Number, default: DEFAULT_FREE_TRIAL_CREDITS, min: 0, max: 10000, validate: Number.isSafeInteger },
+    subscriptionMessages: {
+        daily: { type: String, trim: true, maxlength: 500 },
+        monthly: { type: String, trim: true, maxlength: 500 },
+        trial: { type: String, trim: true, maxlength: 500 },
+        trialWithoutCredits: { type: String, trim: true, maxlength: 500 },
+    },
     // Enable only after the updated mobile builds are available. The cutover
     // script enables this together with the one-time allowance.
     generationBillingRequired: { type: Boolean, default: false },

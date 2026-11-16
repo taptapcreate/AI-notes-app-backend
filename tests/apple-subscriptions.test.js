@@ -67,6 +67,7 @@ beforeEach(async () => {
         dailyFreeCreditsEnabled: false,
         welcomePackCredits: 7,
         subscriberDailyLimit: 10,
+        dailySubscriptionAllowanceEnabled: true,
     };
     service = createAppleSubscriptions({
         User,
@@ -566,7 +567,7 @@ test('subscription expiration webhook recovers missing record without reviving e
 });
 
 test('trial usage is shared across devices and only a verified paid period refills the allowance', async () => {
-    config.monthlySubscriptionAllowanceEnabled = true;
+    config.dailySubscriptionAllowanceEnabled = false;
     const trial = proof({
         offerType: 1,
         offerDiscountType: 'FREE_TRIAL',
@@ -579,14 +580,14 @@ test('trial usage is shared across devices and only a verified paid period refil
         await generation.finish(record._id, result, result === 200 ? { notes: 'Note' } : { error: 'Failed' });
     };
     const remaining = async (code = codes[0]) => (await credits.balance(code)).subscriberDailyRemaining;
-    assert.equal(await remaining(), 60);
+    assert.equal(await remaining(), 3);
     await use(codes[0]);
     time = new Date(time.getTime() + day);
     await use(codes[1]);
     await use(codes[1], 500);
-    assert.equal(await remaining(), 58);
+    assert.equal(await remaining(), 1);
     assert.equal((await credits.balance(codes[1])).subscriberAllowancePeriod, 'trial');
-    assert.equal(await remaining(codes[1]), 58);
+    assert.equal(await remaining(codes[1]), 1);
 
     const event = {
         product_id: trial.productId, store: 'APP_STORE', environment: 'SANDBOX',
@@ -600,12 +601,12 @@ test('trial usage is shared across devices and only a verified paid period refil
     })]);
     await service.webhook({ ...event, type: 'INITIAL_PURCHASE', period_type: 'NORMAL',
         event_timestamp_ms: time.getTime() + 1, purchased_at_ms: trial.purchaseDate - 1000 });
-    assert.equal(await remaining(), 58);
+    assert.equal(await remaining(), 1);
     assert.equal((await status(codes[0])).isPro, true);
     await Subscription.deleteMany({});
-    assert.equal(await remaining(), 58);
+    assert.equal(await remaining(), 1);
     config.billingControls = { usePrimarySubscriptionTracking: false };
-    assert.equal(await remaining(), 58);
+    assert.equal(await remaining(), 1);
 
     time = new Date(trial.expiresDate + 1);
     await service.webhook({ ...event, type: 'EXPIRATION', event_timestamp_ms: time.getTime() });
@@ -619,24 +620,24 @@ test('trial usage is shared across devices and only a verified paid period refil
         purchased_at_ms: time.getTime(), expiration_at_ms: time.getTime() + 30 * day,
     };
     assert.equal(await service.webhook(renewal), true);
-    assert.equal(await remaining(), 700);
+    assert.equal(await remaining(), 600);
     await use(codes[1]);
     await service.webhook(renewal);
     await service.attach(codes[0], [JSON.stringify(trial)]);
-    assert.equal(await remaining(), 699);
+    assert.equal(await remaining(), 599);
     const paid = await credits.balance(codes[0]);
     assert.equal(paid.subscriberAllowancePeriod, 'monthly');
     assert.equal(paid.subscriberResetAt, new Date(renewal.expiration_at_ms).toISOString());
     assert.equal(paid.credits, 20);
     assert.equal(paid.freeCreditsRemaining, 7);
     config.billingControls.usePrimarySubscriptionTracking = true;
-    assert.equal(await remaining(), 699);
+    assert.equal(await remaining(), 599);
 });
 
 test('verified StoreKit can start a paid month without RevenueCat and weekly keeps its daily allowance', async () => {
-    config.monthlySubscriptionAllowanceEnabled = true;
+    config.dailySubscriptionAllowanceEnabled = false;
     const monthly = await attach(codes[0], { environment: 'Production' });
-    assert.equal(monthly.subscriberDailyRemaining, 700);
+    assert.equal(monthly.subscriberDailyRemaining, 600);
     const weekly = await attach(codes[1], {
         productId: 'ai_notes_pro_weekly_subscription',
         originalTransactionId: '100000000151',
@@ -647,11 +648,11 @@ test('verified StoreKit can start a paid month without RevenueCat and weekly kee
 });
 
 test('exhausted trial requests require consent to spend wallet credits', async () => {
-    config.monthlySubscriptionAllowanceEnabled = true;
+    config.dailySubscriptionAllowanceEnabled = false;
     await attach(codes[0], { offerType: 1, offerDiscountType: 'FREE_TRIAL' });
     const { quotaId } = await status(codes[0]);
     await Subscription.updateOne({ _id: quotaId }, {
-        $set: { periodUsageTransactionId: proof().transactionId, periodRequestCount: 59 },
+        $set: { periodUsageTransactionId: proof().transactionId, periodRequestCount: 2 },
     });
     const before = await credits.balance(codes[0]);
     const last = await generation.begin(codes[0], randomUUID(), '/notes', source);
@@ -662,4 +663,41 @@ test('exhausted trial requests require consent to spend wallet credits', async (
     assert.equal(exhausted.subscriberDailyRemaining, 0);
     assert.equal(exhausted.credits, before.credits);
     assert.equal(exhausted.freeCreditsRemaining, before.freeCreditsRemaining);
+});
+
+test('trial credit controls are independent of the paid daily mode and the wallet', async () => {
+    config.freeTrialCreditsEnabled = false;
+    config.freeTrialCredits = 4;
+    await attach(codes[0], { offerType: 1, offerDiscountType: 'FREE_TRIAL' });
+    const disabled = await credits.balance(codes[0]);
+    assert.equal((await status(codes[0])).isPro, true);
+    assert.equal(disabled.subscriberAllowancePeriod, 'trial');
+    assert.equal(disabled.subscriberDailyLimit, 0);
+    assert.equal(disabled.subscriberDailyRemaining, 0);
+    assert.equal(disabled.freeCreditsRemaining, 7);
+    assert.equal(disabled.credits, 20);
+
+    config.freeTrialCreditsEnabled = true;
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 4);
+    config.dailySubscriptionAllowanceEnabled = false;
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 4);
+});
+
+test('paywall copy uses the same configured credit limits as billing', () => {
+    const { subscriptionPlanMessages } = require('../services/subscription-usage');
+    const monthly = subscriptionPlanMessages({});
+    assert.match(monthly.monthly, /600 AI credits per paid billing month/);
+    assert.match(monthly.trial, /\{duration\} free trial/);
+    assert.match(monthly.trial, /3 extra AI credits total/);
+
+    const daily = subscriptionPlanMessages({
+        dailySubscriptionAllowanceEnabled: true,
+        subscriberDailyLimit: 12,
+        freeTrialCreditsEnabled: false,
+        freeTrialCredits: 4,
+        subscriptionMessages: { daily: 'Includes {credits} credits per day.' },
+    });
+    assert.equal(daily.monthly, 'Includes 12 credits per day.');
+    assert.match(daily.trial, /adds no extra credits/);
+    assert.doesNotMatch(daily.trial, /4 extra/);
 });

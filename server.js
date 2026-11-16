@@ -39,7 +39,7 @@ const PurchaseClaim = require('./models/PurchaseClaim');
 const { createCredits } = require('./services/credits');
 const { createPurchases } = require('./services/purchases');
 const { getWelcomeCredits } = require('./services/credit-policy');
-const { getSubscriberDailyLimit, monthlyAllowances } = require('./services/subscription-usage');
+const { getSubscriberDailyLimit, monthlyAllowances, subscriptionPlanMessages, initializeSubscriptionControls } = require('./services/subscription-usage');
 const { createCreditRouter } = require('./routes/credits');
 const { billingControls, platformBillingControls } = require('./services/billing-controls');
 const { createDeletedAccountLookup } = require('./services/account-deletion');
@@ -76,6 +76,8 @@ let accountRecoveryReady = false;
 const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
     .then(async () => {
         await getAppConfig();
+        await initializeSubscriptionControls(AppConfig)
+            .catch(error => console.error('Subscription controls initialization deferred:', error.message));
         await require('./services/message-controls-init').initializeMessageControls({
             Config: AppConfig, Messages: require('./models/UserAnnouncement'),
         }).catch(error => console.error('Message controls initialization deferred:', error.message));
@@ -777,8 +779,7 @@ app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
-        res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, subscriptionAllowances: monthlyAllowances(config) });
+        res.json({ ...config.toObject(), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, subscriptionAllowances: config.dailySubscriptionAllowanceEnabled === true ? null : monthlyAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

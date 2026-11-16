@@ -6,7 +6,7 @@ const {
     Environment,
 } = require('@apple/app-store-server-library');
 const { CreditError } = require('./credit-policy');
-const { dailySubscriptionUsage, requestHistoryUsage, monthlyAllowances, MONTHLY_PRODUCT } = require('./subscription-usage');
+const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT } = require('./subscription-usage');
 const BUNDLE_ID = 'com.taptapcreate.ainotes';
 const PRODUCTS = new Set([
     'ai_notes_pro_weekly_subscription',
@@ -461,11 +461,10 @@ function createAppleSubscriptions({
             if (ids.length) {
                 const existing = await Subscription.find({ _id: { $in: ids } }).lean();
                 const byID = new Map(existing.map(record => [record._id, record]));
-                const useMonthly = monthlyAllowances(await getAppConfig());
                 for (const payload of recoverable) {
                     const record = byID.get(identity(payload.environment, payload.originalTransactionId));
-                    const period = useMonthly && storeKitAllowancePeriod(payload);
-                    const refreshPeriod = useMonthly && record && payload.productId === MONTHLY_PRODUCT &&
+                    const period = storeKitAllowancePeriod(payload);
+                    const refreshPeriod = record && payload.productId === MONTHLY_PRODUCT &&
                         (payload.purchaseDate > new Date(record.purchaseDate || 0).getTime() ||
                             (record.transactionId === payload.transactionId && period &&
                                 allowancePeriodFor(record, payload.transactionId, period) !== record.allowancePeriod));
