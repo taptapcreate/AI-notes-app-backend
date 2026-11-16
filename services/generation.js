@@ -1,3 +1,4 @@
+const { generationUnits } = require('./media-note-billing');
 const { canUseAppleRecord } = require('./apple-subscriptions');
 const { requestHistoryUsage } = require('./subscription-usage');
 const { validateNarration } = require('./walkthrough');
@@ -21,17 +22,37 @@ const PATHS = new Set([
 ]);
 const REQUEST_ID =
     /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'website', 'import', 'documents', 'video', 'location', 'calendar', 'sketch']);
+const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
+const PRO_SOURCES = new Set(['video', 'location', 'calendar', 'sketch']);
+const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling']
+    .some(field => body?.[field] !== undefined);
+const requiresPro = (body) => PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
+    (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));
+
 function validateInput(endpoint, body) {
     if (!body || typeof body !== 'object' || Array.isArray(body))
         throw new CreditError(400, 'Invalid AI request');
     if (Buffer.byteLength(JSON.stringify(body)) > 23 * 1024 * 1024)
         throw new CreditError(413, 'The source is too large');
-    if (body.billingMode !== undefined && !['free', 'purchased'].includes(body.billingMode))
+    if (body.billingMode !== undefined && !['free', 'purchased', ...(body.desktopMediaBilling === 1 || body.mobileMediaBilling === 1 ? ['mixed'] : [])].includes(body.billingMode))
         throw new CreditError(400, 'Invalid billing mode');
     const text = (value, max = 2000000) => {
         if (typeof value !== 'string' || !value.trim() || value.length > max)
             throw new CreditError(400, 'Enter valid source content');
     };
+    if (body.featurePolicyVersion !== undefined && body.featurePolicyVersion !== 1)
+        throw new CreditError(400, 'Invalid feature policy');
+    if (body.appFeature !== undefined && (endpoint !== '/notes' || !APP_FEATURES.has(body.appFeature)))
+        throw new CreditError(400, 'Invalid note source');
+    if (body.appFeature === 'video' && body.type !== 'image')
+        throw new CreditError(400, 'Video notes require reviewed still frames');
+    if (body.replyTool !== undefined && !(
+        (endpoint === '/followup' && ['explain', 'sound'].includes(body.replyTool)) ||
+        (endpoint === '/reply' && body.replyTool === 'attachment' && body.mode === 'reply')
+    )) throw new CreditError(400, 'Invalid reply tool');
+    if (body.replyTool === 'attachment') text(body.attachmentText, 24000);
+    else if (body.attachmentText !== undefined) throw new CreditError(400, 'Unexpected reply attachment');
     if (body.narration !== undefined && (endpoint !== '/notes' || body.type !== 'image')) throw new CreditError(400, 'Narration requires walkthrough image frames');
     if (endpoint === '/notes') {
         if (body.sourceKind !== undefined && (!['compare', 'walkthrough', 'screenshot', 'sketch', 'image'].includes(body.sourceKind) || body.type !== 'image')) throw new CreditError(400, 'Invalid visual source kind');
@@ -199,19 +220,23 @@ function createGeneration({
                 if (held.subscriptionId) {
                     try { await subscriptionRecovery.ensure(held.subscriptionId, session); }
                     catch (error) { if (error.status !== 404) throw error; }
-                } else await credits.ensureAccount(record.recoveryCode, session);
+                }
+                if (!held.subscriptionId || held.free || held.ad || held.paid)
+                    await credits.ensureAccount(record.recoveryCode, session);
                 if (held.pro) {
                     await (held.subscriptionId ? Subscription : User).updateOne(
                         {
                             ...(held.subscriptionId ? { _id: held.subscriptionId } : { recoveryCode: record.recoveryCode }),
                             ...(held.subscriptionId ? { quotaEpoch: held.quotaEpoch ?? { $exists: false } } : {}),
-                            lastRequestReset: new Date(held.day),
-                            dailyRequestCount: { $gt: 0 },
+                            ...(held.periodTransactionId
+                                ? { periodUsageTransactionId: held.periodTransactionId, periodRequestCount: { $gte: held.proUnits ?? 1 } }
+                                : { lastRequestReset: new Date(held.day), dailyRequestCount: { $gte: held.proUnits ?? 1 } }),
                         },
-                        { $inc: { dailyRequestCount: -1 } },
+                        { $inc: { [held.periodTransactionId ? 'periodRequestCount' : 'dailyRequestCount']: -(held.proUnits ?? 1) } },
                         { session },
                     );
-                } else {
+                }
+                if (held.free || held.ad || held.paid) {
                     await User.updateOne(
                         { recoveryCode: record.recoveryCode },
                         {
@@ -229,7 +254,9 @@ function createGeneration({
                 if (record.reservation.subscriptionId) {
                     if (await Subscription.exists({ _id: record.reservation.subscriptionId }).session(session))
                         await subscriptionRecovery.checkpoint(record.reservation.subscriptionId, session);
-                } else await credits.checkpointAccount(record.recoveryCode, session);
+                }
+                if (!record.reservation.subscriptionId || record.reservation.free || record.reservation.ad || record.reservation.paid)
+                    await credits.checkpointAccount(record.recoveryCode, session);
             }
             return GenerationRequest.findOneAndUpdate(
                 { _id: id, state: 'pending' },
@@ -294,6 +321,7 @@ function createGeneration({
         };
         const existing = await GenerationRequest.findById(id).lean();
         if (existing) return check(existing);
+        const units = await generationUnits(endpoint, body);
         const config = requestConfig ?? await getAppConfig();
         await credits.balance(code, undefined, config); // Initialize any legacy allowance before reserving.
         const rules = policy(config);
@@ -341,83 +369,74 @@ function createGeneration({
                     pro = false;
                     quotaId = undefined;
                 }
+                if (requiresPro(body) && !pro)
+                    throw new CreditError(403, 'This feature is available with AI Notes Pro.', { code: 'PRO_REQUIRED' });
                 // Both tracking modes serialize reservations by updating this quota document.
                 // The history count runs inside the same transaction, so parallel requests cannot overdraw.
                 const usage = await requestHistoryUsage(quota, config, timestamp, session, GenerationRequest);
                 const { billingMode } = body;
-                let reservation;
-                if (pro && usage.subscriberDailyRemaining > 0) {
+                const proUnits = pro ? Math.min(units, usage.subscriberDailyRemaining) : 0;
+                const walletUnits = units - proUnits;
+                const current = balance(user, rules);
+                const selectedBalance = billingMode === 'free' ? current.freeCreditsRemaining
+                    : billingMode === 'purchased' ? current.credits
+                    : current.freeCreditsRemaining + current.credits;
+                if (walletUnits && pro && (!billingMode || selectedBalance < walletUnits))
+                    throw new CreditError(
+                        429,
+                        'Your Pro allowance does not cover this request. Wait for the reset or choose credits to finish it.',
+                        {
+                            code: 'SUBSCRIPTION_DAILY_LIMIT',
+                            ...usage,
+                            requiredWalletCredits: walletUnits,
+                            freeCreditsAvailable: current.freeCreditsRemaining,
+                            freeCreditPolicy: current.freeCreditPolicy,
+                            purchasedCreditsAvailable: current.credits,
+                        },
+                    );
+                if (walletUnits && billingMode && selectedBalance < walletUnits)
+                    throw new CreditError(402, 'The selected credit balance does not cover this request.');
+                if (current.totalAvailable < walletUnits)
+                    throw new CreditError(
+                        402,
+                        membership.sandbox
+                            ? 'This Apple sandbox subscription has no test allowance enabled, and your credit balance is insufficient.'
+                            : 'No AI credits remain. Recover an existing account or purchase more credits.',
+                        membership.sandbox ? { code: 'SANDBOX_PRO_ALLOWANCE_DISABLED' } : undefined,
+                    );
+                const reservation = { pro: proUnits > 0 };
+                if (proUnits) {
                     const day = new Date(timestamp);
                     day.setUTCHours(0, 0, 0, 0);
                     const { subscriberDailyUsage: count, subscriberDailyLimit: limit } = usage;
                     const previous = quota.lastRequestReset && new Date(quota.lastRequestReset);
                     const sameDay = previous && previous >= day && previous < new Date(usage.subscriberResetAt);
                     const reset = sameDay ? previous : timestamp;
+                    const periodTransactionId = usage.subscriberAllowancePeriod !== 'daily' ? quota.transactionId : null;
                     await (quotaId ? Subscription : User).updateOne(
                         { _id: quota._id },
-                        {
-                            $set: {
-                                dailyRequestCount: count + 1,
-                                lastRequestReset: reset,
-                            },
-                        },
+                        { $set: periodTransactionId
+                            ? { periodRequestCount: count + proUnits, periodUsageTransactionId: periodTransactionId }
+                            : { dailyRequestCount: count + proUnits, lastRequestReset: reset } },
                         { session },
                     );
-                    reservation = {
-                        pro: true,
+                    Object.assign(reservation, {
+                        ...(proUnits > 1 ? { proUnits } : {}),
                         ...(quotaId ? { subscriptionId: quotaId, ...(quota.quotaEpoch ? { quotaEpoch: quota.quotaEpoch } : {}) } : {}),
-                        day: reset.toISOString(),
+                        ...(periodTransactionId ? { periodTransactionId } : { day: reset.toISOString() }),
                         limit,
-                    };
-                } else {
-                    const current = balance(user, rules);
-                    const selectedBalance = billingMode === 'free' ? current.freeCreditsRemaining : current.credits;
-                    if (pro && (!billingMode || selectedBalance < 1))
-                        throw new CreditError(
-                            429,
-                            'You’ve used today’s Pro allowance. Wait for it to reset or choose a credit for this request.',
-                            {
-                                code: 'SUBSCRIPTION_DAILY_LIMIT',
-                                ...usage,
-                                freeCreditsAvailable: current.freeCreditsRemaining,
-                                freeCreditPolicy: current.freeCreditPolicy,
-                                purchasedCreditsAvailable: current.credits,
-                            },
-                        );
-                    if (billingMode && selectedBalance < 1)
-                        throw new CreditError(
-                            402,
-                            billingMode === 'free' ? 'No free credits remain.' : 'No purchased credits remain.',
-                        );
-                    if (current.totalAvailable < 1)
-                        throw new CreditError(
-                            402,
-                            membership.sandbox
-                                ? 'This Apple sandbox subscription has no test allowance enabled, and your credit balance is zero.'
-                                : 'No AI credits remain. Recover an existing account or purchase more credits.',
-                            membership.sandbox ? { code: 'SANDBOX_PRO_ALLOWANCE_DISABLED' } : undefined,
-                        );
-                    const free = billingMode === 'purchased' ? 0 : Math.min(current.freeCreditsRemaining, 1);
-                    const ad = billingMode ? 0 : Math.min(current.adCredits, 1 - free);
-                    const paid = 1 - free - ad;
+                    });
+                }
+                if (walletUnits) {
+                    const free = billingMode === 'purchased' ? 0 : Math.min(current.freeCreditsRemaining, walletUnits);
+                    const ad = billingMode ? 0 : Math.min(current.adCredits, walletUnits - free);
+                    const paid = walletUnits - free - ad;
                     await User.updateOne(
                         { _id: user._id },
-                        {
-                            $inc: {
-                                [rules.field]: -free,
-                                adCredits: -ad,
-                                credits: -paid,
-                            },
-                        },
+                        { $inc: { [rules.field]: -free, adCredits: -ad, credits: -paid } },
                         { session },
                     );
-                    reservation = {
-                        pro: false,
-                        field: rules.field,
-                        free,
-                        ad,
-                        paid,
-                    };
+                    Object.assign(reservation, { field: rules.field, free, ad, paid });
                 }
                 // The held credit/quota and its recovery snapshot commit atomically.
                 if (reservation.subscriptionId) await subscriptionRecovery.checkpoint(reservation.subscriptionId, session);
@@ -466,11 +485,9 @@ function createGeneration({
                 ...(record.reservation.sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),
                 requestId: record.requestId,
                 charged: record.state === 'succeeded',
-                creditCost: record.reservation.pro
-                    ? 0
-                    : record.state === 'succeeded'
-                      ? 1
-                      : 0,
+                creditCost: record.state === 'succeeded'
+                    ? (record.reservation.free || 0) + (record.reservation.ad || 0) + (record.reservation.paid || 0)
+                    : 0,
                 hasProSubscription: record.reservation.membershipPro ?? record.reservation.pro,
                 creditBalance: current,
                 ...Object.fromEntries(Object.entries(current).filter(([key]) => key.startsWith('subscriber') || key === 'serverTime')),
@@ -517,7 +534,7 @@ function createGeneration({
             // builds until the operator deliberately enables the strict cutover.
             if (
                 config.generationBillingRequired === false &&
-                !req.headers.authorization
+                !req.headers.authorization && !needsAuthenticatedBilling(req.body)
             )
                 return next();
             const code = await authenticate(req.headers.authorization);

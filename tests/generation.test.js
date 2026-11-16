@@ -73,7 +73,7 @@ const reserve = (code, id = randomUUID(), body = source) =>
     generation.begin(code, id, '/notes', body);
 async function api(t, handler, service = generation) {
     const app = express();
-    app.use(express.json());
+    app.use(express.json({ limit: '25mb' }));
     app.use('/api', service.middleware);
     app.post('/api/notes', async (req, res) => {
         calls++;
@@ -617,7 +617,7 @@ test('pending purchased charge and refund survive wallet deletion exactly once',
 
 
 async function streamAPI(t, handler) {
- const app=express();app.use(express.json());app.use('/api',generation.middleware);
+ const app=express();app.use(express.json({ limit: '25mb' }));app.use('/api',generation.middleware);
  app.post('/api/notes',async(req,res)=>{calls++;await handler(req,res);});
  const server=app.listen(0,'127.0.0.1');await once(server,'listening');
  t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
@@ -654,4 +654,67 @@ test('a disconnected preview still saves the paid result for a same-ID retry',as
  const replay=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${code}`,'Idempotency-Key':id,Accept:'text/event-stream'},body:JSON.stringify(source)});
  const final=(await replay.text()).split('\n\n').filter(x=>x.startsWith('data:')).map(x=>JSON.parse(x.slice(5))).find(x=>x.type==='complete');
  assert.equal(final.body.notes,'Recovered final note');assert.equal(final.body.billing.charged,true);assert.equal(calls,1);assert.equal((await credits.balance(code)).freeCreditsRemaining,6);
+});
+
+function noteAudio(seconds) {
+    const audio = Buffer.alloc(44 + seconds * 32000);
+    audio.write('RIFF', 0);
+    audio.writeUInt32LE(audio.length - 8, 4);
+    audio.write('WAVEfmt ', 8);
+    audio.writeUInt32LE(16, 16);
+    audio.writeUInt16LE(1, 20);
+    audio.writeUInt16LE(1, 22);
+    audio.writeUInt32LE(16000, 24);
+    audio.writeUInt32LE(32000, 28);
+    audio.writeUInt16LE(2, 32);
+    audio.writeUInt16LE(16, 34);
+    audio.write('data', 36);
+    audio.writeUInt32LE(audio.length - 44, 40);
+    return audio.toString('base64');
+}
+
+test('desktop media charges two credits once and rejects oversize media before model execution', async (t) => {
+    const { PDFDocument } = require('pdf-lib');
+    const code = await account();
+    const request = await api(t);
+    const doc = await PDFDocument.create();
+    for (let i = 0; i < 10; i++) doc.addPage();
+    const pdf = { type: 'pdf', content: await doc.saveAsBase64(), desktopMediaBilling: 1 };
+    const id = randomUUID();
+    const result = await request(code, id, pdf);
+    assert.equal(result.status, 200);
+    assert.equal(result.body.billing.creditCost, 2);
+    assert.equal((await request(code, id, pdf)).body.billing.creditBalance.totalAvailable, 5);
+    doc.addPage();
+    assert.equal((await request(code, randomUUID(), { ...pdf, content: await doc.saveAsBase64() })).status, 400);
+    assert.equal((await request(code, randomUUID(), { type: 'voice', content: noteAudio(181), desktopMediaBilling: 1 })).status, 400);
+    const narration = { type: 'image', sourceKind: 'walkthrough', content: 'AAAA', narration: noteAudio(61), desktopMediaBilling: 1 };
+    assert.equal((await request(code, randomUUID(), narration)).status, 400);
+    assert.equal(calls, 1);
+    const audio = { type: 'voice', content: noteAudio(180), desktopMediaBilling: 1 };
+    assert.equal((await request(code, randomUUID(), audio)).body.billing.creditCost, 2);
+    assert.equal((await request(code, randomUUID(), { ...narration, narration: noteAudio(60) })).body.billing.creditCost, 2);
+    assert.equal((await credits.balance(code)).totalAvailable, 1);
+    assert.equal((await request(code, randomUUID(), audio)).status, 402);
+    assert.equal(calls, 3);
+});
+
+test('desktop media reserves two Pro units, counts both in history, and refunds both on failure', async () => {
+    const code = await account();
+    member = { isPro: true };
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    const audio = { type: 'voice', content: noteAudio(1), desktopMediaBilling: 1 };
+    const { record } = await reserve(code, randomUUID(), audio);
+    assert.equal(record.reservation.proUnits, 2);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 0);
+    await generation.finish(record._id, 500, { error: 'Provider failed' });
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 2);
+    await reserve(code);
+    await assert.rejects(reserve(code, randomUUID(), audio), { status: 429 });
+    const mixed = await reserve(code, randomUUID(), { ...audio, billingMode: 'free' });
+    assert.equal(mixed.record.reservation.pro, true);
+    assert.equal(mixed.record.reservation.free, 1);
+    await generation.finish(mixed.record._id, 500, { error: 'Provider failed' });
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 1);
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
 });

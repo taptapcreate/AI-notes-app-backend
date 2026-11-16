@@ -6,7 +6,7 @@ const {
     Environment,
 } = require('@apple/app-store-server-library');
 const { CreditError } = require('./credit-policy');
-const { subscriptionUsage, requestHistoryUsage } = require('./subscription-usage');
+const { dailySubscriptionUsage, requestHistoryUsage, monthlyAllowances, MONTHLY_PRODUCT } = require('./subscription-usage');
 const BUNDLE_ID = 'com.taptapcreate.ainotes';
 const PRODUCTS = new Set([
     'ai_notes_pro_weekly_subscription',
@@ -21,6 +21,22 @@ const date = (value) =>
     Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000
         ? new Date(value)
         : null;
+function storeKitAllowancePeriod(payload) {
+    if (payload.productId !== MONTHLY_PRODUCT) return null;
+    if (payload.offerDiscountType === 'FREE_TRIAL' || (payload.offerType === 1 && payload.price === 0))
+        return 'trial';
+    if (payload.price > 0 || ['PAY_AS_YOU_GO', 'PAY_UP_FRONT'].includes(payload.offerDiscountType) ||
+        (payload.offerType == null && payload.price == null)) return 'monthly';
+    return null;
+}
+
+// A trial spans one Apple transaction. Only a new transaction can start a paid period.
+function allowancePeriodFor(current, transactionId, period) {
+    if (current.transactionId !== transactionId) return period;
+    if (current.allowancePeriod === 'trial') return 'trial';
+    return period ?? current.allowancePeriod ?? null;
+}
+
 // An omitted scope preserves compatibility with existing clients. An empty
 // scope is an explicit StoreKit check that found no current sandbox entitlement.
 function canUseAppleRecord(record, sandboxIds) {
@@ -188,11 +204,13 @@ function createAppleSubscriptions({
                 (payload.transactionId === current.transactionId &&
                     payload.signedDate >=
                         new Date(current.signedAt || 0).getTime());
-            if (newer)
+            if (newer) {
                 Object.assign(set, {
                     transactionId: payload.transactionId,
                     productId: payload.productId,
-                    purchaseDate: date(payload.purchaseDate),
+                    purchaseDate: current.transactionId === payload.transactionId && current.purchaseDate
+                        ? current.purchaseDate : date(payload.purchaseDate),
+                    allowancePeriod: allowancePeriodFor(current, payload.transactionId, storeKitAllowancePeriod(payload)),
                     expiresAt:
                         current.expiredTransactionId === payload.transactionId
                             ? current.expiresAt
@@ -208,6 +226,7 @@ function createAppleSubscriptions({
                           timestamp
                         : null,
                 });
+            }
             if (
                 payload.revocationDate &&
                 current.transactionId === payload.transactionId
@@ -219,13 +238,13 @@ function createAppleSubscriptions({
             const markWallet = link && !(current.migratedWallets || []).includes(walletHash);
             if (markWallet && !alreadyLinked) {
                 const config = await getAppConfig();
-                let used = subscriptionUsage(
+                let used = dailySubscriptionUsage(
                     current,
                     config,
                     timestamp,
                 ).subscriberDailyUsage;
                 const legacyUsage = !user.appleSubscriptionIds?.length
-                    ? subscriptionUsage(user, config, timestamp).subscriberDailyUsage
+                    ? dailySubscriptionUsage(user, config, timestamp).subscriberDailyUsage
                     : 0;
                 used += legacyUsage;
                 // Preserve same-day usage when a production subscription changes.
@@ -246,7 +265,7 @@ function createAppleSubscriptions({
                         .session(session)
                         .lean();
                     for (const previous of older)
-                        used += subscriptionUsage(
+                        used += dailySubscriptionUsage(
                             previous,
                             config,
                             timestamp,
@@ -375,8 +394,9 @@ function createAppleSubscriptions({
                     'PRODUCT_CHANGE',
                 ].includes(event.type) &&
                 expiry &&
-                event.purchased_at_ms >=
-                    new Date(record.purchaseDate || 0).getTime() &&
+                date(event.purchased_at_ms) &&
+                (event.purchased_at_ms > new Date(record.purchaseDate || 0).getTime() ||
+                    event.transaction_id === record.transactionId) &&
                 record.expiredTransactionId !== event.transaction_id &&
                 !(record.revokedTransactions || []).includes(
                     event.transaction_id,
@@ -385,7 +405,12 @@ function createAppleSubscriptions({
                 Object.assign(set, {
                     transactionId: event.transaction_id,
                     productId: event.product_id,
-                    purchaseDate: date(event.purchased_at_ms),
+                    purchaseDate: event.transaction_id === record.transactionId && record.purchaseDate
+                        ? record.purchaseDate : date(event.purchased_at_ms),
+                    allowancePeriod: allowancePeriodFor(record, event.transaction_id,
+                        event.product_id !== MONTHLY_PRODUCT ? null
+                            : event.period_type === 'TRIAL' ? 'trial'
+                              : ['NORMAL', 'INTRO', 'PREPAID'].includes(event.period_type) ? 'monthly' : null),
                     expiresAt: expiry,
                     revokedAt: null,
                     isUpgraded: false,
@@ -435,9 +460,16 @@ function createAppleSubscriptions({
             const ids = recoverable.map(payload => identity(payload.environment, payload.originalTransactionId));
             if (ids.length) {
                 const existing = await Subscription.find({ _id: { $in: ids } }).lean();
-                const ready = new Set(existing.filter(record => record.transactionId).map(record => record._id));
+                const byID = new Map(existing.map(record => [record._id, record]));
+                const useMonthly = monthlyAllowances(await getAppConfig());
                 for (const payload of recoverable) {
-                    if (!ready.has(identity(payload.environment, payload.originalTransactionId)))
+                    const record = byID.get(identity(payload.environment, payload.originalTransactionId));
+                    const period = useMonthly && storeKitAllowancePeriod(payload);
+                    const refreshPeriod = useMonthly && record && payload.productId === MONTHLY_PRODUCT &&
+                        (payload.purchaseDate > new Date(record.purchaseDate || 0).getTime() ||
+                            (record.transactionId === payload.transactionId && period &&
+                                allowancePeriodFor(record, payload.transactionId, period) !== record.allowancePeriod));
+                    if (!record?.transactionId || refreshPeriod)
                         await savePayload(payload, user.recoveryCode);
                 }
             }

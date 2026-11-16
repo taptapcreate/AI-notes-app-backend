@@ -78,6 +78,7 @@ const AppConfigSchema = new mongoose.Schema({
     },
     welcomePackVersion: { type: Number, default: 1 },
     subscriberDailyLimit: { type: Number, default: DEFAULT_SUBSCRIBER_DAILY_LIMIT, min: 1, max: 10000, validate: Number.isSafeInteger },
+    monthlySubscriptionAllowanceEnabled: { type: Boolean, default: false },
     // Enable only after the updated mobile builds are available. The cutover
     // script enables this together with the one-time allowance.
     generationBillingRequired: { type: Boolean, default: false },

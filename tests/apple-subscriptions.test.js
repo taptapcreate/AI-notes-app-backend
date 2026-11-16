@@ -564,3 +564,102 @@ test('subscription expiration webhook recovers missing record without reviving e
     await Subscription.deleteMany({});
     assert.equal((await status(codes[0])).isPro, false);
 });
+
+test('trial usage is shared across devices and only a verified paid period refills the allowance', async () => {
+    config.monthlySubscriptionAllowanceEnabled = true;
+    const trial = proof({
+        offerType: 1,
+        offerDiscountType: 'FREE_TRIAL',
+        expiresDate: time.getTime() + 3 * 86400000,
+    });
+    for (const code of codes) await service.attach(code, [JSON.stringify(trial)]);
+    const day = 86400000;
+    const use = async (code, result = 200) => {
+        const { record } = await generation.begin(code, randomUUID(), '/notes', source);
+        await generation.finish(record._id, result, result === 200 ? { notes: 'Note' } : { error: 'Failed' });
+    };
+    const remaining = async (code = codes[0]) => (await credits.balance(code)).subscriberDailyRemaining;
+    assert.equal(await remaining(), 60);
+    await use(codes[0]);
+    time = new Date(time.getTime() + day);
+    await use(codes[1]);
+    await use(codes[1], 500);
+    assert.equal(await remaining(), 58);
+    assert.equal((await credits.balance(codes[1])).subscriberAllowancePeriod, 'trial');
+    assert.equal(await remaining(codes[1]), 58);
+
+    const event = {
+        product_id: trial.productId, store: 'APP_STORE', environment: 'SANDBOX',
+        original_transaction_id: trial.originalTransactionId, transaction_id: trial.transactionId,
+        purchased_at_ms: trial.purchaseDate, expiration_at_ms: trial.expiresDate,
+        event_timestamp_ms: time.getTime(), period_type: 'TRIAL',
+    };
+    await service.webhook({ ...event, type: 'CANCELLATION' });
+    await service.attach(codes[0], [JSON.stringify({
+        ...trial, offerType: undefined, offerDiscountType: undefined, signedDate: time.getTime(),
+    })]);
+    await service.webhook({ ...event, type: 'INITIAL_PURCHASE', period_type: 'NORMAL',
+        event_timestamp_ms: time.getTime() + 1, purchased_at_ms: trial.purchaseDate - 1000 });
+    assert.equal(await remaining(), 58);
+    assert.equal((await status(codes[0])).isPro, true);
+    await Subscription.deleteMany({});
+    assert.equal(await remaining(), 58);
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    assert.equal(await remaining(), 58);
+
+    time = new Date(trial.expiresDate + 1);
+    await service.webhook({ ...event, type: 'EXPIRATION', event_timestamp_ms: time.getTime() });
+    assert.equal((await status(codes[0])).isPro, false);
+    assert.equal(await remaining(), 0);
+
+    const renewal = {
+        ...event, type: 'RENEWAL', period_type: 'NORMAL', is_trial_conversion: true,
+        transaction_id: '100000000003',
+        event_timestamp_ms: time.getTime() + 1,
+        purchased_at_ms: time.getTime(), expiration_at_ms: time.getTime() + 30 * day,
+    };
+    assert.equal(await service.webhook(renewal), true);
+    assert.equal(await remaining(), 700);
+    await use(codes[1]);
+    await service.webhook(renewal);
+    await service.attach(codes[0], [JSON.stringify(trial)]);
+    assert.equal(await remaining(), 699);
+    const paid = await credits.balance(codes[0]);
+    assert.equal(paid.subscriberAllowancePeriod, 'monthly');
+    assert.equal(paid.subscriberResetAt, new Date(renewal.expiration_at_ms).toISOString());
+    assert.equal(paid.credits, 20);
+    assert.equal(paid.freeCreditsRemaining, 7);
+    config.billingControls.usePrimarySubscriptionTracking = true;
+    assert.equal(await remaining(), 699);
+});
+
+test('verified StoreKit can start a paid month without RevenueCat and weekly keeps its daily allowance', async () => {
+    config.monthlySubscriptionAllowanceEnabled = true;
+    const monthly = await attach(codes[0], { environment: 'Production' });
+    assert.equal(monthly.subscriberDailyRemaining, 700);
+    const weekly = await attach(codes[1], {
+        productId: 'ai_notes_pro_weekly_subscription',
+        originalTransactionId: '100000000151',
+        transactionId: '100000000152',
+    });
+    assert.equal(weekly.subscriberAllowancePeriod, 'daily');
+    assert.equal(weekly.subscriberDailyRemaining, 10);
+});
+
+test('exhausted trial requests require consent to spend wallet credits', async () => {
+    config.monthlySubscriptionAllowanceEnabled = true;
+    await attach(codes[0], { offerType: 1, offerDiscountType: 'FREE_TRIAL' });
+    const { quotaId } = await status(codes[0]);
+    await Subscription.updateOne({ _id: quotaId }, {
+        $set: { periodUsageTransactionId: proof().transactionId, periodRequestCount: 59 },
+    });
+    const before = await credits.balance(codes[0]);
+    const last = await generation.begin(codes[0], randomUUID(), '/notes', source);
+    await generation.finish(last.record._id, 200, { notes: 'Last trial note' });
+    await assert.rejects(generation.begin(codes[0], randomUUID(), '/notes', source),
+        error => error.status === 429);
+    const exhausted = await credits.balance(codes[0]);
+    assert.equal(exhausted.subscriberDailyRemaining, 0);
+    assert.equal(exhausted.credits, before.credits);
+    assert.equal(exhausted.freeCreditsRemaining, before.freeCreditsRemaining);
+});

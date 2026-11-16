@@ -16,7 +16,7 @@ function createAccountRecovery({ Account, Backup, kind, now = () => new Date() }
             throw new CreditError(503, 'Account backup needs support review');
         const counters = kind === 'wallet'
             ? ['credits', 'adCredits', 'totalFreeCredits', 'freeCreditsRemaining', 'dailyRequestCount']
-            : ['dailyRequestCount'];
+            : ['dailyRequestCount', 'periodRequestCount'];
         if (counters.some(name => snapshot[name] != null &&
             (!Number.isSafeInteger(snapshot[name]) || snapshot[name] < 0)))
             throw new CreditError(503, 'Account backup needs support review');
