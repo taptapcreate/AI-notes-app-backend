@@ -2,7 +2,8 @@ const express = require('express');
 const { authorized } = require('./revenuecat');
 const { recoveryCode, CreditError } = require('../services/credit-policy');
 const {
-    CREDIT_PACK_PRODUCTS,
+    creditPackAmount,
+    appleCreditPackCutover,
     purchaseAliases,
 } = require('../services/purchases');
 
@@ -10,6 +11,7 @@ function createPurchaseAdminRouter({
     PendingPurchase,
     credits,
     secret,
+    applePackCutover = appleCreditPackCutover(),
     logger = console,
 }) {
     const router = express.Router();
@@ -61,11 +63,11 @@ function createPurchaseAdminRouter({
             let added = 0;
             let linked = 0;
             for (const purchase of pending) {
-                const amount = CREDIT_PACK_PRODUCTS[purchase.productId];
+                const amount = creditPackAmount(purchase.productId, purchase.rawEvent || {}, applePackCutover);
                 if (!amount)
                     throw new CreditError(
                         409,
-                        'Unknown product requires manual review',
+                        'Purchase details require manual review',
                     );
                 const aliases = purchaseAliases(purchase.productId, {
                     ...(purchase.rawEvent || {}),

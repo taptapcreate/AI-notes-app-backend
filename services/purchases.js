@@ -11,6 +11,43 @@ const CREDIT_PACK_PRODUCTS = Object.freeze({
     ai_notes_supreme_pack_credits: 5000,
 });
 
+const APPLE_CREDIT_PACK_PRODUCTS = Object.freeze({
+    ai_notes_lite_pack_credits: 20,
+    ai_notes_power_pack_credits: 50,
+    ai_notes_pro_pack_credits: 100,
+    ai_notes_elite_pack_credits: 200,
+    ai_notes_ultimate_pack_credits: 350,
+    ai_notes_mega_pack_credits: 750,
+    ai_notes_supreme_pack_credits: 1500,
+});
+
+function appleCreditPackCutover(value = process.env.APPLE_CREDIT_PACKS_EFFECTIVE_AT) {
+    if (!value) return null;
+    const time = Date.parse(value);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(time))
+        throw new Error('APPLE_CREDIT_PACKS_EFFECTIVE_AT must be an ISO timestamp with a time zone');
+    return time;
+}
+
+function creditPackAmount(product, purchase, cutover = appleCreditPackCutover()) {
+    if (!Object.hasOwn(CREDIT_PACK_PRODUCTS, product)) return undefined;
+    const store = typeof purchase.store === 'string' ? purchase.store.toLowerCase() : '';
+    if (cutover === null) return CREDIT_PACK_PRODUCTS[product];
+    if (store === 'play_store') return CREDIT_PACK_PRODUCTS[product];
+    if (!['app_store', 'mac_app_store'].includes(store)) return undefined;
+    const date = purchase.purchased_at_ms ?? purchase.purchase_date;
+    const timestamp = typeof date === 'string' ? Date.parse(date) : date;
+    if (!Number.isSafeInteger(timestamp) || timestamp <= 0) return undefined;
+    return (timestamp >= cutover ? APPLE_CREDIT_PACK_PRODUCTS : CREDIT_PACK_PRODUCTS)[product];
+}
+
+function confirmedPackAmount(result, aliases, amount) {
+    if (result.applied) return amount;
+    return result.user?.processedTransactions?.find(
+        (entry) => entry.credits > 0 && aliases.includes(entry.transactionId),
+    )?.credits ?? amount;
+}
+
 function purchaseAliases(product, purchase) {
     const aliases = [
         purchase.store_transaction_id,
@@ -33,7 +70,7 @@ function purchaseAliases(product, purchase) {
     return [...new Set(aliases)];
 }
 
-function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions, verifyApple }) {
+function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions, verifyApple, applePackCutover = appleCreditPackCutover() }) {
     async function customer(user, { required = false } = {}) {
         if (!apiKey) {
             if (required)
@@ -140,7 +177,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
             );
         }
         const expected = options.purchase;
-        if (expected && (!CREDIT_PACK_PRODUCTS[expected.productId] ||
+        if (expected && (!Object.hasOwn(CREDIT_PACK_PRODUCTS, expected.productId) ||
             typeof expected.transactionId !== 'string' || !expected.transactionId ||
             expected.transactionId.length > 512))
             throw new CreditError(400, 'Invalid purchase identity');
@@ -148,8 +185,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
         let synced = 0;
         let amount = 0;
         for (const [product, entries] of Object.entries(purchases)) {
-            const value = CREDIT_PACK_PRODUCTS[product];
-            if (!value || !Array.isArray(entries)) continue;
+            if (!Object.hasOwn(CREDIT_PACK_PRODUCTS, product) || !Array.isArray(entries)) continue;
             for (const purchase of entries) {
                 if (
                     !purchase ||
@@ -166,6 +202,8 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                     if (matches) confirmation = { ...expected, status: 'sandbox_disabled', sandbox: true };
                     continue;
                 }
+                const value = creditPackAmount(product, purchase, applePackCutover);
+                if (!value) continue;
                 let result;
                 try {
                     result = await credits.grantPurchase(
@@ -181,7 +219,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                     throw error;
                 }
                 if (matches) confirmation = { ...expected, status: 'credited',
-                    credits: value, alreadyProcessed: !result.applied, sandbox: purchase.is_sandbox === true };
+                    credits: confirmedPackAmount(result, aliases, value), alreadyProcessed: !result.applied, sandbox: purchase.is_sandbox === true };
                 if (result.applied) {
                     synced++;
                     amount += value;
@@ -193,8 +231,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
     async function confirmApple(user, signed, expected) {
         verifyApple ||= appleVerifier();
         const proof = await verifyApple(signed);
-        const amount = CREDIT_PACK_PRODUCTS[proof.productId];
-        if (!amount || proof.bundleId !== BUNDLE_ID || proof.type !== 'Consumable' ||
+        if (!Object.hasOwn(CREDIT_PACK_PRODUCTS, proof.productId) || proof.bundleId !== BUNDLE_ID || proof.type !== 'Consumable' ||
             proof.revocationDate || !['Sandbox', 'Production'].includes(proof.environment) ||
             !/^\d{1,40}$/.test(proof.transactionId || '') ||
             !Number.isSafeInteger(proof.purchaseDate) || proof.purchaseDate <= 0 ||
@@ -204,13 +241,15 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
         const aliases = purchaseAliases(proof.productId, {
             store_transaction_id: proof.transactionId, purchased_at_ms: proof.purchaseDate,
         });
+        const amount = creditPackAmount(proof.productId,
+            { store: 'app_store', purchased_at_ms: proof.purchaseDate }, applePackCutover);
         const result = await credits.grantPurchase(user.recoveryCode, aliases, amount, 'apple_verified');
         return { credits: result.applied ? amount : 0, purchase: {
             productId: proof.productId, transactionId: proof.transactionId, status: 'credited',
-            credits: amount, alreadyProcessed: !result.applied, sandbox: proof.environment === 'Sandbox',
+            credits: confirmedPackAmount(result, aliases, amount), alreadyProcessed: !result.applied, sandbox: proof.environment === 'Sandbox',
         } };
     }
     return { sync, subscriptionStatus, confirmApple };
 }
 
-module.exports = { createPurchases, CREDIT_PACK_PRODUCTS, purchaseAliases };
+module.exports = { createPurchases, CREDIT_PACK_PRODUCTS, creditPackAmount, appleCreditPackCutover, purchaseAliases };

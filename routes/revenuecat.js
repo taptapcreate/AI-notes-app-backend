@@ -1,6 +1,9 @@
 const { timingSafeEqual } = require('node:crypto');
+const { CreditError } = require('../services/credit-policy');
 const {
     CREDIT_PACK_PRODUCTS,
+    creditPackAmount,
+    appleCreditPackCutover,
     purchaseAliases,
 } = require('../services/purchases');
 
@@ -21,6 +24,7 @@ function createRevenueCatHandler({
     subscriptionEvent = async () => false,
     accountWasDeleted = async () => false,
     allowSandbox = false,
+    applePackCutover = appleCreditPackCutover(),
     secret,
     notify = async () => {},
     logger = console,
@@ -44,8 +48,7 @@ function createRevenueCatHandler({
             ) {
                 return res.json({ success: true, message: 'Event ignored' });
             }
-            const amount = CREDIT_PACK_PRODUCTS[event.product_id];
-            if (!amount || (event.environment === 'SANDBOX' && !allowSandbox && !['APP_STORE', 'MAC_APP_STORE'].includes(event.store))) {
+            if (!Object.hasOwn(CREDIT_PACK_PRODUCTS, event.product_id) || (event.environment === 'SANDBOX' && !allowSandbox && !['APP_STORE', 'MAC_APP_STORE'].includes(event.store))) {
                 return res.json({ success: true, message: 'Event ignored' });
             }
             if (
@@ -60,6 +63,8 @@ function createRevenueCatHandler({
                     .status(400)
                     .json({ error: 'Purchase identity is required' });
             }
+            const amount = creditPackAmount(event.product_id, event, applePackCutover);
+            if (!amount) throw new CreditError(503, 'The store purchase details could not be verified');
             let user;
             try { user = await credits.byCode(event.app_user_id.toUpperCase()); }
             catch (error) {
