@@ -6,7 +6,7 @@ const {
     Environment,
 } = require('@apple/app-store-server-library');
 const { CreditError } = require('./credit-policy');
-const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT, WEEKLY_PRODUCT, paidAllowancePeriod } = require('./subscription-usage');
+const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT, WEEKLY_PRODUCT, paidAllowancePeriod, trialCreditLimit } = require('./subscription-usage');
 const BUNDLE_ID = 'com.taptapcreate.ainotes';
 const PRODUCTS = new Set([WEEKLY_PRODUCT, MONTHLY_PRODUCT]);
 const hash = (value) => createHash('sha256').update(value).digest('hex');
@@ -111,6 +111,42 @@ function createAppleSubscriptions({
             new Date(record.expiresAt || 0).getTime(),
             new Date(record.graceExpiresAt || 0).getTime(),
         ) > timestamp.getTime();
+    async function setTrialGrant(current, update) {
+        if (update.allowancePeriod === 'trial') {
+            if (current.transactionId !== update.transactionId || current.trialCreditLimit == null)
+                update.trialCreditLimit = trialCreditLimit(await getAppConfig());
+        } else if (current.transactionId !== update.transactionId) {
+            update.trialCreditLimit = null;
+        }
+    }
+
+    async function backfillTrialGrants(config) {
+        const timestamp = now();
+        const grant = trialCreditLimit(config);
+        const filter = {
+            allowancePeriod: 'trial',
+            transactionId: { $type: 'string' },
+            expiresAt: { $gt: timestamp },
+            revokedAt: null,
+            isUpgraded: { $ne: true },
+            trialCreditLimit: null,
+        };
+        const backfill = id => transaction(async session => {
+            const record = await subscriptionRecovery.ensure(id, session);
+            if (record.allowancePeriod !== 'trial' || !record.transactionId || record.trialCreditLimit != null ||
+                record.revokedAt || record.isUpgraded || !(record.expiresAt > timestamp)) return;
+            await Subscription.updateOne({ _id: id }, { $set: { trialCreditLimit: grant } }, { session });
+            await subscriptionRecovery.checkpoint(id, session);
+        });
+        for await (const record of Subscription.find(filter).select('_id').lean().cursor())
+            await backfill(record._id);
+
+        // Restore active trials whose only surviving record is the recovery snapshot.
+        const snapshotFilter = Object.fromEntries(Object.entries(filter).map(([key, value]) => ['snapshot.' + key, value]));
+        for await (const backup of Backup.find({ kind: 'subscription', ...snapshotFilter }).select('identity').lean().cursor())
+            await backfill(backup.identity);
+    }
+
     async function recordFor(user, session, sandboxIds) {
         const ids = user.appleSubscriptionIds || [];
         if (!ids.length) return null;
@@ -224,6 +260,7 @@ function createAppleSubscriptions({
                           timestamp
                         : null,
                 });
+                await setTrialGrant(current, set);
             }
             if (
                 payload.revocationDate &&
@@ -416,6 +453,7 @@ function createAppleSubscriptions({
                         ? { graceExpiresAt: null }
                         : {}),
                 });
+                await setTrialGrant(record, set);
             }
             if (event.transaction_id === record.transactionId) {
                 if (refunded) set.revokedAt = stamp;
@@ -480,7 +518,7 @@ function createAppleSubscriptions({
             payload.isUpgraded !== true
         ).map(payload => identity(payload.environment, payload.originalTransactionId)))];
     }
-    return { attach, status, usage, webhook, active, recordFor, resolveStoreKitScope };
+    return { attach, status, usage, webhook, active, recordFor, resolveStoreKitScope, backfillTrialGrants };
 }
 module.exports = {
     canUseAppleRecord,

@@ -69,13 +69,17 @@ async function syncWeeklySubscriptionCredits(Config, config) {
     return updated;
 }
 
+function trialCreditLimit(config) {
+    return config.freeTrialCreditsEnabled === false ? 0 :
+        configuredCreditLimit(config.freeTrialCredits, DEFAULT_FREE_TRIAL_CREDITS, 0);
+}
+
 function subscriptionAllowances(config) {
     const daily = config.dailySubscriptionAllowanceEnabled === true;
     return {
         monthly: daily ? null : configuredMonthlyLimit(config),
         weekly: daily ? null : getWeeklySubscriptionCredits(config),
-        trial: config.freeTrialCreditsEnabled === false ? 0 :
-            configuredCreditLimit(config.freeTrialCredits, DEFAULT_FREE_TRIAL_CREDITS, 0),
+        trial: trialCreditLimit(config),
     };
 }
 
@@ -114,12 +118,14 @@ function allowanceWindow(subscription, config) {
         // Wait for verified period data before granting a trial or paid allowance.
         return { period: paidPeriod, limit: 0, reset, transactionId: subscription.transactionId || null };
     }
-    const limits = subscriptionAllowances(config);
     const period = subscription.allowancePeriod;
     const reset = new Date(subscription.expiresAt);
     if (!subscription.expiresAt || !Number.isFinite(reset.getTime()))
         throw new CreditError(503, 'Subscription period needs support review');
-    return { period, limit: limits[period], reset, transactionId: subscription.transactionId };
+    const limit = period === 'trial'
+        ? configuredCreditLimit(subscription.trialCreditLimit, 0, 0)
+        : period === 'monthly' ? configuredMonthlyLimit(config) : getWeeklySubscriptionCredits(config);
+    return { period, limit, reset, transactionId: subscription.transactionId };
 }
 
 function getSubscriberDailyLimit(config, user) {
@@ -214,7 +220,7 @@ async function requestHistoryUsage(user, config, now = new Date(), session, requ
 }
 module.exports = {
     requestHistoryUsage, subscriptionUsage, dailySubscriptionUsage, subscriptionAllowances,
-    getWeeklySubscriptionCredits, syncWeeklySubscriptionCredits, paidAllowancePeriod,
+    getWeeklySubscriptionCredits, syncWeeklySubscriptionCredits, paidAllowancePeriod, trialCreditLimit,
     getSubscriberDailyLimit, subscriptionPlanMessages, initializeSubscriptionControls, DEFAULT_SUBSCRIBER_DAILY_LIMIT,
     DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS, MONTHLY_PRODUCT, WEEKLY_PRODUCT,
 };

@@ -31,6 +31,7 @@ if (process.env.TRUST_PROXY_HOPS !== undefined) {
 const DB_NAME = 'ai_notes_app';
 
 const AppConfig = require('./models/AppConfig');
+const { noteOutputLimit, initializeNoteOutputLimits } = require('./services/note-output-limits');
 const { releaseConfig } = require('./services/release-config');
 const { publicMaintenance, createMaintenanceGate } = require('./services/maintenance');
 
@@ -76,6 +77,8 @@ let accountRecoveryReady = false;
 const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
     .then(async () => {
         await getAppConfig();
+        await initializeNoteOutputLimits(AppConfig)
+            .catch(error => console.error('Note output limits initialization deferred:', error.message));
         await initializeSubscriptionControls(AppConfig)
             .catch(error => console.error('Subscription controls initialization deferred:', error.message));
         await require('./services/message-controls-init').initializeMessageControls({
@@ -84,6 +87,7 @@ const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: 
         const result = await require('./services/recovery-cutover').backfillAccountRecovery({
             User, Subscription: AppleSubscription, Backup: require('./models/AccountRecovery'),
         });
+        await appleSubscriptions.backfillTrialGrants(await getAppConfig());
         accountRecoveryReady = true;
         console.log('Account recovery ready:', result);
     });
@@ -237,23 +241,19 @@ const generateWithRetry = async (maxTokens, content, retries = 3, delay = 2000, 
 
 // ==================== SHARED GUIDES ====================
 
-// Note length instructions with token limits
+// Note length instructions
 const lengthGuides = {
     brief: {
-        instruction: 'Provide a concise but informative summary. Aim for 5-7 useful points when the source supports them; use fewer for short material. Keep it short but ensure the main context and important details are clear.',
-        maxTokens: 1200
+        instruction: 'Provide a concise but informative summary. Aim for 5-7 useful points when the source supports them; use fewer for short material. Keep it short but ensure the main context and important details are clear.'
     },
     standard: {
-        instruction: 'Provide a comprehensive and well-rounded summary. Cover the main themes with sufficient explanations and important details; aim for 10-15 points only when justified by the source. Provide a good level of depth without being overly exhaustive.',
-        maxTokens: 2500
+        instruction: 'Provide a comprehensive and well-rounded summary. Cover the main themes with sufficient explanations and important details; aim for 10-15 points only when justified by the source. Provide a good level of depth without being overly exhaustive.'
     },
     detailed: {
-        instruction: 'Provide a very thorough and comprehensive analysis. Develop the core insights, supporting evidence, explanations, and nuances without page-by-page recitation. Use as many points as the material warrants, without padding.',
-        maxTokens: 5000 // Increased further for depth per user request
+        instruction: 'Provide a very thorough and comprehensive analysis. Develop the core insights, supporting evidence, explanations, and nuances without page-by-page recitation. Use as many points as the material warrants, without padding.'
     },
     'in-depth': {
-        instruction: 'Write a thorough reference note organized by topic. Explain why important details matter, connect related ideas, and use examples when supported by the source. Identify open questions or missing context where relevant. Keep the scope proportional to the material and avoid padding.',
-        maxTokens: 6500
+        instruction: 'Write a thorough reference note organized by topic. Explain why important details matter, connect related ideas, and use examples when supported by the source. Identify open questions or missing context where relevant. Keep the scope proportional to the material and avoid padding.'
     },
 };
 
@@ -337,7 +337,7 @@ app.post('/api/notes', async (req, res) => {
 
         const lengthConfig = Object.hasOwn(lengthGuides, noteLength) ? lengthGuides[noteLength] : lengthGuides.standard;
         const lengthInstruction = lengthConfig.instruction;
-        const maxTokens = lengthConfig.maxTokens;
+        const maxTokens = noteOutputLimit(res.locals.appConfig, noteLength);
 
         const formatInstruction = formatGuides[format] || formatGuides.bullet;
 

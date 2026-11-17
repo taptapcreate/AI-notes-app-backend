@@ -29,6 +29,7 @@ const schema = new mongoose.Schema(
         dailyRequestCount: { type: Number, default: 0 },
         lastRequestReset: Date,
         allowancePeriod: { type: String, enum: ['trial', 'monthly', 'weekly'] },
+        trialCreditLimit: { type: Number, min: 0, max: 10000, validate: Number.isSafeInteger },
         periodUsageTransactionId: String,
         periodRequestCount: { type: Number, min: 0, default: 0, validate: Number.isSafeInteger },
         lastEventAt: Date,

@@ -698,9 +698,40 @@ test('trial credit controls are independent of the paid daily mode and the walle
     assert.equal(disabled.credits, 20);
 
     config.freeTrialCreditsEnabled = true;
-    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 4);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 0);
     config.dailySubscriptionAllowanceEnabled = false;
-    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 4);
+    const newTrial = await attach(codes[1], {
+        originalTransactionId: '100000000201',
+        transactionId: '100000000202',
+        offerType: 1,
+        offerDiscountType: 'FREE_TRIAL',
+    });
+    assert.equal(newTrial.subscriberDailyRemaining, 4);
+});
+
+test('an existing trial keeps its grant and usage after backfill, settings changes and recovery', async () => {
+    config.dailySubscriptionAllowanceEnabled = false;
+    const trial = { offerType: 1, offerDiscountType: 'FREE_TRIAL' };
+    await attach(codes[0], trial);
+    const { quotaId } = await status(codes[0]);
+    const request = await generation.begin(codes[0], randomUUID(), '/notes', source);
+    await generation.finish(request.record._id, 200, { notes: 'Trial note' });
+
+    // Simulate a trial from the previous deployment present only in its backup.
+    await AccountRecovery.updateOne({ identity: quotaId }, { $unset: { 'snapshot.trialCreditLimit': '' } });
+    await Subscription.deleteOne({ _id: quotaId });
+    await service.backfillTrialGrants(config);
+    config.freeTrialCreditsEnabled = false;
+    config.freeTrialCredits = 8;
+    await service.backfillTrialGrants(config);
+    await Subscription.deleteOne({ _id: quotaId });
+
+    const refreshed = await attach(codes[0], trial);
+    assert.equal(refreshed.subscriberDailyLimit, 3);
+    assert.equal(refreshed.subscriberDailyRemaining, 2);
+    const wallet = await credits.balance(codes[0]);
+    assert.equal(wallet.credits, 20);
+    assert.equal(wallet.freeCreditsRemaining, 7);
 });
 
 test('paywall copy uses the same configured credit limits as billing', () => {

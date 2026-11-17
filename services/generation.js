@@ -530,6 +530,7 @@ function createGeneration({
                     'Use the authenticated notes endpoint in the latest AI Notes app',
                 );
             const config = await getAppConfig();
+            res.locals.appConfig = config;
             // A staged deployment must continue serving installed legacy mobile
             // builds until the operator deliberately enables the strict cutover.
             if (

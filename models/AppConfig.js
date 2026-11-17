@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { limits: noteOutputLimits, minimum: minimumNoteOutputTokens } = require('../services/note-output-limits');
 const { DEFAULT_WELCOME_CREDITS } = require('../services/credit-policy');
 const { DEFAULT_SUBSCRIBER_DAILY_LIMIT, DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS } = require('../services/subscription-usage');
 
@@ -50,6 +51,12 @@ const AppConfigSchema = new mongoose.Schema({
             ['ios', 'android', 'macos', 'windows'].map(platform =>
                 [platform, { type: PlatformBillingSchema, default: () => ({}) }]),
         ), { _id: false }),
+        default: () => ({}),
+    },
+    noteOutputTokenLimits: {
+        type: new mongoose.Schema(Object.fromEntries(Object.entries(noteOutputLimits).map(([key, rule]) => [
+            key, { type: Number, default: rule.default, min: minimumNoteOutputTokens, max: rule.cap, validate: Number.isSafeInteger },
+        ])), { _id: false }),
         default: () => ({}),
     },
     // 1. General Alerts
