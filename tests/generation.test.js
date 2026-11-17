@@ -678,14 +678,14 @@ test('desktop media charges two credits once and rejects oversize media before m
     const code = await account();
     const request = await api(t);
     const doc = await PDFDocument.create();
-    for (let i = 0; i < 10; i++) doc.addPage();
+    for (let i = 0; i < 3; i++) doc.addPage();
     const pdf = { type: 'pdf', content: await doc.saveAsBase64(), desktopMediaBilling: 1 };
     const id = randomUUID();
     const result = await request(code, id, pdf);
     assert.equal(result.status, 200);
     assert.equal(result.body.billing.creditCost, 2);
     assert.equal((await request(code, id, pdf)).body.billing.creditBalance.totalAvailable, 5);
-    doc.addPage();
+    for (let i = 3; i < 11; i++) doc.addPage();
     assert.equal((await request(code, randomUUID(), { ...pdf, content: await doc.saveAsBase64() })).status, 400);
     assert.equal((await request(code, randomUUID(), { type: 'voice', content: noteAudio(181), desktopMediaBilling: 1 })).status, 400);
     const narration = { type: 'image', sourceKind: 'walkthrough', content: 'AAAA', narration: noteAudio(61), desktopMediaBilling: 1 };
@@ -717,4 +717,26 @@ test('desktop media reserves two Pro units, counts both in history, and refunds 
     await generation.finish(mixed.record._id, 500, { error: 'Provider failed' });
     assert.equal((await credits.balance(code)).subscriberDailyRemaining, 1);
     assert.equal((await credits.balance(code)).totalAvailable, 7);
+});
+
+test('PDF billing verifies the number of selected pages before reserving credits', async (t) => {
+    const { PDFDocument } = require('pdf-lib');
+    const { generationUnits } = require('../services/media-note-billing');
+    const code = await account();
+    const request = await api(t);
+    const doc = await PDFDocument.create();
+    let pdf;
+    for (const expected of [2, 2, 2, 3, 3, 3, 4, 4, 4, 5]) {
+        doc.addPage();
+        pdf = { type: 'pdf', content: await doc.saveAsBase64(), mobileMediaBilling: 1, pdfOcrCreditQuote: expected };
+        assert.equal(await generationUnits('/notes', pdf), expected);
+    }
+    const wrong = await request(code, randomUUID(), { ...pdf, pdfOcrCreditQuote: 2 });
+    assert.equal(wrong.status, 409);
+    assert.match(wrong.body.error, /need 5 AI credits/);
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
+    const id = randomUUID();
+    assert.equal((await request(code, id, pdf)).body.billing.creditCost, 5);
+    assert.equal((await request(code, id, pdf)).body.billing.creditBalance.totalAvailable, 2);
+    assert.equal(calls, 1);
 });

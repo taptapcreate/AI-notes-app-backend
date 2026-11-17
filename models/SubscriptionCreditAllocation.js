@@ -9,6 +9,8 @@ const schema = new mongoose.Schema({
     periodEnd: { type: Date, required: true, immutable: true },
     expiresAt: { type: Date, required: true },
     carriedIntoTransactionId: String,
+    carriedCredits: { ...units(), required: false },
+    closedAt: Date,
     terms: { type: new mongoose.Schema({
         version: { type: Number, enum: [1], required: true },
         kind: { type: String, enum: ['monthly', 'weekly', 'trial'], required: true },

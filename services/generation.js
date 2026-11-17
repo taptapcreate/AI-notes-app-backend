@@ -1,3 +1,4 @@
+const { monthlyUsage, reserveMonthly, settleMonthly } = require('./subscription-credit-ledger');
 const { generationUnits } = require('./media-note-billing');
 const { canUseAppleRecord } = require('./apple-subscriptions');
 const { requestHistoryUsage } = require('./subscription-usage');
@@ -25,7 +26,7 @@ const REQUEST_ID =
 const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'website', 'import', 'documents', 'video', 'location', 'calendar', 'sketch']);
 const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
 const PRO_SOURCES = new Set(['video', 'location', 'calendar', 'sketch']);
-const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling']
+const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote']
     .some(field => body?.[field] !== undefined);
 const requiresPro = (body) => PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
     (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));
@@ -215,15 +216,18 @@ function createGeneration({
                     error: 'The AI request expired. Your credit was returned; please try again.',
                 };
             }
+            const held = record.reservation;
+            let subscription;
+            if (held.ledger || (status >= 400 && held.subscriptionId)) {
+                try { subscription = await subscriptionRecovery.ensure(held.subscriptionId, session); }
+                catch (error) { if (error.status !== 404) throw error; }
+            }
+            if (held.ledger)
+                await settleMonthly(held.ledger, id, status < 400, subscription, now(), session);
             if (status >= 400) {
-                const held = record.reservation;
-                if (held.subscriptionId) {
-                    try { await subscriptionRecovery.ensure(held.subscriptionId, session); }
-                    catch (error) { if (error.status !== 404) throw error; }
-                }
                 if (!held.subscriptionId || held.free || held.ad || held.paid)
                     await credits.ensureAccount(record.recoveryCode, session);
-                if (held.pro) {
+                if (held.pro && !held.ledger) {
                     await (held.subscriptionId ? Subscription : User).updateOne(
                         {
                             ...(held.subscriptionId ? { _id: held.subscriptionId } : { recoveryCode: record.recoveryCode }),
@@ -373,7 +377,8 @@ function createGeneration({
                     throw new CreditError(403, 'This feature is available with AI Notes Pro.', { code: 'PRO_REQUIRED' });
                 // Both tracking modes serialize reservations by updating this quota document.
                 // The history count runs inside the same transaction, so parallel requests cannot overdraw.
-                const usage = await requestHistoryUsage(quota, config, timestamp, session, GenerationRequest);
+                const usage = (quotaId ? await monthlyUsage(quota, config, timestamp, session, GenerationRequest) : null) ??
+                    await requestHistoryUsage(quota, config, timestamp, session, GenerationRequest);
                 const { billingMode } = body;
                 const proUnits = pro ? Math.min(units, usage.subscriberDailyRemaining) : 0;
                 const walletUnits = units - proUnits;
@@ -405,7 +410,12 @@ function createGeneration({
                         membership.sandbox ? { code: 'SANDBOX_PRO_ALLOWANCE_DISABLED' } : undefined,
                     );
                 const reservation = { pro: proUnits > 0 };
-                if (proUnits) {
+                if (proUnits && usage.subscriberCreditBuckets) {
+                    const ledger = await reserveMonthly(quota, proUnits, id, timestamp, session);
+                    Object.assign(reservation, { ledger, subscriptionId: quotaId, proUnits,
+                        periodTransactionId: quota.transactionId, limit: usage.subscriberDailyLimit,
+                        ...(quota.quotaEpoch ? { quotaEpoch: quota.quotaEpoch } : {}) });
+                } else if (proUnits) {
                     const day = new Date(timestamp);
                     day.setUTCHours(0, 0, 0, 0);
                     const { subscriberDailyUsage: count, subscriberDailyLimit: limit } = usage;
@@ -490,7 +500,7 @@ function createGeneration({
                     : 0,
                 hasProSubscription: record.reservation.membershipPro ?? record.reservation.pro,
                 creditBalance: current,
-                ...Object.fromEntries(Object.entries(current).filter(([key]) => key.startsWith('subscriber') || key === 'serverTime')),
+                ...Object.fromEntries(Object.entries(current).filter(([key]) => key.startsWith('subscriber') || ['serverTime', 'subscriptionUsageKey'].includes(key))),
             },
         };
     }
@@ -535,7 +545,8 @@ function createGeneration({
             // builds until the operator deliberately enables the strict cutover.
             if (
                 config.generationBillingRequired === false &&
-                !req.headers.authorization && !needsAuthenticatedBilling(req.body)
+                !req.headers.authorization && !needsAuthenticatedBilling(req.body) &&
+                !(endpoint === '/notes' && req.body?.type === 'pdf')
             )
                 return next();
             const code = await authenticate(req.headers.authorization);

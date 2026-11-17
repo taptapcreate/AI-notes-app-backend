@@ -52,7 +52,11 @@ const { createAppleSubscriptions } = require('./services/apple-subscriptions');
 const appleSubscriptions = createAppleSubscriptions({ User, Subscription: AppleSubscription, GenerationRequest, getAppConfig: () => getAppConfig() });
 const creditService = createCredits({ User, CreditRegistration, PurchaseClaim, getAppConfig: () => getAppConfig(),
     subscriptionUsageFor: appleSubscriptions.usage });
+const creditPackCatalog = require('./services/credit-pack-catalog').createCreditPackCatalog({
+    History: require('./models/CreditPackHistory'), getAppConfig: () => getAppConfig(),
+});
 const purchaseService = createPurchases({
+    applePackCutover: null, resolvePackAmount: creditPackCatalog.amount,
     credits: creditService, appleSubscriptions, axios, apiKey: process.env.REVENUECAT_API_SECRET_KEY,
     allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
 });
@@ -77,6 +81,9 @@ let accountRecoveryReady = false;
 const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
     .then(async () => {
         await getAppConfig();
+        await require('./services/credit-pack-catalog').initializeCreditPacks(AppConfig);
+        await creditPackCatalog.publicCatalog(await getAppConfig());
+        await require('./services/subscription-credit-ledger').initializeLedger();
         await initializeNoteOutputLimits(AppConfig)
             .catch(error => console.error('Note output limits initialization deferred:', error.message));
         await initializeSubscriptionControls(AppConfig)
@@ -758,6 +765,7 @@ app.use('/api/credits', createCreditRouter({
 // ==================== REVENUECAT WEBHOOK ====================
 
 app.post('/api/webhooks/revenuecat', createRevenueCatHandler({
+    applePackCutover: null, resolvePackAmount: creditPackCatalog.amount,
     User, PendingPurchase, credits: creditService,
     accountWasDeleted,
     reconcilePurchases: user => purchaseService.sync(user, { required: true }),
@@ -781,7 +789,7 @@ app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, pdfPageBillingVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }
@@ -975,6 +983,7 @@ app.get('/api/notifications/stats', async (req, res) => {
 // ==================== PENDING PURCHASES ADMIN ====================
 
 app.use('/api/admin', createPurchaseAdminRouter({
+    applePackCutover: null, resolvePackAmount: creditPackCatalog.amount,
     PendingPurchase, credits: creditService, secret: process.env.ADMIN_API_SECRET,
 }));
 

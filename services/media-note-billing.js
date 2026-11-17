@@ -20,6 +20,10 @@ function validatePCM(value, seconds) {
 async function generationUnits(endpoint, body) {
     const desktop = body.desktopMediaBilling !== undefined;
     const mobile = body.mobileMediaBilling !== undefined;
+    if (body.pdfOcrCreditQuote !== undefined && (endpoint !== '/notes' || body.type !== 'pdf'))
+        throw new CreditError(400, 'An OCR quote requires a PDF.');
+    if (!desktop && !mobile && body.type === 'pdf' && endpoint === '/notes')
+        throw new CreditError(426, 'Update AI Notes to use PDF text recognition.');
     if (!desktop && !mobile) return 1;
     if (endpoint !== '/notes' || (desktop && mobile) || (body.desktopMediaBilling ?? body.mobileMediaBilling) !== 1)
         throw new CreditError(400, 'Invalid media billing request');
@@ -34,7 +38,12 @@ async function generationUnits(endpoint, body) {
             throw new CreditError(400, 'Choose a readable, unlocked PDF.');
         }
         if (pages < 1 || pages > 10) throw new CreditError(400, 'Choose a PDF with 1 to 10 pages.');
-        return 2;
+        const units = 1 + Math.ceil(pages / 3);
+        if (body.pdfOcrCreditQuote === undefined && units > 2)
+            throw new CreditError(426, 'Update AI Notes to process more than 3 scanned PDF pages.');
+        if (body.pdfOcrCreditQuote !== undefined && body.pdfOcrCreditQuote !== units)
+            throw new CreditError(409, `These PDF pages need ${units} AI credits. Review your selection and try again.`);
+        return units;
     }
     if (body.type === 'voice') {
         if (desktop) validatePCM(body.content, 180);

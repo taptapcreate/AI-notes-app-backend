@@ -30,6 +30,6 @@ function createAccountTransactions(Account, Backup) {
             return Reflect.get(target, property);
         } });
     }
-    return { run, bind, session: () => scope.getStore() };
+    return { run, bind, session: () => scope.getStore(), withSession: (session, work) => scope.run(session, work) };
 }
 module.exports = { createAccountTransactions };

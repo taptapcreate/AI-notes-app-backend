@@ -54,6 +54,24 @@ const AppConfigSchema = new mongoose.Schema({
         ), { _id: false }),
         default: () => ({}),
     },
+    // Changing these amounts activates a new catalog revision automatically.
+    // Missing platform fields inherit the common amounts. Empty settings use server defaults.
+    creditPacks: {
+        amounts: { type: new mongoose.Schema(Object.fromEntries(
+            require('../services/credit-pack-catalog').IDS.map(id => [id, {
+                type: Number, min: 1, max: 100000, validate: Number.isSafeInteger,
+            }]),
+        ), { _id: false }), default: undefined },
+        platforms: { type: new mongoose.Schema(Object.fromEntries(
+            ['android', 'windows'].map(platform => [platform, {
+                type: new mongoose.Schema(Object.fromEntries(
+                    require('../services/credit-pack-catalog').IDS.map(id => [id, {
+                        type: Number, min: 1, max: 100000, validate: Number.isSafeInteger,
+                    }]),
+                ), { _id: false }), default: undefined,
+            }]),
+        ), { _id: false }), default: undefined },
+    },
     noteOutputTokenLimits: {
         type: new mongoose.Schema(Object.fromEntries(Object.entries(noteOutputLimits).map(([key, rule]) => [
             key, { type: Number, default: rule.default, min: minimumNoteOutputTokens, max: rule.cap, validate: Number.isSafeInteger },

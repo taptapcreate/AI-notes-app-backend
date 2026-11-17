@@ -25,6 +25,7 @@ function createRevenueCatHandler({
     accountWasDeleted = async () => false,
     allowSandbox = false,
     applePackCutover = appleCreditPackCutover(),
+    resolvePackAmount = (product, purchase) => creditPackAmount(product, purchase, applePackCutover),
     secret,
     notify = async () => {},
     logger = console,
@@ -63,7 +64,7 @@ function createRevenueCatHandler({
                     .status(400)
                     .json({ error: 'Purchase identity is required' });
             }
-            const amount = creditPackAmount(event.product_id, event, applePackCutover);
+            const amount = await resolvePackAmount(event.product_id, event);
             if (!amount) throw new CreditError(503, 'The store purchase details could not be verified');
             let user;
             try { user = await credits.byCode(event.app_user_id.toUpperCase()); }

@@ -12,6 +12,7 @@ function createPurchaseAdminRouter({
     credits,
     secret,
     applePackCutover = appleCreditPackCutover(),
+    resolvePackAmount = (product, purchase) => creditPackAmount(product, purchase, applePackCutover),
     logger = console,
 }) {
     const router = express.Router();
@@ -63,7 +64,7 @@ function createPurchaseAdminRouter({
             let added = 0;
             let linked = 0;
             for (const purchase of pending) {
-                const amount = creditPackAmount(purchase.productId, purchase.rawEvent || {}, applePackCutover);
+                const amount = await resolvePackAmount(purchase.productId, purchase.rawEvent || {});
                 if (!amount)
                     throw new CreditError(
                         409,

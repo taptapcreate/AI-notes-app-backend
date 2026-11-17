@@ -7,6 +7,7 @@ const {
 } = require('@apple/app-store-server-library');
 const { CreditError } = require('./credit-policy');
 const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT, WEEKLY_PRODUCT, paidAllowancePeriod, trialCreditLimit } = require('./subscription-usage');
+const { monthlyUsage } = require('./subscription-credit-ledger');
 const BUNDLE_ID = 'com.taptapcreate.ainotes';
 const PRODUCTS = new Set([WEEKLY_PRODUCT, MONTHLY_PRODUCT]);
 const hash = (value) => createHash('sha256').update(value).digest('hex');
@@ -147,13 +148,39 @@ function createAppleSubscriptions({
             await backfill(backup.identity);
     }
 
+    async function installPeriod(record, set, timestamp, session) {
+        const config = await getAppConfig();
+        if (set.transactionId && set.transactionId !== record.transactionId && record.expiresAt &&
+            !record.revokedAt && !record.isUpgraded && record.purchaseDate <= record.expiresAt &&
+            timestamp >= record.purchaseDate) {
+            const previousTime = new Date(Math.min(timestamp.getTime(), record.expiresAt.getTime() - 1));
+            await monthlyUsage(record, config, previousTime, session, GenerationRequest);
+        }
+        await monthlyUsage({ ...record, ...set }, config, timestamp, session, GenerationRequest);
+    }
+
+    async function promoteRenewal(record, session) {
+        const renewal = record.scheduledRenewal;
+        const timestamp = now();
+        if (!renewal || renewal.purchaseDate > timestamp) return;
+        const set = { scheduledRenewal: null };
+        if ((!record.purchaseDate || renewal.purchaseDate > record.purchaseDate) &&
+            !record.revokedTransactions?.includes(renewal.transactionId)) {
+            Object.assign(set, renewal, { revokedAt: null, isUpgraded: false, graceExpiresAt: null });
+            await setTrialGrant(record, set);
+            await installPeriod(record, set, timestamp, session);
+        }
+        await Subscription.updateOne({ _id: record._id }, { $set: set }, { session });
+    }
+
     async function recordFor(user, session, sandboxIds) {
         const ids = user.appleSubscriptionIds || [];
         if (!ids.length) return null;
         if (!session) return transaction(inner => recordFor(user, inner, sandboxIds));
         for (const id of ids) {
             try {
-                await subscriptionRecovery.ensure(id, session);
+                const record = await subscriptionRecovery.ensure(id, session);
+                await promoteRenewal(record, session);
                 await subscriptionRecovery.checkpoint(id, session);
             } catch (error) { if (error.status !== 404) throw error; }
         }
@@ -183,18 +210,17 @@ function createAppleSubscriptions({
         };
     }
     async function usage(user, config, timestamp = now(), sandboxIds) {
-        const record = await recordFor(user, undefined, sandboxIds);
-        return {
-            ...await requestHistoryUsage(
-                record || (user.appleSubscriptionIds?.length ? { recoveryCode: user.recoveryCode } : user),
-                config ?? await getAppConfig(),
-                timestamp,
-                undefined,
-                GenerationRequest,
-            ),
-            subscriptionIdentityVersion: 1,
-            appleSubscriptionBound: !!record,
-        };
+        config ??= await getAppConfig();
+        return transaction(async session => {
+            const record = await recordFor(user, session, sandboxIds);
+            const target = record || (user.appleSubscriptionIds?.length ? { recoveryCode: user.recoveryCode } : user);
+            const ledger = await monthlyUsage(record, config, timestamp, session, GenerationRequest);
+            return {
+                ...(ledger ?? await requestHistoryUsage(target, config, timestamp, session, GenerationRequest)),
+                subscriptionIdentityVersion: 1,
+                appleSubscriptionBound: !!record,
+            };
+        });
     }
     async function savePayload(payload, code) {
         const timestamp = now();
@@ -238,7 +264,7 @@ function createAppleSubscriptions({
                 (payload.transactionId === current.transactionId &&
                     payload.signedDate >=
                         new Date(current.signedAt || 0).getTime());
-            if (newer) {
+            if (newer && payload.purchaseDate <= timestamp.getTime()) {
                 Object.assign(set, {
                     transactionId: payload.transactionId,
                     productId: payload.productId,
@@ -260,6 +286,7 @@ function createAppleSubscriptions({
                           timestamp
                         : null,
                 });
+                if (current.scheduledRenewal?.purchaseDate <= set.purchaseDate) set.scheduledRenewal = null;
                 await setTrialGrant(current, set);
             }
             if (
@@ -346,6 +373,7 @@ function createAppleSubscriptions({
                     set.subscriberDailyLimitOverride =
                         user.subscriberDailyLimitOverride;
             }
+            await installPeriod(current, { ...set, revokedTransactions: [...revoked] }, timestamp, session);
             const update = {
                 $set: set,
                 $addToSet: { revokedTransactions: { $each: [...revoked] } },
@@ -414,7 +442,8 @@ function createAppleSubscriptions({
                 event.type === 'CANCELLATION' &&
                 event.cancel_reason === 'CUSTOMER_SUPPORT' &&
                 event.expiration_at_ms <= now().getTime();
-            if (!refunded && record.lastEventAt && record.lastEventAt >= stamp)
+            const newerTransaction = date(event.purchased_at_ms) > (record.purchaseDate || new Date(0));
+            if (!refunded && !newerTransaction && record.lastEventAt && record.lastEventAt >= stamp)
                 return true;
             const expiry = date(event.expiration_at_ms);
             const set = {
@@ -437,7 +466,7 @@ function createAppleSubscriptions({
                     event.transaction_id,
                 )
             ) {
-                Object.assign(set, {
+                const period = {
                     transactionId: event.transaction_id,
                     productId: event.product_id,
                     purchaseDate: event.transaction_id === record.transactionId && record.purchaseDate
@@ -447,14 +476,24 @@ function createAppleSubscriptions({
                             ['NORMAL', 'INTRO', 'PREPAID'].includes(event.period_type)
                                 ? paidAllowancePeriod(event.product_id) : null),
                     expiresAt: expiry,
+                };
+                if (period.purchaseDate > now()) {
+                    if (!record.scheduledRenewal || period.purchaseDate >= record.scheduledRenewal.purchaseDate)
+                        set.scheduledRenewal = period;
+                } else {
+                    Object.assign(set, period, {
                     revokedAt: null,
                     isUpgraded: false,
                     ...(event.transaction_id !== record.transactionId
                         ? { graceExpiresAt: null }
                         : {}),
-                });
-                await setTrialGrant(record, set);
+                    });
+                    if (record.scheduledRenewal?.purchaseDate <= period.purchaseDate) set.scheduledRenewal = null;
+                    await setTrialGrant(record, set);
+                }
             }
+            if (refunded && record.scheduledRenewal?.transactionId === event.transaction_id)
+                set.scheduledRenewal = null;
             if (event.transaction_id === record.transactionId) {
                 if (refunded) set.revokedAt = stamp;
                 if (event.type === 'EXPIRATION' && expiry) {
@@ -467,6 +506,8 @@ function createAppleSubscriptions({
                     );
                 }
             }
+            await installPeriod(record, { ...set, revokedTransactions: refunded
+                ? [...(record.revokedTransactions || []), event.transaction_id] : record.revokedTransactions }, now(), session);
             const update = { $set: set };
             if (refunded)
                 update.$addToSet = {

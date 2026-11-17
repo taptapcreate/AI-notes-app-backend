@@ -17,6 +17,9 @@ const {
 const { createCredits } = require('../services/credits');
 const { createGeneration } = require('../services/generation');
 const { createPurchases } = require('../services/purchases');
+const LedgerAccount = require('../models/SubscriptionCreditAccount');
+const LedgerAllocation = require('../models/SubscriptionCreditAllocation');
+const LedgerEntry = require('../models/SubscriptionCreditLedgerEntry');
 let mongo, service, credits, generation, time, config;
 const codes = ['MACCODEA', 'IPADCODE'];
 const source = { type: 'text', content: 'Explain event loop' };
@@ -44,6 +47,7 @@ before(async () => {
             GenerationRequest,
             CreditRegistration,
             PurchaseClaim,
+            LedgerAccount, LedgerAllocation, LedgerEntry,
         ].map((model) => model.init()),
     );
 });
@@ -60,6 +64,7 @@ beforeEach(async () => {
             GenerationRequest,
             CreditRegistration,
             PurchaseClaim,
+            LedgerAccount, LedgerAllocation, LedgerEntry,
         ].map((model) => model.deleteMany({})),
     );
     time = new Date('2026-11-13T00:00:00Z');
@@ -779,4 +784,73 @@ test('weekly config mirror is persisted using the latest monthly value', async (
     } finally {
         await Config.deleteOne({ _id: initial._id });
     }
+});
+
+test('an early Apple renewal rolls credits once, spends the oldest first, and expires the remainder after one period', async () => {
+    Object.assign(config, {
+        dailySubscriptionAllowanceEnabled: false,
+        monthlySubscriptionCredits: 8,
+        subscriptionRollover: { monthlyEnabled: true, maxCarryPeriods: 1 },
+    });
+    const first = proof();
+    await Promise.all(codes.map(code => attach(code, first)));
+    const verifyBucket = async (code, current, rollover) => {
+        const { subscriberCreditBuckets: buckets } = await credits.balance(code);
+        assert.equal(buckets?.current.remaining, current);
+        assert.equal(buckets?.rollover?.remaining ?? 0, rollover);
+    };
+    await verifyBucket(codes[0], 8, 0);
+    const spent = await generation.begin(codes[0], randomUUID(), '/notes', source);
+    await generation.finish(spent.record._id, 200, { notes: 'Saved' });
+    await verifyBucket(codes[1], 7, 0);
+
+    const secondStart = first.expiresDate;
+    const secondEnd = secondStart + 3600000;
+    const event = {
+        type: 'RENEWAL', store: 'APP_STORE', environment: 'SANDBOX', period_type: 'NORMAL',
+        original_transaction_id: first.originalTransactionId, transaction_id: '100000000003',
+        product_id: first.productId, purchased_at_ms: secondStart, expiration_at_ms: secondEnd,
+        event_timestamp_ms: time.getTime() + 1000,
+    };
+    await service.webhook(event);
+    await verifyBucket(codes[0], 7, 0);
+
+    time = new Date(secondStart + 1000);
+    await Promise.all(codes.map(code => verifyBucket(code, 8, 7)));
+    await service.webhook(event);
+    const held = await generation.begin(codes[1], randomUUID(), '/notes', source);
+    await verifyBucket(codes[0], 8, 6);
+    await generation.finish(held.record._id, 500, { error: 'Provider failed' });
+    await verifyBucket(codes[0], 8, 7);
+
+    time = new Date(secondEnd + 1000);
+    await attach(codes[0], { transactionId: '100000000004', purchaseDate: secondEnd, expiresDate: secondEnd + 3600000 });
+    await verifyBucket(codes[1], 8, 8);
+    assert.equal(await LedgerEntry.countDocuments({ type: 'carry' }), 2);
+    assert.equal(await LedgerAllocation.countDocuments(), 3);
+});
+
+test('a failed generation at expiry returns credits for a late continuous renewal', async () => {
+    Object.assign(config, {
+        dailySubscriptionAllowanceEnabled: false,
+        monthlySubscriptionCredits: 8,
+        subscriptionRollover: { monthlyEnabled: true, maxCarryPeriods: 1 },
+    });
+    const first = proof({ expiresDate: time.getTime() + 2000 });
+    await attach(codes[0], first);
+    const held = await generation.begin(codes[0], randomUUID(), '/notes', source);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 7);
+
+    time = new Date(first.expiresDate + 1000);
+    await generation.finish(held.record._id, 500, { error: 'Provider failed' });
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 0);
+
+    await attach(codes[0], {
+        transactionId: '100000000003',
+        purchaseDate: first.expiresDate,
+        expiresDate: first.expiresDate + 3600000,
+    });
+    const { subscriberCreditBuckets: buckets } = await credits.balance(codes[0]);
+    assert.equal(buckets.current.remaining, 8);
+    assert.equal(buckets.rollover.remaining, 8);
 });

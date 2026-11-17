@@ -70,7 +70,7 @@ function purchaseAliases(product, purchase) {
     return [...new Set(aliases)];
 }
 
-function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions, verifyApple, applePackCutover = appleCreditPackCutover() }) {
+function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions, verifyApple, applePackCutover = appleCreditPackCutover(), resolvePackAmount = (product, purchase) => creditPackAmount(product, purchase, applePackCutover) }) {
     async function customer(user, { required = false } = {}) {
         if (!apiKey) {
             if (required)
@@ -202,7 +202,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                     if (matches) confirmation = { ...expected, status: 'sandbox_disabled', sandbox: true };
                     continue;
                 }
-                const value = creditPackAmount(product, purchase, applePackCutover);
+                const value = await resolvePackAmount(product, purchase);
                 if (!value) continue;
                 let result;
                 try {
@@ -241,8 +241,9 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
         const aliases = purchaseAliases(proof.productId, {
             store_transaction_id: proof.transactionId, purchased_at_ms: proof.purchaseDate,
         });
-        const amount = creditPackAmount(proof.productId,
-            { store: 'app_store', purchased_at_ms: proof.purchaseDate }, applePackCutover);
+        const amount = await resolvePackAmount(proof.productId,
+            { store: 'app_store', purchased_at_ms: proof.purchaseDate });
+        if (!amount) throw new CreditError(503, 'Credit-pack details are temporarily unavailable');
         const result = await credits.grantPurchase(user.recoveryCode, aliases, amount, 'apple_verified');
         return { credits: result.applied ? amount : 0, purchase: {
             productId: proof.productId, transactionId: proof.transactionId, status: 'credited',
