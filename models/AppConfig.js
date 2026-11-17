@@ -80,11 +80,14 @@ const AppConfigSchema = new mongoose.Schema({
     subscriberDailyLimit: { type: Number, default: DEFAULT_SUBSCRIBER_DAILY_LIMIT, min: 1, max: 10000, validate: Number.isSafeInteger },
     dailySubscriptionAllowanceEnabled: { type: Boolean, default: false },
     monthlySubscriptionCredits: { type: Number, default: DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, min: 1, max: 10000, validate: Number.isSafeInteger },
+    // Derived from monthlySubscriptionCredits; edit the monthly value to change both.
+    weeklySubscriptionCredits: { type: Number, min: 0, max: 2500, validate: Number.isSafeInteger },
     freeTrialCreditsEnabled: { type: Boolean, default: true },
     freeTrialCredits: { type: Number, default: DEFAULT_FREE_TRIAL_CREDITS, min: 0, max: 10000, validate: Number.isSafeInteger },
     subscriptionMessages: {
         daily: { type: String, trim: true, maxlength: 500 },
         monthly: { type: String, trim: true, maxlength: 500 },
+        weekly: { type: String, trim: true, maxlength: 500 },
         trial: { type: String, trim: true, maxlength: 500 },
         trialWithoutCredits: { type: String, trim: true, maxlength: 500 },
     },

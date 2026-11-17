@@ -3,10 +3,13 @@ const { billingControls } = require('./billing-controls');
 const { CreditError } = require('./credit-policy');
 const DEFAULT_SUBSCRIBER_DAILY_LIMIT = 10;
 const MONTHLY_PRODUCT = 'ai_notes_pro_monthly_subscription';
+const WEEKLY_PRODUCT = 'ai_notes_pro_weekly_subscription';
+const WEEKS_PER_MONTHLY_ALLOWANCE = 4;
 const DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS = 600;
 const DEFAULT_FREE_TRIAL_CREDITS = 3;
 const DEFAULT_SUBSCRIPTION_MESSAGES = {
     daily: 'Up to {credits} AI credits per day. Resets at midnight UTC.',
+    weekly: '{credits} AI credits per paid billing week.',
     monthly: '{credits} AI credits per paid billing month.',
     trial: 'Eligible customers get a {duration} free trial with Pro features and {credits} extra AI credits total. Unused trial credits expire when it ends.',
     trialWithoutCredits: 'Eligible customers get a {duration} free trial with Pro features. The trial adds no extra credits. Your existing credits can be used during the trial.',
@@ -28,6 +31,10 @@ async function initializeSubscriptionControls(Config) {
             },
         })),
     );
+    await Config.collection.updateOne(
+        { key: 'master_config', 'subscriptionMessages.weekly': { $exists: false } },
+        { $set: { 'subscriptionMessages.weekly': DEFAULT_SUBSCRIPTION_MESSAGES.weekly } },
+    );
 }
 
 function configuredCreditLimit(value, fallback, minimum) {
@@ -37,24 +44,52 @@ function configuredCreditLimit(value, fallback, minimum) {
     return limit;
 }
 
-function monthlyAllowances(config) {
+function configuredMonthlyLimit(config) {
+    return configuredCreditLimit(config.monthlySubscriptionCredits, DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, 1);
+}
+
+function getWeeklySubscriptionCredits(config) {
+    return Math.floor(configuredMonthlyLimit(config) / WEEKS_PER_MONTHLY_ALLOWANCE);
+}
+
+async function syncWeeklySubscriptionCredits(Config, config) {
+    const expected = getWeeklySubscriptionCredits(config);
+    if (config.weeklySubscriptionCredits === expected) return;
+    // Calculate from the current stored value, even if Compass edited it after this read.
+    // Use the same snapshot for both updating the mirror and serving this request.
+    const updated = await Config.findOneAndUpdate(
+        { _id: config._id },
+        [{ $set: { weeklySubscriptionCredits: { $floor: { $divide: [
+            { $ifNull: ['$monthlySubscriptionCredits', DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS] },
+            WEEKS_PER_MONTHLY_ALLOWANCE,
+        ] } } } }],
+        { returnDocument: 'after', updatePipeline: true },
+    );
+    if (!updated) throw new CreditError(503, 'Subscription settings are temporarily unavailable');
+    return updated;
+}
+
+function subscriptionAllowances(config) {
+    const daily = config.dailySubscriptionAllowanceEnabled === true;
     return {
-        monthly: config.dailySubscriptionAllowanceEnabled === true ? null :
-            configuredCreditLimit(config.monthlySubscriptionCredits, DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, 1),
+        monthly: daily ? null : configuredMonthlyLimit(config),
+        weekly: daily ? null : getWeeklySubscriptionCredits(config),
         trial: config.freeTrialCreditsEnabled === false ? 0 :
             configuredCreditLimit(config.freeTrialCredits, DEFAULT_FREE_TRIAL_CREDITS, 0),
     };
 }
 
 function subscriptionPlanMessages(config) {
-    const { monthly, trial } = monthlyAllowances(config);
+    const { monthly, weekly, trial } = subscriptionAllowances(config);
     const daily = getSubscriberDailyLimit(config);
     const messages = config.subscriptionMessages;
     const format = (template, fallback, credits) =>
         (template?.trim() || fallback).replaceAll('{credits}', String(credits));
     const dailyMessage = format(messages?.daily, DEFAULT_SUBSCRIPTION_MESSAGES.daily, daily);
     return {
-        weekly: dailyMessage,
+        daily: dailyMessage,
+        weekly: weekly === null ? dailyMessage :
+            format(messages?.weekly, DEFAULT_SUBSCRIPTION_MESSAGES.weekly, weekly),
         monthly: monthly === null ? dailyMessage :
             format(messages?.monthly, DEFAULT_SUBSCRIPTION_MESSAGES.monthly, monthly),
         trial: trial > 0
@@ -63,18 +98,23 @@ function subscriptionPlanMessages(config) {
     };
 }
 
+function paidAllowancePeriod(productId) {
+    return productId === MONTHLY_PRODUCT ? 'monthly' : productId === WEEKLY_PRODUCT ? 'weekly' : null;
+}
+
 function allowanceWindow(subscription, config) {
-    if (subscription.productId !== MONTHLY_PRODUCT) return null;
-    if (subscription.allowancePeriod === 'monthly' && config.dailySubscriptionAllowanceEnabled === true)
+    const paidPeriod = paidAllowancePeriod(subscription.productId);
+    if (!paidPeriod) return null;
+    if (subscription.allowancePeriod === paidPeriod && config.dailySubscriptionAllowanceEnabled === true)
         return null;
-    if (!subscription.transactionId || !['trial', 'monthly'].includes(subscription.allowancePeriod)) {
+    if (!subscription.transactionId || !['trial', paidPeriod].includes(subscription.allowancePeriod)) {
         const reset = new Date(subscription.expiresAt);
         if (!subscription.expiresAt || !Number.isFinite(reset.getTime()))
             throw new CreditError(503, 'Subscription period needs support review');
         // Wait for verified period data before granting a trial or paid allowance.
-        return { period: 'monthly', limit: 0, reset, transactionId: subscription.transactionId || null };
+        return { period: paidPeriod, limit: 0, reset, transactionId: subscription.transactionId || null };
     }
-    const limits = monthlyAllowances(config);
+    const limits = subscriptionAllowances(config);
     const period = subscription.allowancePeriod;
     const reset = new Date(subscription.expiresAt);
     if (!subscription.expiresAt || !Number.isFinite(reset.getTime()))
@@ -173,7 +213,8 @@ async function requestHistoryUsage(user, config, now = new Date(), session, requ
     };
 }
 module.exports = {
-    requestHistoryUsage, subscriptionUsage, dailySubscriptionUsage, monthlyAllowances,
+    requestHistoryUsage, subscriptionUsage, dailySubscriptionUsage, subscriptionAllowances,
+    getWeeklySubscriptionCredits, syncWeeklySubscriptionCredits, paidAllowancePeriod,
     getSubscriberDailyLimit, subscriptionPlanMessages, initializeSubscriptionControls, DEFAULT_SUBSCRIBER_DAILY_LIMIT,
-    DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS, MONTHLY_PRODUCT,
+    DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS, MONTHLY_PRODUCT, WEEKLY_PRODUCT,
 };

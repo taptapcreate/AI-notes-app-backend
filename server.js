@@ -39,7 +39,7 @@ const PurchaseClaim = require('./models/PurchaseClaim');
 const { createCredits } = require('./services/credits');
 const { createPurchases } = require('./services/purchases');
 const { getWelcomeCredits } = require('./services/credit-policy');
-const { getSubscriberDailyLimit, monthlyAllowances, subscriptionPlanMessages, initializeSubscriptionControls } = require('./services/subscription-usage');
+const { getSubscriberDailyLimit, subscriptionAllowances, getWeeklySubscriptionCredits, syncWeeklySubscriptionCredits, subscriptionPlanMessages, initializeSubscriptionControls } = require('./services/subscription-usage');
 const { createCreditRouter } = require('./routes/credits');
 const { billingControls, platformBillingControls } = require('./services/billing-controls');
 const { createDeletedAccountLookup } = require('./services/account-deletion');
@@ -65,11 +65,11 @@ const generationService = createGeneration({ User, GenerationRequest, Subscripti
 const getAppConfig = async () => {
     // Preserve existing production settings. A missing database/configuration is
     // not permission to hand out a fallback allowance.
-    const config = await AppConfig.findOne({ key: 'master_config' });
-    if (config) return config;
-    return AppConfig.findOneAndUpdate({ key: 'master_config' }, {
-        $setOnInsert: { key: 'master_config' },
-    }, { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true });
+    const config = await AppConfig.findOne({ key: 'master_config' }) ??
+        await AppConfig.findOneAndUpdate({ key: 'master_config' }, {
+            $setOnInsert: { key: 'master_config' },
+        }, { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true });
+    return await syncWeeklySubscriptionCredits(AppConfig, config) ?? config;
 };
 
 let accountRecoveryReady = false;
@@ -779,7 +779,7 @@ app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, subscriptionAllowances: config.dailySubscriptionAllowanceEnabled === true ? null : monthlyAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

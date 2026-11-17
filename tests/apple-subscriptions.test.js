@@ -634,17 +634,37 @@ test('trial usage is shared across devices and only a verified paid period refil
     assert.equal(await remaining(), 599);
 });
 
-test('verified StoreKit can start a paid month without RevenueCat and weekly keeps its daily allowance', async () => {
+test('verified StoreKit grants weekly and monthly allowances per Apple transaction', async () => {
     config.dailySubscriptionAllowanceEnabled = false;
     const monthly = await attach(codes[0], { environment: 'Production' });
     assert.equal(monthly.subscriberDailyRemaining, 600);
-    const weekly = await attach(codes[1], {
+    const weeklyProof = {
         productId: 'ai_notes_pro_weekly_subscription',
         originalTransactionId: '100000000151',
         transactionId: '100000000152',
+        expiresDate: time.getTime() + 86400000,
+    };
+    const weekly = await attach(codes[1], weeklyProof);
+    assert.equal(weekly.subscriberAllowancePeriod, 'weekly');
+    assert.equal(weekly.subscriberDailyRemaining, 150);
+    assert.equal(weekly.subscriberResetAt, new Date(weeklyProof.expiresDate).toISOString());
+    const request = await generation.begin(codes[1], randomUUID(), '/notes', source);
+    await generation.finish(request.record._id, 200, { notes: 'Paid weekly note' });
+    config.monthlySubscriptionCredits = 800;
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 800);
+    assert.equal((await credits.balance(codes[1])).subscriberDailyRemaining, 199);
+
+    time = new Date(weeklyProof.expiresDate);
+    const renewed = await attach(codes[1], {
+        ...weeklyProof,
+        transactionId: '100000000153',
+        expiresDate: time.getTime() + 7 * 86400000,
     });
-    assert.equal(weekly.subscriberAllowancePeriod, 'daily');
-    assert.equal(weekly.subscriberDailyRemaining, 10);
+    assert.equal(renewed.subscriberDailyRemaining, 200);
+    config.dailySubscriptionAllowanceEnabled = true;
+    const daily = await credits.balance(codes[1]);
+    assert.equal(daily.subscriberAllowancePeriod, 'daily');
+    assert.equal(daily.subscriberDailyRemaining, 10);
 });
 
 test('exhausted trial requests require consent to spend wallet credits', async () => {
@@ -687,6 +707,12 @@ test('paywall copy uses the same configured credit limits as billing', () => {
     const { subscriptionPlanMessages } = require('../services/subscription-usage');
     const monthly = subscriptionPlanMessages({});
     assert.match(monthly.monthly, /600 AI credits per paid billing month/);
+    assert.match(monthly.weekly, /150 AI credits per paid billing week/);
+    assert.equal(subscriptionPlanMessages({
+        monthlySubscriptionCredits: 803,
+        weeklySubscriptionCredits: 999,
+        subscriptionMessages: { weekly: 'Weekly Pro includes {credits} credits.' },
+    }).weekly, 'Weekly Pro includes 200 credits.');
     assert.match(monthly.trial, /\{duration\} free trial/);
     assert.match(monthly.trial, /3 extra AI credits total/);
 
@@ -698,6 +724,28 @@ test('paywall copy uses the same configured credit limits as billing', () => {
         subscriptionMessages: { daily: 'Includes {credits} credits per day.' },
     });
     assert.equal(daily.monthly, 'Includes 12 credits per day.');
+    assert.equal(daily.weekly, daily.daily);
     assert.match(daily.trial, /adds no extra credits/);
     assert.doesNotMatch(daily.trial, /4 extra/);
+});
+
+test('weekly config mirror is persisted using the latest monthly value', async () => {
+    const Config = require('../models/AppConfig');
+    const { syncWeeklySubscriptionCredits } = require('../services/subscription-usage');
+    const initial = await Config.create({ key: 'weekly-config-test' });
+    try {
+        const first = await syncWeeklySubscriptionCredits(Config, initial);
+        assert.equal(first.weeklySubscriptionCredits, 150);
+        assert.equal((await Config.collection.findOne({ _id: initial._id })).weeklySubscriptionCredits, 150);
+        const { modifiedCount } = await Config.collection.updateOne(
+            { _id: initial._id }, { $set: { monthlySubscriptionCredits: 803 } },
+        );
+        assert.equal(modifiedCount, 1);
+        const refreshed = await syncWeeklySubscriptionCredits(Config, initial);
+        assert.equal(refreshed.monthlySubscriptionCredits, 803);
+        assert.equal(refreshed.weeklySubscriptionCredits, 200);
+        assert.equal((await Config.collection.findOne({ _id: initial._id })).weeklySubscriptionCredits, 200);
+    } finally {
+        await Config.deleteOne({ _id: initial._id });
+    }
 });

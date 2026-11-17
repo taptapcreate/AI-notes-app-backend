@@ -6,12 +6,9 @@ const {
     Environment,
 } = require('@apple/app-store-server-library');
 const { CreditError } = require('./credit-policy');
-const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT } = require('./subscription-usage');
+const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT, WEEKLY_PRODUCT, paidAllowancePeriod } = require('./subscription-usage');
 const BUNDLE_ID = 'com.taptapcreate.ainotes';
-const PRODUCTS = new Set([
-    'ai_notes_pro_weekly_subscription',
-    'ai_notes_pro_monthly_subscription',
-]);
+const PRODUCTS = new Set([WEEKLY_PRODUCT, MONTHLY_PRODUCT]);
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const identity = (environment, original) =>
     hash(`apple:${BUNDLE_ID}:${environment}:${original}`);
@@ -22,11 +19,12 @@ const date = (value) =>
         ? new Date(value)
         : null;
 function storeKitAllowancePeriod(payload) {
-    if (payload.productId !== MONTHLY_PRODUCT) return null;
+    const paidPeriod = paidAllowancePeriod(payload.productId);
+    if (!paidPeriod) return null;
     if (payload.offerDiscountType === 'FREE_TRIAL' || (payload.offerType === 1 && payload.price === 0))
         return 'trial';
     if (payload.price > 0 || ['PAY_AS_YOU_GO', 'PAY_UP_FRONT'].includes(payload.offerDiscountType) ||
-        (payload.offerType == null && payload.price == null)) return 'monthly';
+        (payload.offerType == null && payload.price == null)) return paidPeriod;
     return null;
 }
 
@@ -408,9 +406,9 @@ function createAppleSubscriptions({
                     purchaseDate: event.transaction_id === record.transactionId && record.purchaseDate
                         ? record.purchaseDate : date(event.purchased_at_ms),
                     allowancePeriod: allowancePeriodFor(record, event.transaction_id,
-                        event.product_id !== MONTHLY_PRODUCT ? null
-                            : event.period_type === 'TRIAL' ? 'trial'
-                              : ['NORMAL', 'INTRO', 'PREPAID'].includes(event.period_type) ? 'monthly' : null),
+                        event.period_type === 'TRIAL' ? 'trial' :
+                            ['NORMAL', 'INTRO', 'PREPAID'].includes(event.period_type)
+                                ? paidAllowancePeriod(event.product_id) : null),
                     expiresAt: expiry,
                     revokedAt: null,
                     isUpgraded: false,
@@ -464,7 +462,7 @@ function createAppleSubscriptions({
                 for (const payload of recoverable) {
                     const record = byID.get(identity(payload.environment, payload.originalTransactionId));
                     const period = storeKitAllowancePeriod(payload);
-                    const refreshPeriod = record && payload.productId === MONTHLY_PRODUCT &&
+                    const refreshPeriod = record && PRODUCTS.has(payload.productId) &&
                         (payload.purchaseDate > new Date(record.purchaseDate || 0).getTime() ||
                             (record.transactionId === payload.transactionId && period &&
                                 allowancePeriodFor(record, payload.transactionId, period) !== record.allowancePeriod));

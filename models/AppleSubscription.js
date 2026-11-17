@@ -28,7 +28,7 @@ const schema = new mongoose.Schema(
         quotaEpoch: { type: String, default: randomUUID },
         dailyRequestCount: { type: Number, default: 0 },
         lastRequestReset: Date,
-        allowancePeriod: { type: String, enum: ['trial', 'monthly'] },
+        allowancePeriod: { type: String, enum: ['trial', 'monthly', 'weekly'] },
         periodUsageTransactionId: String,
         periodRequestCount: { type: Number, min: 0, default: 0, validate: Number.isSafeInteger },
         lastEventAt: Date,
