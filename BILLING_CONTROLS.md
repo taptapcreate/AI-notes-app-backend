@@ -25,3 +25,9 @@ These are offer-visibility controls, not entitlement revocation. Restore and man
 Clients refresh configuration while active and cache effective controls for startup. Existing installed builds understand only the fields shipped in that build; per-platform controls require a new mobile/desktop build. Global controls continue to work for previous builds that already support them.
 
 Run `node scripts/billing-controls.js --dry-run` to inspect missing fields, then `--apply` to seed only absent fields. Existing values are preserved. Deploy the backend schema before saving these fields through Mongoose. Updated clients support missing platform fields safely.
+
+## Subscription rollover
+
+`master_config.subscriptionRollover.monthlyEnabled` defaults to `false`. The supported value for `maxCarryPeriods` is `1`. The accounting models store the verified subscription's original grant, usage, and billing dates separately from purchased and lifetime credits. Weekly and trial allocations are ineligible for rollover.
+
+Phase 1 introduces the config and accounting primitives. Renewal and request handlers continue using the existing balance system. Wait for the renewal and reconciliation implementation before enabling this setting.

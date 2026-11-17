@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const { limits: noteOutputLimits, minimum: minimumNoteOutputTokens } = require('../services/note-output-limits');
 const { DEFAULT_WELCOME_CREDITS } = require('../services/credit-policy');
 const { DEFAULT_SUBSCRIBER_DAILY_LIMIT, DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS } = require('../services/subscription-usage');
+const { DEFAULT_ROLLOVER } = require('../services/subscription-credit-policy');
 
 const PlatformReleaseSchema = new mongoose.Schema({
     minVersion: { type: String, match: /^\d+\.\d+\.\d+$/ },
@@ -87,6 +88,13 @@ const AppConfigSchema = new mongoose.Schema({
     subscriberDailyLimit: { type: Number, default: DEFAULT_SUBSCRIBER_DAILY_LIMIT, min: 1, max: 10000, validate: Number.isSafeInteger },
     dailySubscriptionAllowanceEnabled: { type: Boolean, default: false },
     monthlySubscriptionCredits: { type: Number, default: DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, min: 1, max: 10000, validate: Number.isSafeInteger },
+    subscriptionRollover: {
+        type: new mongoose.Schema({
+            monthlyEnabled: { type: Boolean, default: DEFAULT_ROLLOVER.monthlyEnabled },
+            maxCarryPeriods: { type: Number, enum: [1], default: DEFAULT_ROLLOVER.maxCarryPeriods },
+        }, { _id: false }),
+        default: () => ({}),
+    },
     // Derived from monthlySubscriptionCredits; edit the monthly value to change both.
     weeklySubscriptionCredits: { type: Number, min: 0, max: 2500, validate: Number.isSafeInteger },
     freeTrialCreditsEnabled: { type: Boolean, default: true },

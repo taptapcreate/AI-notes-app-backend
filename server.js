@@ -81,6 +81,8 @@ const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: 
             .catch(error => console.error('Note output limits initialization deferred:', error.message));
         await initializeSubscriptionControls(AppConfig)
             .catch(error => console.error('Subscription controls initialization deferred:', error.message));
+        await require('./services/subscription-credit-policy').initializeSubscriptionRollover(AppConfig)
+            .catch(error => console.error('Subscription rollover settings initialization deferred:', error.message));
         await require('./services/message-controls-init').initializeMessageControls({
             Config: AppConfig, Messages: require('./models/UserAnnouncement'),
         }).catch(error => console.error('Message controls initialization deferred:', error.message));
