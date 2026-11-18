@@ -102,6 +102,10 @@ const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: 
     });
 accountStorageReady.catch(err => console.error('Account recovery initialization failed:', err.message));
 
+// OAuth launches before the shared database gate and has its own small JSON body limit.
+const { createWorkplaceOAuth } = require('./routes/workplace-oauth');
+app.use('/api/workplace-oauth', createWorkplaceOAuth());
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
