@@ -26,7 +26,7 @@ const REQUEST_ID =
 const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'website', 'import', 'documents', 'video', 'location', 'calendar', 'sketch']);
 const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
 const PRO_SOURCES = new Set(['video', 'location', 'calendar', 'sketch']);
-const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote']
+const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'pdfEvidence']
     .some(field => body?.[field] !== undefined);
 const requiresPro = (body) => PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
     (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));

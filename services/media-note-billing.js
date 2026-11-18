@@ -17,7 +17,29 @@ function validatePCM(value, seconds) {
         data.readUInt32LE(40) !== length) throw error;
 }
 
+function validatePdfEvidence(endpoint, body) {
+    if (body.pdfEvidence === undefined) return;
+    const invalid = () => new CreditError(400, 'Choose valid local and cloud PDF pages.');
+    if (endpoint !== '/notes' || body.type !== 'pdf' ||
+        body.desktopMediaBilling !== 1 || body.mobileMediaBilling !== undefined ||
+        body.pdfOcrCreditQuote === undefined || !body.pdfEvidence ||
+        typeof body.pdfEvidence !== 'object' || Array.isArray(body.pdfEvidence))
+        throw invalid();
+    const { localPages, cloudPages } = body.pdfEvidence;
+    if (!Array.isArray(localPages) || !Array.isArray(cloudPages) || !localPages.length ||
+        !cloudPages.length || localPages.length + cloudPages.length > 10 ||
+        localPages.some(entry => !entry || typeof entry.text !== 'string' ||
+            !entry.text.trim() || entry.text.length > 20000))
+        throw invalid();
+    const pages = [...localPages.map(entry => entry.page), ...cloudPages];
+    if (pages.some(page => !Number.isSafeInteger(page) || page < 1) ||
+        new Set(pages).size !== pages.length ||
+        cloudPages.some((page, index) => index > 0 && page <= cloudPages[index - 1]))
+        throw invalid();
+}
+
 async function generationUnits(endpoint, body) {
+    validatePdfEvidence(endpoint, body);
     const desktop = body.desktopMediaBilling !== undefined;
     const mobile = body.mobileMediaBilling !== undefined;
     if (body.pdfOcrCreditQuote !== undefined && (endpoint !== '/notes' || body.type !== 'pdf'))
@@ -38,6 +60,8 @@ async function generationUnits(endpoint, body) {
             throw new CreditError(400, 'Choose a readable, unlocked PDF.');
         }
         if (pages < 1 || pages > 10) throw new CreditError(400, 'Choose a PDF with 1 to 10 pages.');
+        if (body.pdfEvidence && body.pdfEvidence.cloudPages.length !== pages)
+            throw new CreditError(400, 'The cloud page list does not match the PDF attachment.');
         const units = 1 + Math.ceil(pages / 3);
         if (body.pdfOcrCreditQuote === undefined && units > 2)
             throw new CreditError(426, 'Update AI Notes to process more than 3 scanned PDF pages.');

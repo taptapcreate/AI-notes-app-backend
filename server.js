@@ -341,7 +341,7 @@ const { appendNarration } = require('./services/walkthrough');
 const { buildNotePrompt } = require('./services/note-prompts');
 app.post('/api/notes', async (req, res) => {
     try {
-        const { type, content, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', sourceKind, isPro = false } = req.body;
+        const { type, content, pdfEvidence, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', sourceKind, isPro = false } = req.body;
         const instruction = await appendNarration(requestedInstruction, req.body.narration, transcribe, generationSignal());
 
         if (!content) {
@@ -363,7 +363,7 @@ app.post('/api/notes', async (req, res) => {
 
         const promptFor = (sourceContent = content) => buildNotePrompt({
             type, sourceKind, content: ['text', 'voice', 'website', 'youtube'].includes(type) ? cleanSourceText(sourceContent) : sourceContent, instruction,
-            lengthInstruction, formatInstruction, toneInstruction, languageInstruction, isPro,
+            lengthInstruction, formatInstruction, toneInstruction, languageInstruction, isPro, pdfEvidence,
             url: ['website', 'youtube'].includes(type) ? content : undefined,
         });
         const generate = value => generateWithRetry(maxTokens, value, 3, 2000, req.noteStream?.delta);
@@ -793,7 +793,7 @@ app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, pdfPageBillingVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }
