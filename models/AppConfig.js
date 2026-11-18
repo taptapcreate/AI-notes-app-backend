@@ -127,6 +127,11 @@ const AppConfigSchema = new mongoose.Schema({
     // Enable only after the updated mobile builds are available. The cutover
     // script enables this together with the one-time allowance.
     generationBillingRequired: { type: Boolean, default: false },
+    generationMediaPricing: {
+        audioExtra: { type: Number, min: 1, max: 5, validate: Number.isSafeInteger },
+        narrationExtra: { type: Number, min: 1, max: 5, validate: Number.isSafeInteger },
+        pdfPagesPerCredit: { type: Number, min: 1, max: 10, validate: Number.isSafeInteger },
+    },
     // 2. Subscription Promo (Home Screen)
     subscriptionOffer: {
         active: { type: Boolean, default: false },

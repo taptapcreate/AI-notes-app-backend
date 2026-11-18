@@ -740,3 +740,28 @@ test('PDF billing verifies the number of selected pages before reserving credits
     assert.equal((await request(code, id, pdf)).body.billing.creditBalance.totalAvailable, 2);
     assert.equal(calls, 1);
 });
+
+test('both client transports use configured media pricing and stale quotes reserve nothing', async (t) => {
+    const code = await account();
+    const request = await api(t);
+    config.generationMediaPricing = { audioExtra: 2 };
+    const audio = { type: 'voice', content: noteAudio(1) };
+    const stale = await request(code, randomUUID(), { ...audio, desktopMediaBilling: 1, mediaCreditQuote: 2 });
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.code, 'CREDIT_QUOTE_CHANGED');
+    assert.equal(calls, 0);
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
+
+    for (const client of ['desktopMediaBilling', 'mobileMediaBilling']) {
+        const body = { ...audio, [client]: 1, mediaCreditQuote: 3 };
+        const id = randomUUID();
+        const first = await request(code, id, body);
+        assert.equal(first.status, 200);
+        assert.equal(first.body.billing.totalCreditCost, 3);
+        assert.equal(first.body.billing.subscriptionCreditCost, 0);
+        assert.equal((await request(code, id, body)).body.billing.creditBalance.totalAvailable,
+            first.body.billing.creditBalance.totalAvailable);
+    }
+    assert.equal(calls, 2);
+    assert.equal((await credits.balance(code)).totalAvailable, 1);
+});

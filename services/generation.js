@@ -26,7 +26,7 @@ const REQUEST_ID =
 const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'website', 'import', 'documents', 'video', 'location', 'calendar', 'sketch']);
 const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
 const PRO_SOURCES = new Set(['video', 'location', 'calendar', 'sketch']);
-const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'pdfEvidence']
+const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'mediaCreditQuote', 'pdfEvidence']
     .some(field => body?.[field] !== undefined);
 const requiresPro = (body) => PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
     (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));
@@ -325,8 +325,8 @@ function createGeneration({
         };
         const existing = await GenerationRequest.findById(id).lean();
         if (existing) return check(existing);
-        const units = await generationUnits(endpoint, body);
         const config = requestConfig ?? await getAppConfig();
+        const units = await generationUnits(endpoint, body, config);
         await credits.balance(code, undefined, config); // Initialize any legacy allowance before reserving.
         const rules = policy(config);
         const account = await credits.byCode(code);
@@ -488,16 +488,20 @@ function createGeneration({
                 'This request completed earlier, but its saved result expired. No additional credit was charged. Start a new generation if you need another result.',
             );
         const current = await credits.balance(record.recoveryCode, record.reservation.sandboxIds);
+        const held = record.reservation;
+        const succeeded = record.state === 'succeeded';
+        const walletCost = succeeded ? (held.free ?? 0) + (held.ad ?? 0) + (held.paid ?? 0) : 0;
+        const subscriptionCost = succeeded && held.pro ? held.proUnits ?? 1 : 0;
         return {
             ...record.result,
             billing: {
                 version: 2,
                 ...(record.reservation.sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),
                 requestId: record.requestId,
-                charged: record.state === 'succeeded',
-                creditCost: record.state === 'succeeded'
-                    ? (record.reservation.free || 0) + (record.reservation.ad || 0) + (record.reservation.paid || 0)
-                    : 0,
+                charged: succeeded,
+                creditCost: walletCost,
+                subscriptionCreditCost: subscriptionCost,
+                totalCreditCost: walletCost + subscriptionCost,
                 hasProSubscription: record.reservation.membershipPro ?? record.reservation.pro,
                 creditBalance: current,
                 ...Object.fromEntries(Object.entries(current).filter(([key]) => key.startsWith('subscriber') || ['serverTime', 'subscriptionUsageKey'].includes(key))),

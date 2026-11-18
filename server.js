@@ -61,6 +61,7 @@ const purchaseService = createPurchases({
     allowSandbox: process.env.REVENUECAT_ALLOW_SANDBOX === 'true',
 });
 const { createGeneration } = require('./services/generation');
+const { generationMediaPricing } = require('./services/media-note-billing');
 const { signal: generationSignal } = require('./services/generation-context');
 const generationService = createGeneration({ User, GenerationRequest, Subscription: AppleSubscription, credits: creditService,
     getAppConfig: () => getAppConfig(), entitlement: purchaseService.subscriptionStatus, resolveStoreKitScope: appleSubscriptions.resolveStoreKitScope });
@@ -793,7 +794,7 @@ app.get('/api/config', async (req, res) => {
     try {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
-        res.json({ ...config.toObject(), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

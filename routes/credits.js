@@ -9,6 +9,7 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
         Messages: require('../models/UserAnnouncement'), credits,
     });
     const endpoint = (handler) => async (req, res) => {
+        res.set('Cache-Control', 'no-store');
         try {
             res.json(await handler(req));
         } catch (error) {
