@@ -21,7 +21,7 @@ test('mixed PDF billing validates distinct source pages and charges only for the
     for (const invalid of [
         { ...body, type: 'text' },
         { ...body, pdfOcrCreditQuote: undefined },
-        { ...body, desktopMediaBilling: undefined, mobileMediaBilling: 1 },
+        { ...body, mobileMediaBilling: 1 },
         { ...body, pdfEvidence: { ...body.pdfEvidence, cloudPages: [4, 5] } },
         { ...body, pdfEvidence: { ...body.pdfEvidence, cloudPages: [6, 4] } },
         { ...body, pdfEvidence: { ...body.pdfEvidence, cloudPages: [4] } },
@@ -29,6 +29,9 @@ test('mixed PDF billing validates distinct source pages and charges only for the
     ]) await assert.rejects(generationUnits('/notes', invalid), { status: 400 });
     assert.equal(await generationUnits('/notes', {
         type: 'pdf', content, mobileMediaBilling: 1, pdfOcrCreditQuote: 2,
+    }), 2);
+    assert.equal(await generationUnits('/notes', {
+        ...body, desktopMediaBilling: undefined, mobileMediaBilling: 1,
     }), 2);
 });
 

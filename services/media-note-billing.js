@@ -36,7 +36,8 @@ function validatePdfEvidence(endpoint, body) {
     if (body.pdfEvidence === undefined) return;
     const invalid = () => new CreditError(400, 'Choose valid local and cloud PDF pages.');
     if (endpoint !== '/notes' || body.type !== 'pdf' ||
-        body.desktopMediaBilling !== 1 || body.mobileMediaBilling !== undefined ||
+        !((body.desktopMediaBilling === 1 && body.mobileMediaBilling === undefined) ||
+            (body.mobileMediaBilling === 1 && body.desktopMediaBilling === undefined)) ||
         body.pdfOcrCreditQuote === undefined || !body.pdfEvidence ||
         typeof body.pdfEvidence !== 'object' || Array.isArray(body.pdfEvidence))
         throw invalid();

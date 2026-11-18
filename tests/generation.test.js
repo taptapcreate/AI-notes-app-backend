@@ -741,6 +741,25 @@ test('PDF billing verifies the number of selected pages before reserving credits
     assert.equal(calls, 1);
 });
 
+test('Video works on Free while paid-only mobile sources retain the backend gate', async (t) => {
+    const code = await account();
+    const request = await api(t);
+    const video = { type: 'image', content: 'AAAA', appFeature: 'video', featurePolicyVersion: 1 };
+    const id = randomUUID();
+    const first = await request(code, id, video);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.billing.totalCreditCost, 1);
+    assert.equal((await request(code, id, video)).body.billing.creditBalance.totalAvailable,
+        first.body.billing.creditBalance.totalAvailable);
+    for (const appFeature of ['location', 'calendar', 'sketch']) {
+        const result = await request(code, randomUUID(), { type: appFeature === 'sketch' ? 'image' : 'text',
+            content: appFeature === 'sketch' ? 'AAAA' : 'Selected event or place', appFeature, featurePolicyVersion: 1 });
+        assert.equal(result.status, 403);
+        assert.equal(result.body.code, 'PRO_REQUIRED');
+    }
+    assert.equal(calls, 1);
+});
+
 test('both client transports use configured media pricing and stale quotes reserve nothing', async (t) => {
     const code = await account();
     const request = await api(t);
