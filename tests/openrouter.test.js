@@ -90,3 +90,17 @@ test('upstream EOF or in-stream failure cannot become a successful note', async(
         await assert.rejects(router.complete('Source',100,undefined,()=>{}),/stream/);
     }
 });
+
+test('provider timing reports latency without source text and observers cannot discard results', async () => {
+    const metrics = [];
+    const router = createOpenRouter({ chat: { completions: { create: async () => (async function* () {
+        yield { choices: [{ delta: { content: 'Private manuscript' } }] };
+        yield { choices: [{ finish_reason: 'stop' }] };
+    })() } } }, { onTiming: value => { metrics.push(value); throw new Error('observer unavailable'); } });
+    const result = await router.complete('Secret source', 100, undefined, () => {});
+    assert.equal(result.text, 'Private manuscript');
+    assert.equal(metrics.length, 1); assert.equal(metrics[0].success, true);
+    assert.ok(metrics[0].durationMs >= 0); assert.ok(metrics[0].firstTextMs >= 0);
+    assert.ok(!JSON.stringify(metrics).includes('Secret source'));
+    assert.ok(!JSON.stringify(metrics).includes('Private manuscript'));
+});

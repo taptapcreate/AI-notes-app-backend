@@ -62,13 +62,13 @@ const purchaseService = createPurchases({
 });
 const { createGeneration } = require('./services/generation');
 const { generationMediaPricing } = require('./services/media-note-billing');
-const { signal: generationSignal } = require('./services/generation-context');
+const { signal: generationSignal, context: generationContext } = require('./services/generation-context');
 const generationService = createGeneration({ User, GenerationRequest, Subscription: AppleSubscription, credits: creditService,
     getAppConfig: () => getAppConfig(), entitlement: purchaseService.subscriptionStatus, resolveStoreKitScope: appleSubscriptions.resolveStoreKitScope });
 
 
 // Helper: Get App Config (Singleton)
-const getAppConfig = async () => {
+const loadAppConfig = async () => {
     // Preserve existing production settings. A missing database/configuration is
     // not permission to hand out a fallback allowance.
     const config = await AppConfig.findOne({ key: 'master_config' }) ??
@@ -77,6 +77,8 @@ const getAppConfig = async () => {
         }, { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true });
     return await syncWeeklySubscriptionCredits(AppConfig, config) ?? config;
 };
+
+const { getAppConfig, middleware: requestConfigScope } = require('./services/request-config').createRequestConfig(loadAppConfig);
 
 let accountRecoveryReady = false;
 const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
@@ -115,6 +117,7 @@ app.use('/api', (req, res, next) => {
     if (!accountRecoveryReady) return res.status(503).json({ error: 'Account recovery is initializing. Please retry shortly.' });
     next();
 });
+app.use('/api', requestConfigScope);
 app.use('/api', createMaintenanceGate({ getAppConfig }));
 app.use('/api', generationService.middleware);
 
@@ -123,7 +126,14 @@ const { complete, transcribe } = createOpenRouter(new OpenAI({
     apiKey: process.env.OPEN_ROUTER_API_KEY,
     timeout: 60000,
     maxRetries: 0,
-}));
+}), { onTiming: timing => {
+    const request = generationContext.getStore();
+    console.info('AI provider timing', { ...timing, endpoint: request?.endpoint,
+        ...(request?.startedAt === undefined ? {} : {
+            beforeModelMs: Math.max(0, Math.round(performance.now() - request.startedAt - timing.durationMs)),
+        }),
+    });
+} });
 
 // Helper: Sleep function for delays
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -572,6 +582,7 @@ Generate ${replyCount} replies now:`;
 });
 
 // ==================== FOLLOW-UP ENDPOINT ====================
+const { writingReviewPrompt } = require('./services/writing-review');
 app.post('/api/followup', async (req, res) => {
     try {
         const { context, question, type = 'note', replyTool, language = 'English' } = req.body;
@@ -581,7 +592,10 @@ app.post('/api/followup', async (req, res) => {
         }
 
         let prompt;
-        if (replyTool === 'explain' || replyTool === 'sound') {
+        const writingReview = !replyTool && writingReviewPrompt(context, question);
+        if (writingReview) {
+            prompt = writingReview;
+        } else if (replyTool === 'explain' || replyTool === 'sound') {
             const task = replyTool === 'explain'
                 ? 'Explain what the sender explicitly asks for, what is unclear, and which questions the user could ask before replying. Distinguish the text from your interpretation.'
                 : 'Explain how this draft may be perceived, point to specific wording, and offer one clearer rewrite. Do not claim to know how the recipient will react.';

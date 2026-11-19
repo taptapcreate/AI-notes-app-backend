@@ -515,6 +515,7 @@ function createGeneration({
             (!PATHS.has(endpoint) && endpoint !== '/notes/stream')
         )
             return next();
+        const startedAt = performance.now();
         const send = res.json.bind(res);
         let timer, stream;
         const abort = new AbortController();
@@ -600,7 +601,7 @@ function createGeneration({
                 leaseMs,
             );
             timer.unref?.();
-            context.run({ signal: abort.signal }, () => next());
+            context.run({ signal: abort.signal, endpoint, startedAt }, () => next());
         })().catch((error) => {
             const status = error.status || 503;
             const body = { error: error.status ? error.message : 'AI charging is temporarily unavailable. Please try again.', ...(error.details || {}) };
