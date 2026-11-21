@@ -71,6 +71,75 @@ const account = async () =>
     (await credits.register({ deviceId: randomUUID() })).recoveryCode;
 const reserve = (code, id = randomUUID(), body = source) =>
     generation.begin(code, id, '/notes', body);
+
+test('completion receipts avoid the full balance refresh and retries still report fresh counters', async t => {
+    const code = await account();
+    const originalBalance = credits.balance;
+    let fullReads = 0, receiptReads = 0;
+    credits.balance = async (...args) => { fullReads++; return originalBalance(...args); };
+    const originalReceipt = credits.receiptBalance;
+    credits.receiptBalance = async (...args) => { receiptReads++; return originalReceipt(...args); };
+    const request = await api(t);
+    const id = randomUUID();
+    assert.equal((await request(code, id)).body.billing.creditBalance.totalAvailable, 6);
+    assert.equal(fullReads, 1, 'only the pre-reservation initialization uses the full balance path');
+    assert.equal(receiptReads, 1);
+    await credits.grantPurchase(code, ['receipt-later-payment'], 10, 'test');
+    assert.equal((await request(code, id)).body.billing.creditBalance.totalAvailable, 16);
+    assert.equal(calls, 1); assert.equal(fullReads, 1); assert.equal(receiptReads, 2);
+});
+
+test('a receipt outage preserves the committed result for retry and timing observers cannot lose it', async t => {
+    const code = await account(), metrics = [];
+    const service = createGeneration({ User, GenerationRequest, credits, getAppConfig: async () => config,
+        entitlement: async () => member, now: () => new Date(time), onTiming: value => { metrics.push(value); throw new Error('observer failed'); } });
+    const original = credits.receiptBalance; let failed = true;
+    credits.receiptBalance = async (...args) => { if (failed) throw new Error('temporary receipt failure'); return original(...args); };
+    const request = await api(t, undefined, service), id = randomUUID();
+    assert.equal((await request(code, id)).status, 503);
+    const committed = await GenerationRequest.findOne({ requestId: id }).lean();
+    assert.equal(committed.state, 'succeeded');
+    failed = false; const retry = await request(code, id);
+    assert.equal(retry.status, 200); assert.equal(retry.body.billing.creditBalance.totalAvailable, 6); assert.equal(calls, 1);
+    assert.equal(metrics.length, 1); assert.equal(metrics[0].receiptCompleted, false);
+    assert.ok(metrics[0].settlementMs >= 0); assert.ok(metrics[0].receiptMs >= 0);
+    assert.doesNotMatch(JSON.stringify(metrics), new RegExp(code));
+});
+
+test('authenticated extraction scope is isolated between accounts and diagnostics cannot fail completion', async t => {
+    const a = await account(), b = await account(), seen = [], metrics = [];
+    const service = createGeneration({ User, GenerationRequest, credits, getAppConfig: async () => config,
+        entitlement: async () => member, now: () => new Date(time), onTiming: value => { metrics.push(value); throw new Error('observer failed'); } });
+    const request = await api(t, async (_req, res) => {
+        const scope = require('../services/generation-context').context.getStore();
+        seen.push(scope.accountScope); res.json({ notes: 'Scope-safe result' });
+    }, service);
+    assert.equal((await request(a, randomUUID())).status, 200); assert.equal((await request(b, randomUUID())).status, 200);
+    assert.notEqual(seen[0], seen[1]); assert.match(seen[0], /^[a-f0-9]{64}$/);
+    assert.equal(metrics.length, 2); assert.ok(metrics.every(value => value.receiptCompleted && value.finalizationMs >= 0));
+});
+
+test('parallel accounts retain their own extraction scope across asynchronous provider work', async t => {
+    const a = await account(), b = await account(), seen = [];
+    let release; const both = new Promise(resolve => { release = resolve; });
+    const request = await api(t, async (req, res) => {
+        const context = require('../services/generation-context').context;
+        const before = context.getStore().accountScope;
+        seen.push({ content: req.body.content, before }); if (seen.length === 2) release();
+        await both;
+        const after = context.getStore().accountScope;
+        assert.equal(before, after); res.json({ notes: req.body.content });
+    });
+    const results = await Promise.all([
+        request(a, randomUUID(), { ...source, content: 'Account A recording' }),
+        request(b, randomUUID(), { ...source, content: 'Account B recording' }),
+    ]);
+    assert.deepEqual(results.map(value => value.status), [200, 200]);
+    assert.notEqual(seen[0].before, seen[1].before);
+    for (const [code, content] of [[a, 'Account A recording'], [b, 'Account B recording']])
+        assert.equal(seen.find(value => value.content === content).before,
+            require('node:crypto').createHash('sha256').update(code).digest('hex'));
+});
 async function api(t, handler, service = generation) {
     const app = express();
     app.use(express.json({ limit: '25mb' }));

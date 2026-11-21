@@ -64,7 +64,8 @@ const { createGeneration } = require('./services/generation');
 const { generationMediaPricing } = require('./services/media-note-billing');
 const { signal: generationSignal, context: generationContext } = require('./services/generation-context');
 const generationService = createGeneration({ User, GenerationRequest, Subscription: AppleSubscription, credits: creditService,
-    getAppConfig: () => getAppConfig(), entitlement: purchaseService.subscriptionStatus, resolveStoreKitScope: appleSubscriptions.resolveStoreKitScope });
+    getAppConfig: () => getAppConfig(), entitlement: purchaseService.subscriptionStatus, resolveStoreKitScope: appleSubscriptions.resolveStoreKitScope,
+    onTiming: timing => console.info('AI completion timing', timing) });
 
 
 // Helper: Get App Config (Singleton)
@@ -126,7 +127,7 @@ const { complete, transcribe } = createOpenRouter(new OpenAI({
     apiKey: process.env.OPEN_ROUTER_API_KEY,
     timeout: 60000,
     maxRetries: 0,
-}), { onTiming: timing => {
+}), { getCacheScope: () => generationContext.getStore()?.accountScope, onTiming: timing => {
     const request = generationContext.getStore();
     console.info('AI provider timing', { ...timing, endpoint: request?.endpoint,
         ...(request?.startedAt === undefined ? {} : {

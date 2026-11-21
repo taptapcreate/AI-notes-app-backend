@@ -166,6 +166,7 @@ function createGeneration({
     resolveStoreKitScope = async () => undefined,
     now = () => new Date(),
     leaseMs = 180000,
+    onTiming = () => {},
 }) {
     const subscriptionRecovery = Subscription && require('./account-recovery').createAccountRecovery({
         Account: Subscription, Backup: require('../models/AccountRecovery'), kind: 'subscription', now,
@@ -487,7 +488,9 @@ function createGeneration({
                 410,
                 'This request completed earlier, but its saved result expired. No additional credit was charged. Start a new generation if you need another result.',
             );
-        const current = await credits.balance(record.recoveryCode, record.reservation.sandboxIds);
+        const current = credits.receiptBalance
+            ? await credits.receiptBalance(record.recoveryCode, record.reservation.sandboxIds)
+            : await credits.balance(record.recoveryCode, record.reservation.sandboxIds);
         const held = record.reservation;
         const succeeded = record.state === 'succeeded';
         const walletCost = succeeded ? (held.free ?? 0) + (held.ad ?? 0) + (held.paid ?? 0) : 0;
@@ -525,12 +528,25 @@ function createGeneration({
             finishing = true;
             if (status >= 400) abort.abort();
             clearTimeout(timer);
+            const finalizationStarted = performance.now();
+            let settlementMs;
+            const timing = receiptCompleted => {
+                const elapsed = performance.now() - finalizationStarted;
+                try { onTiming({ endpoint, status, receiptCompleted,
+                    ...(settlementMs === undefined ? {} : {
+                        settlementMs: Math.round(settlementMs), receiptMs: Math.round(elapsed - settlementMs),
+                    }), finalizationMs: Math.round(elapsed) }); } catch { /* Diagnostics cannot lose a paid result. */ }
+            };
             try {
                 const record = await finish(id, status, value);
+                status = record.httpStatus;
+                settlementMs = performance.now() - finalizationStarted;
                 const body = await response(record);
+                timing(true);
                 if (stream) stream.finish(record.httpStatus, body);
                 else if (!res.destroyed && !res.writableEnded) { res.status(record.httpStatus); send(body); }
             } catch (error) {
+                timing(false);
                 if (!res.destroyed && !res.writableEnded) {
                     const body = { error: 'Your AI request is being reconciled. Retry with the same request ID to check its result.' };
                     if (stream) stream.finish(503, body);
@@ -601,7 +617,8 @@ function createGeneration({
                 leaseMs,
             );
             timer.unref?.();
-            context.run({ signal: abort.signal, endpoint, startedAt }, () => next());
+            context.run({ signal: abort.signal, endpoint, startedAt,
+                accountScope: createHash('sha256').update(code).digest('hex') }, () => next());
         })().catch((error) => {
             const status = error.status || 503;
             const body = { error: error.status ? error.message : 'AI charging is temporarily unavailable. Please try again.', ...(error.details || {}) };

@@ -59,6 +59,63 @@ beforeEach(async () => {
     });
 });
 const register = (deviceId = 'device-1') => credits.register({ platform: 'ios', deviceId });
+
+test('receipt reads fresh counters without rewriting an initialized wallet or recovery checkpoint', async () => {
+    const { recoveryCode: code } = await register();
+    await credits.use(code, 2);
+    const before = await User.findOne({ recoveryCode: code }).lean();
+    const backup = await AccountRecovery.findOne({ identity: code, kind: 'wallet' }).lean();
+    time = new Date(time.getTime() + 60000);
+    const receipt = await credits.receiptBalance(code);
+    assert.equal(receipt.totalAvailable, 5);
+    assert.deepEqual(await User.findOne({ recoveryCode: code }).lean(), before);
+    assert.deepEqual(await AccountRecovery.findOne({ identity: code, kind: 'wallet' }).lean(), backup);
+    await credits.grantPurchase(code, ['new-payment'], 20, 'test');
+    assert.equal((await credits.receiptBalance(code)).totalAvailable, 25);
+    assert.equal((await credits.receiptBalance(code)).totalAvailable, 25);
+});
+
+test('receipt reads keep accounts separate and recover missing wallets without granting another welcome pack', async () => {
+    const first = await register('receipt-a'), second = await register('receipt-b');
+    await credits.use(first.recoveryCode, 3);
+    await User.deleteOne({ recoveryCode: first.recoveryCode });
+    assert.equal((await credits.receiptBalance(first.recoveryCode)).totalAvailable, 4);
+    assert.equal((await credits.receiptBalance(second.recoveryCode)).totalAvailable, 7);
+    await User.deleteOne({ recoveryCode: first.recoveryCode }); await AccountRecovery.deleteMany({ identity: first.recoveryCode });
+    await assert.rejects(credits.receiptBalance(first.recoveryCode), error => error.status === 404);
+});
+
+test('receipt daily rollover initializes exactly once and handles policy changes', async () => {
+    const { recoveryCode: code } = await register();
+    config.dailyFreeCreditsEnabled = true; config.freeDailyCredits = 3;
+    await User.updateOne({ recoveryCode: code }, { $set: { lastFreeCreditsReset: new Date(time.getTime() - 86400000) } });
+    assert.equal((await credits.receiptBalance(code)).freeCreditsRemaining, 3);
+    await credits.use(code, 2); assert.equal((await credits.receiptBalance(code)).freeCreditsRemaining, 1);
+    time = new Date(time.getTime() + 86400000);
+    const values = await Promise.all([credits.receiptBalance(code), credits.receiptBalance(code)]);
+    assert.deepEqual(values.map(value => value.freeCreditsRemaining), [3, 3]);
+    await credits.use(code, 1); assert.equal((await credits.receiptBalance(code)).freeCreditsRemaining, 2);
+    config.dailyFreeCreditsEnabled = false;
+    assert.equal((await credits.receiptBalance(code)).freeCreditPolicy, 'one-time');
+});
+
+test('a future reset timestamp cannot create an extra daily grant through the receipt path', async () => {
+    const { recoveryCode: code } = await register();
+    config.dailyFreeCreditsEnabled = true; config.freeDailyCredits = 3;
+    await User.updateOne({ recoveryCode: code }, { $set: { lastFreeCreditsReset: new Date(time.getTime() + 86400000), freeCreditsRemaining: 0 } });
+    assert.equal((await credits.receiptBalance(code)).freeCreditsRemaining, 0);
+    assert.equal((await credits.balance(code)).freeCreditsRemaining, 0);
+});
+
+test('receipt rejects deleted accounts and corrupt balances rather than returning cached counters', async () => {
+    const { recoveryCode: code } = await register();
+    const hash = require('node:crypto').createHash('sha256').update(code).digest('hex');
+    await User.db.collection('deletedaccounts').insertOne({ _id: hash });
+    try { await assert.rejects(credits.receiptBalance(code), error => error.status === 410); }
+    finally { await User.db.collection('deletedaccounts').deleteOne({ _id: hash }); }
+    await User.updateOne({ recoveryCode: code }, { $set: { credits: -1 } });
+    await assert.rejects(credits.receiptBalance(code), error => error.status === 503);
+});
 const rejectsStatus = (promise, status) =>
     assert.rejects(promise, (error) => error.status === status);
 
