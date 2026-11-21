@@ -139,23 +139,64 @@ const { complete, transcribe } = createOpenRouter(new OpenAI({
 // Helper: Sleep function for delays
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// A website can permit the user's Mac but reject the server's IP or user agent.
+// The desktop can attach a short, locally checked excerpt for that case. It is
+// still treated as untrusted source text and is only used after a server fetch
+// failed; it never replaces a normal server-side fetch.
+const localWebsiteFallback = (value) => {
+    if (typeof value !== 'string' || value.length > 12000) return '';
+    const text = cleanSourceText(value).trim();
+    return text.length >= 200 ? text : '';
+};
+const websiteAccessError = (error) => {
+    if (error?.code === 'WEB_UNSUPPORTED_CONTENT' || error?.code === 'WEB_NO_READABLE_CONTENT')
+        return new Error(`${error.code}: ${error.message}`);
+    const status = error?.response?.status;
+    if (status === 401 || status === 403 || status === 429)
+        return new Error('WEB_ACCESS_RESTRICTED: This site blocks automated reading or requires sign-in.');
+    if (status && status >= 400 && status < 500)
+        return new Error('WEB_ACCESS_UNAVAILABLE: This webpage could not be found or accessed.');
+    return new Error('WEB_ACCESS_UNAVAILABLE: This website could not be reached right now.');
+};
 // Helper: Fetch Website Content
-const fetchWebsiteContent = async (url) => {
+const fetchWebsiteContent = async (url, fallbackText = '') => {
     try {
-        const { data, headers } = await axios.get(url, {
+        const { data, headers, status } = await axios.get(url, {
             timeout: 15000,
             maxContentLength: 2 * 1024 * 1024,
+            responseType: 'text',
+            validateStatus: () => true,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1',
+                'Accept-Language': 'en-US,en;q=0.9',
             }
         });
-        if (typeof data !== 'string' || !/^text\/(html|plain)(?:;|$)/i.test(headers['content-type'] || ''))
-            throw new Error('Unsupported page content');
-        const content = websiteText(data, { plainText: /^text\/plain(?:;|$)/i.test(headers['content-type']) });
-        if (!content.trim()) throw new Error('Empty page');
+        if (status < 200 || status >= 300) {
+            const responseError = new Error(`Website returned HTTP ${status}`);
+            responseError.response = { status };
+            throw responseError;
+        }
+        const type = headers['content-type'] || '';
+        if (typeof data !== 'string' || !/^(text\/(html|plain)|application\/xhtml\+xml)(?:;|$)/i.test(type)) {
+            const unsupported = new Error('This link is not an HTML webpage.');
+            unsupported.code = 'WEB_UNSUPPORTED_CONTENT';
+            throw unsupported;
+        }
+        const content = websiteText(data, { plainText: /^text\/plain(?:;|$)/i.test(type) });
+        if (!content.trim()) {
+            const empty = new Error('This page did not expose readable article text.');
+            empty.code = 'WEB_NO_READABLE_CONTENT';
+            throw empty;
+        }
         return content;
-    } catch {
-        throw new Error('WEB_ACCESS_BLOCKED: AI Notes couldn’t read this page. Paste the article text instead.');
+    } catch (error) {
+        const fallback = localWebsiteFallback(fallbackText);
+        if (fallback) {
+            console.info('Website fetch failed; using verified desktop preview', { reason: error?.code || error?.response?.status || 'unavailable' });
+            return fallback;
+        }
+        throw websiteAccessError(error);
     }
 };
 
@@ -353,7 +394,7 @@ const { appendNarration } = require('./services/walkthrough');
 const { buildNotePrompt } = require('./services/note-prompts');
 app.post('/api/notes', async (req, res) => {
     try {
-        const { type, content, pdfEvidence, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', sourceKind, isPro = false } = req.body;
+        const { type, content, pdfEvidence, websiteText, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', sourceKind, isPro = false } = req.body;
         const instruction = await appendNarration(requestedInstruction, req.body.narration, transcribe, generationSignal());
 
         if (!content) {
@@ -394,7 +435,7 @@ app.post('/api/notes', async (req, res) => {
                 result = await generate(promptFor(await transcribe(content, generationSignal())));
                 break;
             case 'website':
-                result = await generate(promptFor(await fetchWebsiteContent(content)));
+                result = await generate(promptFor(await fetchWebsiteContent(content, websiteText)));
                 break;
             case 'youtube':
                 result = await generate(promptFor(await fetchYouTubeTranscript(content)));
@@ -426,7 +467,7 @@ app.post('/api/notes', async (req, res) => {
 
     } catch (error) {
         if (error instanceof InvalidSource) return res.status(400).json({ error: error.message });
-        if (/^(WEB_ACCESS_BLOCKED|YOUTUBE_BLOCK):/.test(error.message)) {
+        if (/^(WEB_ACCESS_(RESTRICTED|UNAVAILABLE)|WEB_(UNSUPPORTED_CONTENT|NO_READABLE_CONTENT)|YOUTUBE_BLOCK):/.test(error.message)) {
             return res.status(502).json({ error: error.message });
         }
         console.error('Notes generation error:', { type: req.body?.type, status: error.status, code: error.code, name: error.name });

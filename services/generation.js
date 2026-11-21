@@ -89,6 +89,9 @@ function validateInput(endpoint, body) {
             )
                 throw new CreditError(400, 'Enter a valid website URL');
         }
+        if (body.websiteText !== undefined &&
+            (body.type !== 'website' || typeof body.websiteText !== 'string' || body.websiteText.length > 12000))
+            throw new CreditError(400, 'Invalid website preview text');
     } else if (endpoint === '/reply') text(body.message);
     else if (endpoint === '/followup') {
         text(body.context);
