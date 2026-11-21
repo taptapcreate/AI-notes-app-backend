@@ -18,6 +18,12 @@ test('all source routes preserve format, language, customization, and source att
         if (!['image', 'pdf'].includes(type)) assert.ok(prompt.includes(JSON.stringify(options.content)));
     }
 });
+test('short recognizable topics produce a direct completed explanation instead of a paid clarification request', () => {
+    const prompt = buildNotePrompt({ ...options, type: 'text', content: 'ExplainMe: events, loops, and JWT' });
+    assert.match(prompt, /short title-like request/);
+    assert.match(prompt, /direct, self-contained explainer/);
+    assert.match(prompt, /clarification request alone is not a finished result/);
+});
 test('comparison aligns substance, and recordings can become research notes instead of fabricated procedural steps', () => {
     const comparison = buildNotePrompt({ ...options, type: 'image', sourceKind: 'compare' });
     assert.match(comparison, /TASK: CONTENT COMPARISON/);

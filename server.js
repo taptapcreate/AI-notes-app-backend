@@ -85,24 +85,32 @@ let accountRecoveryReady = false;
 const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: DB_NAME })
     .then(async () => {
         await getAppConfig();
-        await require('./services/credit-pack-catalog').initializeCreditPacks(AppConfig);
-        await creditPackCatalog.publicCatalog(await getAppConfig());
-        await require('./services/subscription-credit-ledger').initializeLedger();
-        await initializeNoteOutputLimits(AppConfig)
-            .catch(error => console.error('Note output limits initialization deferred:', error.message));
-        await initializeSubscriptionControls(AppConfig)
-            .catch(error => console.error('Subscription controls initialization deferred:', error.message));
-        await require('./services/subscription-credit-policy').initializeSubscriptionRollover(AppConfig)
-            .catch(error => console.error('Subscription rollover settings initialization deferred:', error.message));
-        await require('./services/message-controls-init').initializeMessageControls({
-            Config: AppConfig, Messages: require('./models/UserAnnouncement'),
-        }).catch(error => console.error('Message controls initialization deferred:', error.message));
-        const result = await require('./services/recovery-cutover').backfillAccountRecovery({
-            User, Subscription: AppleSubscription, Backup: require('./models/AccountRecovery'),
-        });
-        await appleSubscriptions.backfillTrialGrants(await getAppConfig());
+        // Generation only needs a live database and config. Historically this
+        // flag waited for every maintenance backfill in sequence; a slow
+        // backfill made a healthy cold-start return “Account recovery is
+        // initializing” for minutes (or forever if one noncritical task failed).
         accountRecoveryReady = true;
-        console.log('Account recovery ready:', result);
+        const deferred = [
+            ['credit packs', () => require('./services/credit-pack-catalog').initializeCreditPacks(AppConfig)],
+            ['credit pack catalog', async () => creditPackCatalog.publicCatalog(await getAppConfig())],
+            ['subscription credit ledger', () => require('./services/subscription-credit-ledger').initializeLedger()],
+            ['note output limits', () => initializeNoteOutputLimits(AppConfig)],
+            ['subscription controls', () => initializeSubscriptionControls(AppConfig)],
+            ['subscription rollover', () => require('./services/subscription-credit-policy').initializeSubscriptionRollover(AppConfig)],
+            ['message controls', () => require('./services/message-controls-init').initializeMessageControls({
+                Config: AppConfig, Messages: require('./models/UserAnnouncement'),
+            })],
+            ['account recovery', () => require('./services/recovery-cutover').backfillAccountRecovery({
+                User, Subscription: AppleSubscription, Backup: require('./models/AccountRecovery'),
+            })],
+            ['trial grants', async () => appleSubscriptions.backfillTrialGrants(await getAppConfig())],
+        ];
+        const results = await Promise.allSettled(deferred.map(([, task]) => task()));
+        for (const [index, result] of results.entries())
+            if (result.status === 'rejected') console.error(`${deferred[index][0]} initialization deferred:`, result.reason?.message);
+        const recovery = results.find((_, index) => deferred[index][0] === 'account recovery');
+        const recoveryResult = recovery?.status === 'fulfilled' ? recovery.value : { deferred: true };
+        console.log('Account recovery maintenance:', recoveryResult);
     });
 accountStorageReady.catch(err => console.error('Account recovery initialization failed:', err.message));
 
@@ -313,7 +321,7 @@ const lengthGuides = {
         instruction: 'Provide a concise but informative summary. Aim for 5-7 useful points when the source supports them; use fewer for short material. Keep it short but ensure the main context and important details are clear.'
     },
     standard: {
-        instruction: 'Provide a comprehensive and well-rounded summary. Cover the main themes with sufficient explanations and important details; aim for 10-15 points only when justified by the source. Provide a good level of depth without being overly exhaustive.'
+        instruction: 'Provide a comprehensive, self-contained, and well-rounded result. Develop the main themes with explanations, concrete details, relationships, and an example when it improves understanding. For a short topic request, write a useful direct explainer rather than a clarification request. Aim for 10-15 points only when justified by the source; use readable sections or developed paragraphs rather than a thin list.'
     },
     detailed: {
         instruction: 'Provide a very thorough and comprehensive analysis. Develop the core insights, supporting evidence, explanations, and nuances without page-by-page recitation. Use as many points as the material warrants, without padding.'
