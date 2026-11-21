@@ -162,7 +162,7 @@ function createAppleSubscriptions({
     async function promoteRenewal(record, session) {
         const renewal = record.scheduledRenewal;
         const timestamp = now();
-        if (!renewal || renewal.purchaseDate > timestamp) return;
+        if (!renewal || renewal.purchaseDate > timestamp) return false;
         const set = { scheduledRenewal: null };
         if ((!record.purchaseDate || renewal.purchaseDate > record.purchaseDate) &&
             !record.revokedTransactions?.includes(renewal.transactionId)) {
@@ -171,6 +171,7 @@ function createAppleSubscriptions({
             await installPeriod(record, set, timestamp, session);
         }
         await Subscription.updateOne({ _id: record._id }, { $set: set }, { session });
+        return true;
     }
 
     async function recordFor(user, session, sandboxIds) {
@@ -180,8 +181,8 @@ function createAppleSubscriptions({
         for (const id of ids) {
             try {
                 const record = await subscriptionRecovery.ensure(id, session);
-                await promoteRenewal(record, session);
-                await subscriptionRecovery.checkpoint(id, session);
+                if (await promoteRenewal(record, session))
+                    await subscriptionRecovery.checkpoint(id, session);
             } catch (error) { if (error.status !== 404) throw error; }
         }
         const query = Subscription.find({ _id: { $in: ids } }).sort({
@@ -222,7 +223,7 @@ function createAppleSubscriptions({
             };
         });
     }
-    async function savePayload(payload, code) {
+    async function savePayload(payload, code, batch) {
         const timestamp = now();
         if (
             !PRODUCTS.has(payload.productId) ||
@@ -240,8 +241,8 @@ function createAppleSubscriptions({
                 'This is not a valid AI Notes subscription',
             );
         const id = identity(payload.environment, payload.originalTransactionId);
-        await transaction(async (session) => {
-            const user = code ? await walletRecovery.ensure(code, session) : null;
+        const apply = async (session) => {
+            const user = batch ? batch.user : code ? await walletRecovery.ensure(code, session) : null;
             let current;
             try { current = await subscriptionRecovery.ensure(id, session); }
             catch (error) {
@@ -380,15 +381,23 @@ function createAppleSubscriptions({
             };
             if (markWallet) update.$addToSet.migratedWallets = walletHash;
             await Subscription.updateOne({ _id: id }, update, { session });
-            if (link)
+            if (link && !alreadyLinked) {
                 await User.updateOne(
                     { _id: user._id },
                     { $addToSet: { appleSubscriptionIds: id } },
                     { session },
                 );
-            await subscriptionRecovery.checkpoint(id, session);
-            if (user) await walletRecovery.checkpoint(code, session);
-        });
+                // Subsequent proofs in this batch must see the link and migrated usage.
+                user.appleSubscriptionIds = [...(user.appleSubscriptionIds || []), id];
+            }
+            if (batch) batch.changed.add(id);
+            else {
+                await subscriptionRecovery.checkpoint(id, session);
+                if (user) await walletRecovery.checkpoint(code, session);
+            }
+        };
+        if (batch) await apply(batch.session);
+        else await transaction(apply);
         return id;
     }
     async function attach(code, proofs) {
@@ -399,7 +408,15 @@ function createAppleSubscriptions({
             );
         // Verify the whole batch before changing any account association.
         const decoded = await Promise.all(proofs.map((proof) => verify(proof)));
-        for (const payload of decoded) await savePayload(payload, code);
+        // Keep proof order (including rollover and refunds), but share one wallet
+        // read, commit and recovery checkpoint instead of repeating them per proof.
+        await transaction(async session => {
+            const user = await walletRecovery.ensure(code, session);
+            const batch = { session, user, changed: new Set() };
+            for (const payload of decoded) await savePayload(payload, code, batch);
+            for (const id of batch.changed) await subscriptionRecovery.checkpoint(id, session);
+            await walletRecovery.checkpoint(code, session);
+        });
         const user = await User.findOne({ recoveryCode: code }).lean();
         return {
             success: true,

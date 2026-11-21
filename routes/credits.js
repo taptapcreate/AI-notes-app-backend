@@ -58,7 +58,12 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
         if (!appleSubscriptions) throw new CreditError(503, 'Subscription sharing is not available on this server yet');
         const code = recoveryCode(req.body?.code);
         await credits.byCode(code);
-        return appleSubscriptions.attach(code, req.body?.transactions);
+        const result = await appleSubscriptions.attach(code, req.body?.transactions);
+        // An explicit restore can finish with a fresh wallet snapshot, without a
+        // second balance request that also synchronizes unrelated credit packs.
+        if (req.body?.includeBalance === true)
+            result.creditBalance = await credits.receiptBalance(code);
+        return result;
     }));
     // Verify current membership and recover missing linked records from signed StoreKit proof.
     router.post(
