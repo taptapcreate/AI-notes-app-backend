@@ -1,14 +1,15 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
+const { timeSubscriptionOperation: timeSubscription } = require('./subscription-timing');
 // A query-scoped session keeps legacy credit helpers in the same transaction.
 // Never use a global MongoDB session: parallel HTTP requests must stay isolated.
 function createAccountTransactions(Account, Backup) {
     const scope = new AsyncLocalStorage();
     async function run(work) {
         if (scope.getStore()) return work();
-        await Backup.init();
+        await timeSubscription('account_initialization', () => Backup.init());
         for (let attempt = 0; ; attempt++) {
             const session = await Account.db.startSession();
-            try { return await session.withTransaction(() => scope.run(session, work)); }
+            try { return await timeSubscription('account_transaction', () => session.withTransaction(() => scope.run(session, work))); }
             catch (error) { if (error.code !== 11000 || attempt >= 9) throw error; }
             finally { await session.endSession(); }
         }

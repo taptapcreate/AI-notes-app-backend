@@ -118,6 +118,31 @@ const attach = async (code, fields = {}) =>
     service.attach(code, [JSON.stringify(proof(fields))]);
 const status = async (code) =>
     service.status(await User.findOne({ recoveryCode: code }).lean());
+test('subscription timing records real local query durations without recording test account data', async () => {
+    const { EventEmitter } = require('node:events');
+    const { subscriptionTimingMiddleware } = require('../services/subscription-timing');
+    const logs = [];
+    const res = new EventEmitter();
+    res.statusCode = 200;
+    const middleware = subscriptionTimingMiddleware({ logger: {
+        info: (label, timing) => logs.push({ label, timing }),
+    } });
+    await middleware({ method: 'POST', path: '/credits/apple-subscription' }, res, async () => {
+        await attach(codes[0]);
+        assert.equal((await status(codes[0])).isPro, true);
+    });
+    res.emit('finish');
+    assert.equal(logs.length, 1);
+    const spans = logs[0].timing.spans;
+    for (const operation of ['subscription_transaction', 'db.wallet.findOne', 'db.subscription.find']) {
+        assert.ok(spans.some(span => span.operation === operation && span.outcome === 'ok'), operation);
+    }
+    assert.ok(spans.every(span => Number.isFinite(span.durationMs) && span.durationMs >= 0));
+    const serialized = JSON.stringify(logs);
+    for (const privateValue of [...codes, proof().originalTransactionId, proof().transactionId]) {
+        assert.equal(serialized.includes(privateValue), false);
+    }
+});
 test('the same Apple subscription links two different wallets without transferring access or balances', async () => {
     await attach(codes[0]);
     await attach(codes[1]);

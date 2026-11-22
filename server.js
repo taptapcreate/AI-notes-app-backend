@@ -9,6 +9,7 @@ const { cleanSourceText, websiteText } = require('./services/source-cleanup');
 const { YoutubeTranscript } = require('youtube-transcript');
 const { Expo } = require('expo-server-sdk');
 require('dotenv').config();
+const { subscriptionTimingMiddleware, timeSubscriptionOperation: timeSubscription } = require('./services/subscription-timing');
 
 // Initialize Expo Push SDK
 const expo = new Expo();
@@ -72,11 +73,11 @@ const generationService = createGeneration({ User, GenerationRequest, Subscripti
 const loadAppConfig = async () => {
     // Preserve existing production settings. A missing database/configuration is
     // not permission to hand out a fallback allowance.
-    const config = await AppConfig.findOne({ key: 'master_config' }) ??
+    const config = await timeSubscription('configuration_read', () => AppConfig.findOne({ key: 'master_config' })) ??
         await AppConfig.findOneAndUpdate({ key: 'master_config' }, {
             $setOnInsert: { key: 'master_config' },
         }, { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true });
-    return await syncWeeklySubscriptionCredits(AppConfig, config) ?? config;
+    return await timeSubscription('configuration_sync', () => syncWeeklySubscriptionCredits(AppConfig, config)) ?? config;
 };
 
 const { getAppConfig, middleware: requestConfigScope } = require('./services/request-config').createRequestConfig(loadAppConfig);
@@ -121,6 +122,7 @@ app.use('/api/workplace-oauth', createWorkplaceOAuth());
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
+app.use('/api', subscriptionTimingMiddleware());
 app.use('/api', (req, res, next) => {
     if (req.path === '/config' || req.path.startsWith('/config/')) return next();
     if (!accountRecoveryReady) return res.status(503).json({ error: 'Account recovery is initializing. Please retry shortly.' });

@@ -43,3 +43,20 @@ by the explicit policy migration, not merely by deploying these source changes.
 
 Run `npm test` to verify the credit rules with an isolated temporary MongoDB server.
 Run `npm run credits:policy -- --dry-run` to inspect the intended database policy.
+
+## Subscription timing diagnostics
+
+After deploying this backend, subscription-status and Apple-proof verification requests
+emit one structured `Subscription timing` log entry. Entries contain fixed operation
+names, elapsed milliseconds, completion outcomes, and HTTP status only. They do not
+include request bodies, query filters/results, recovery codes, account or transaction
+identifiers, receipts, credentials, or raw error messages. Other requests are not traced.
+
+Use only the `Subscription timing` entries when investigating renewal latency. The
+`spans` distinguish account lookup, configuration reads, subscription queries,
+transaction work, allowance calculations, signature verification, and RevenueCat calls.
+Durations include nested operations: do not add overlapping spans together. Each
+request retains at most 128 spans; additional spans are counted in `omittedSpans`.
+Logging failures cannot change a subscription result. No additional database connection, migration,
+new environment setting, or desktop rebuild is needed to enable these logs; deploy the
+backend code through the existing Render workflow.

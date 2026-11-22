@@ -7,6 +7,7 @@ const { CreditError } = require('./credit-policy');
 const { rolloverControls, snapshotSubscriptionPolicy } = require('./subscription-credit-policy');
 
 const { requestHistoryUsage } = require('./subscription-usage');
+const { timeSubscriptionOperation: timeSubscription } = require('./subscription-timing');
 
 const transactions = createAccountTransactions(Account, Entry);
 const accounts = transactions.bind(Account);
@@ -98,13 +99,16 @@ async function closeAvailable(allocation, type, now, session) {
         transactionId: allocation.transactionId }, type, units, now);
 }
 
-async function monthlyUsage(record, config, now, session, requests) {
+function monthlyUsage(...args) {
+    return timeSubscription('usage_ledger', () => readMonthlyUsage(...args));
+}
+async function readMonthlyUsage(record, config, now, session, requests) {
     const rollover = rolloverControls(config);
     if (!record?.originalTransactionId || !record.transactionId) return null;
     return transactions.withSession(session, async () => {
         const accountId = appleAccountId(record);
-        const account = await accounts.findById(accountId);
-        const previous = account && await allocations.findById(account.currentAllocationId);
+        const account = await timeSubscription('db.ledger_account.findById', () => accounts.findById(accountId));
+        const previous = account && await timeSubscription('db.allocation.findById', () => allocations.findById(account.currentAllocationId));
         if (account && !previous)
             throw new CreditError(503, 'Subscription allowance needs support review');
         if (previous && record.purchaseDate < previous.periodStart)
@@ -169,7 +173,7 @@ async function monthlyUsage(record, config, now, session, requests) {
                     chainId: id.chainId, currentAllocationId: current._id });
             }
         }
-        let carry = await allocations.findOne({ accountId, carriedIntoTransactionId: current.transactionId });
+        let carry = await timeSubscription('db.allocation.findOne', () => allocations.findOne({ accountId, carriedIntoTransactionId: current.transactionId }));
         if (carry && record.revokedTransactions?.includes(carry.transactionId)) {
             await closeAvailable(carry, 'revoke', now, session);
             carry = null;

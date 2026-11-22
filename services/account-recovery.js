@@ -1,5 +1,6 @@
 const { createHash } = require('node:crypto');
 const { CreditError } = require('./credit-policy');
+const { timeSubscriptionOperation: timeSubscription } = require('./subscription-timing');
 
 // All account mutations and checkpoints share one MongoDB transaction.
 // Every balance mutation and its checkpoint MUST share the supplied transaction.
@@ -27,7 +28,7 @@ function createAccountRecovery({ Account, Backup, kind, now = () => new Date() }
     async function assertRecoverable(identity, session) {
         if (kind === 'wallet') {
             const hash = createHash('sha256').update(identity.toUpperCase()).digest('hex');
-            if (await Account.db.collection('deletedaccounts').findOne({ _id: hash }, { session }))
+            if (await timeSubscription('db.deleted_account.findOne', () => Account.db.collection('deletedaccounts').findOne({ _id: hash }, { session })))
                 throw new CreditError(410, 'This account was deleted and cannot be restored');
         }
     }
@@ -35,24 +36,24 @@ function createAccountRecovery({ Account, Backup, kind, now = () => new Date() }
         requireTransaction(session);
         const id = key(identity);
         await assertRecoverable(identity, session);
-        const existing = await Account.findOne({ [field]: identity }).session(session).lean();
+        const existing = await timeSubscription(kind === 'wallet' ? 'db.wallet.findOne' : 'db.subscription.findOne', () => Account.findOne({ [field]: identity }).session(session).lean());
         if (existing) return existing;
-        const backup = await Backup.findById(id).session(session).lean();
+        const backup = await timeSubscription('db.recovery.findById', () => Backup.findById(id).session(session).lean());
         if (!backup) throw new CreditError(404, 'No confirmed backup is available for this account');
         if (backup.identity !== identity || backup.kind !== kind)
             throw new CreditError(503, 'Account backup identity needs support review');
         validate(backup.snapshot, identity);
-        await Account.collection.insertOne(backup.snapshot, { session });
-        return Account.findOne({ [field]: identity }).session(session).lean();
+        await timeSubscription('db.recovery.insertOne', () => Account.collection.insertOne(backup.snapshot, { session }));
+        return timeSubscription(kind === 'wallet' ? 'db.wallet.findOne' : 'db.subscription.findOne', () => Account.findOne({ [field]: identity }).session(session).lean());
     }
     async function checkpoint(identity, session) {
         requireTransaction(session);
         const id = key(identity);
-        const snapshot = await Account.findOne({ [field]: identity }).session(session).lean();
+        const snapshot = await timeSubscription(kind === 'wallet' ? 'db.wallet.findOne' : 'db.subscription.findOne', () => Account.findOne({ [field]: identity }).session(session).lean());
         validate(snapshot, identity);
-        await Backup.replaceOne({ _id: id }, {
+        await timeSubscription('db.recovery.replaceOne', () => Backup.replaceOne({ _id: id }, {
             _id: id, kind, identity, snapshot, updatedAt: now(),
-        }, { session, upsert: true });
+        }, { session, upsert: true }));
         return snapshot;
     }
     async function run(identity, operation = async () => undefined) {

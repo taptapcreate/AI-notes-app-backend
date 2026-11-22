@@ -8,6 +8,7 @@ const {
 const { CreditError } = require('./credit-policy');
 const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT, WEEKLY_PRODUCT, paidAllowancePeriod, trialCreditLimit } = require('./subscription-usage');
 const { monthlyUsage } = require('./subscription-credit-ledger');
+const { timeSubscriptionOperation: timeSubscription } = require('./subscription-timing');
 const BUNDLE_ID = 'com.taptapcreate.ainotes';
 const PRODUCTS = new Set([WEEKLY_PRODUCT, MONTHLY_PRODUCT]);
 const hash = (value) => createHash('sha256').update(value).digest('hex');
@@ -70,7 +71,7 @@ function appleVerifier() {
         for (const verifier of verifiers) {
             try {
                 const payload =
-                    await verifier.verifyAndDecodeTransaction(signed);
+                    await timeSubscription('verify_apple_signature', () => verifier.verifyAndDecodeTransaction(signed));
                 if (cache.size >= 200) cache.delete(cache.keys().next().value);
                 cache.set(key, { until: Date.now() + 300000, payload });
                 return payload;
@@ -96,10 +97,10 @@ function createAppleSubscriptions({
     const subscriptionRecovery = require('./account-recovery').createAccountRecovery({ Account: Subscription, Backup, kind: 'subscription', now });
     const walletRecovery = require('./account-recovery').createAccountRecovery({ Account: User, Backup, kind: 'wallet', now });
     const transaction = async (work) => {
-        await Backup.init();
+        await timeSubscription('subscription_initialization', () => Backup.init());
         for (let attempt = 0; ; attempt++) {
             const session = await User.db.startSession();
-            try { return await session.withTransaction(() => work(session)); }
+            try { return await timeSubscription('subscription_transaction', () => session.withTransaction(() => work(session))); }
             catch (error) { if (error.code !== 11000 || attempt >= 9) throw error; }
             finally { await session.endSession(); }
         }
@@ -181,7 +182,7 @@ function createAppleSubscriptions({
         for (const id of ids) {
             try {
                 const record = await subscriptionRecovery.ensure(id, session);
-                if (await promoteRenewal(record, session))
+                if (await timeSubscription('renewal_promotion', () => promoteRenewal(record, session)))
                     await subscriptionRecovery.checkpoint(id, session);
             } catch (error) { if (error.status !== 404) throw error; }
         }
@@ -189,7 +190,7 @@ function createAppleSubscriptions({
             expiresAt: -1,
         });
         if (session) query.session(session);
-        const records = (await query.lean()).filter(record => canUseAppleRecord(record, sandboxIds));
+        const records = (await timeSubscription('db.subscription.find', () => query.lean())).filter(record => canUseAppleRecord(record, sandboxIds));
         return records.find((record) => active(record)) || records[0] || null;
     }
     async function status(user, sandboxIds) {

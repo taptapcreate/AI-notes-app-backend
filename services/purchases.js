@@ -70,6 +70,7 @@ function purchaseAliases(product, purchase) {
     return [...new Set(aliases)];
 }
 
+const { timeSubscriptionOperation: timeSubscription } = require('./subscription-timing');
 function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions, verifyApple, applePackCutover = appleCreditPackCutover(), resolvePackAmount = (product, purchase) => creditPackAmount(product, purchase, applePackCutover) }) {
     async function customer(user, { required = false } = {}) {
         if (!apiKey) {
@@ -82,7 +83,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
         }
         let response;
         try {
-            response = await axios.get(
+            response = await timeSubscription('revenuecat_request', () => axios.get(
                 `https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(user.recoveryCode)}`,
                 {
                     timeout: 10000,
@@ -91,7 +92,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
                         'Content-Type': 'application/json',
                     },
                 },
-            );
+            ));
         } catch (error) {
             if (error.response?.status === 404) return null;
             throw new CreditError(
