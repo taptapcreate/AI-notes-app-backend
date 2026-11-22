@@ -59,7 +59,8 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
     router.post('/apple-subscription', rateLimit({ windowMs: 60000, limit: 60, standardHeaders: true, legacyHeaders: false }), endpoint(async req => {
         if (!appleSubscriptions) throw new CreditError(503, 'Subscription sharing is not available on this server yet');
         const code = recoveryCode(req.body?.code);
-        await timeSubscription('account_lookup', () => subscriptionAccount(code));
+        // attach() verifies the same account inside the proof transaction. A
+        // separate lookup here repeated that recovery transaction on every sync.
         const result = await timeSubscription('attach_proofs', () => appleSubscriptions.attach(code, req.body?.transactions));
         // An explicit restore can finish with a fresh wallet snapshot, without a
         // second balance request that also synchronizes unrelated credit packs.

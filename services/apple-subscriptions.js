@@ -414,6 +414,7 @@ function createAppleSubscriptions({
                 );
                 // Subsequent proofs in this batch must see the link and migrated usage.
                 user.appleSubscriptionIds = [...(user.appleSubscriptionIds || []), id];
+                if (batch) batch.walletChanged = true;
             }
             if (batch) batch.changed.add(id);
             else {
@@ -433,20 +434,33 @@ function createAppleSubscriptions({
             );
         // Verify the whole batch before changing any account association.
         const decoded = await Promise.all(proofs.map((proof) => verify(proof)));
+        const timestamp = now();
         // Keep proof order (including rollover and refunds), but share one wallet
         // read, commit and recovery checkpoint instead of repeating them per proof.
-        const user = await transaction(async session => {
+        const verified = await transaction(async session => {
             const user = await walletRecovery.ensure(code, session);
-            const batch = { session, user, changed: new Set() };
+            const batch = { session, user, changed: new Set(), walletChanged: false };
             for (const payload of decoded) await savePayload(payload, code, batch);
             for (const id of batch.changed) await subscriptionRecovery.checkpoint(id, session);
-            return walletRecovery.checkpoint(code, session);
+            // The final status and allowance are part of the same transaction
+            // that saved the proof. Starting another transaction after commit
+            // repeated the same subscription and ledger reads on every renewal.
+            // A routine proof refresh updates the subscription record only. The
+            // wallet snapshot is already current unless a new link was saved.
+            const wallet = batch.walletChanged
+                ? await walletRecovery.checkpoint(code, session)
+                : user;
+            const record = await recordFor(wallet, session);
+            const config = await getAppConfig();
+            return {
+                membership: membershipFor(record),
+                usage: await timeSubscription('allowance', () => usageFor(wallet, record, config, timestamp, session)),
+            };
         });
-        const verified = await snapshot(user);
         return {
             success: true,
-            ...(verified?.membership ?? await status(user)),
-            ...(verified?.usage ?? await usage(user, await getAppConfig())),
+            ...verified.membership,
+            ...verified.usage,
         };
     }
     async function webhook(event) {
