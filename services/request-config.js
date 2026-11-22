@@ -1,7 +1,9 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
-const paths = new Set(['/notes', '/reply', '/followup', '/translate', '/polish', '/sentiment']);
+const paths = new Set(['/notes', '/reply', '/followup', '/translate', '/polish', '/sentiment',
+    '/credits/subscription', '/credits/apple-subscription']);
 
-// Reuse a single settings snapshot within one generation, never across requests.
+// Reuse a single settings snapshot within one generation or subscription check,
+// never across requests.
 // Maintenance/policy changes remain visible on the very next request.
 function createRequestConfig(load) {
     const scope = new AsyncLocalStorage();

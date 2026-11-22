@@ -6,6 +6,7 @@ const { timeSubscriptionOperation: timeSubscription, subscriptionTimingActive } 
 
 function createCreditRouter({ credits, purchases, appleSubscriptions, logger = console }) {
     const router = express.Router();
+    const subscriptionAccount = code => credits.readAccount ? credits.readAccount(code) : credits.byCode(code);
     const readAnnouncement = require('../services/user-announcements').createUserAnnouncements({
         Messages: require('../models/UserAnnouncement'), credits,
     });
@@ -58,7 +59,7 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
     router.post('/apple-subscription', rateLimit({ windowMs: 60000, limit: 60, standardHeaders: true, legacyHeaders: false }), endpoint(async req => {
         if (!appleSubscriptions) throw new CreditError(503, 'Subscription sharing is not available on this server yet');
         const code = recoveryCode(req.body?.code);
-        await timeSubscription('account_lookup', () => credits.byCode(code));
+        await timeSubscription('account_lookup', () => subscriptionAccount(code));
         const result = await timeSubscription('attach_proofs', () => appleSubscriptions.attach(code, req.body?.transactions));
         // An explicit restore can finish with a fresh wallet snapshot, without a
         // second balance request that also synchronizes unrelated credit packs.
@@ -70,11 +71,13 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
     router.post(
         '/subscription',
         endpoint(async (req) => {
-            const user = await timeSubscription('account_lookup', () => credits.byCode(req.body?.code));
+            const user = await timeSubscription('account_lookup', () => subscriptionAccount(req.body?.code));
             const sandboxIds = await timeSubscription('storekit_scope', () => appleSubscriptions?.resolveStoreKitScope(req.body?.storeKitProofs, user));
-            const membership = await timeSubscription('membership', () => purchases.subscriptionStatus(user, sandboxIds));
-            const scopedUsage = appleSubscriptions
-                ? await timeSubscription('allowance', () => appleSubscriptions.usage(user, undefined, undefined, sandboxIds)) : {};
+            const shared = appleSubscriptions?.snapshot
+                ? await timeSubscription('membership', () => appleSubscriptions.snapshot(user, undefined, undefined, sandboxIds)) : null;
+            const membership = shared?.membership ?? await timeSubscription('membership', () => purchases.subscriptionStatus(user, sandboxIds));
+            const scopedUsage = shared?.usage ?? (appleSubscriptions
+                ? await timeSubscription('allowance', () => appleSubscriptions.usage(user, undefined, undefined, sandboxIds)) : {});
             return {
                 ...scopedUsage,
                 ...(sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),

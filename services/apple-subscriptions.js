@@ -179,23 +179,28 @@ function createAppleSubscriptions({
         const ids = user.appleSubscriptionIds || [];
         if (!ids.length) return null;
         if (!session) return transaction(inner => recordFor(user, inner, sandboxIds));
+        const read = () => timeSubscription('db.subscription.find', () =>
+            Subscription.find({ _id: { $in: ids } }).sort({ expiresAt: -1 }).session(session).lean());
+        let records = await read();
+        const existing = new Map(records.map(record => [record._id, record]));
+        let changed = false;
         for (const id of ids) {
             try {
-                const record = await subscriptionRecovery.ensure(id, session);
-                if (await timeSubscription('renewal_promotion', () => promoteRenewal(record, session)))
+                // One batch read covers ordinary polling. Missing records still
+                // use the confirmed recovery snapshot inside this transaction.
+                const record = existing.get(id) ?? await subscriptionRecovery.ensure(id, session);
+                if (!existing.has(id)) changed = true;
+                if (await timeSubscription('renewal_promotion', () => promoteRenewal(record, session))) {
                     await subscriptionRecovery.checkpoint(id, session);
+                    changed = true;
+                }
             } catch (error) { if (error.status !== 404) throw error; }
         }
-        const query = Subscription.find({ _id: { $in: ids } }).sort({
-            expiresAt: -1,
-        });
-        if (session) query.session(session);
-        const records = (await timeSubscription('db.subscription.find', () => query.lean())).filter(record => canUseAppleRecord(record, sandboxIds));
+        if (changed) records = await read();
+        records = records.filter(record => canUseAppleRecord(record, sandboxIds));
         return records.find((record) => active(record)) || records[0] || null;
     }
-    async function status(user, sandboxIds) {
-        if (!user.appleSubscriptionIds?.length) return null;
-        const record = await recordFor(user, undefined, sandboxIds);
+    function membershipFor(record, sandboxIds) {
         return {
             isPro: !!active(record),
             appleSubscriptionBound: true,
@@ -211,16 +216,35 @@ function createAppleSubscriptions({
             ...(record?.environment === 'Sandbox' ? { sandbox: true } : {}),
         };
     }
+    async function status(user, sandboxIds) {
+        if (!user.appleSubscriptionIds?.length) return null;
+        return membershipFor(await recordFor(user, undefined, sandboxIds), sandboxIds);
+    }
+    async function usageFor(user, record, config, timestamp, session) {
+        const target = record || (user.appleSubscriptionIds?.length ? { recoveryCode: user.recoveryCode } : user);
+        const ledger = await monthlyUsage(record, config, timestamp, session, GenerationRequest);
+        return {
+            ...(ledger ?? await requestHistoryUsage(target, config, timestamp, session, GenerationRequest)),
+            subscriptionIdentityVersion: 1,
+            appleSubscriptionBound: !!record,
+        };
+    }
     async function usage(user, config, timestamp = now(), sandboxIds) {
         config ??= await getAppConfig();
         return transaction(async session => {
             const record = await recordFor(user, session, sandboxIds);
-            const target = record || (user.appleSubscriptionIds?.length ? { recoveryCode: user.recoveryCode } : user);
-            const ledger = await monthlyUsage(record, config, timestamp, session, GenerationRequest);
+            return usageFor(user, record, config, timestamp, session);
+        });
+    }
+    async function snapshot(user, config, timestamp = now(), sandboxIds) {
+        // Non-Apple accounts continue through their existing provider lookup.
+        if (!user.appleSubscriptionIds?.length) return null;
+        config ??= await getAppConfig();
+        return transaction(async session => {
+            const record = await recordFor(user, session, sandboxIds);
             return {
-                ...(ledger ?? await requestHistoryUsage(target, config, timestamp, session, GenerationRequest)),
-                subscriptionIdentityVersion: 1,
-                appleSubscriptionBound: !!record,
+                membership: membershipFor(record, sandboxIds),
+                usage: await timeSubscription('allowance', () => usageFor(user, record, config, timestamp, session)),
             };
         });
     }
@@ -411,18 +435,18 @@ function createAppleSubscriptions({
         const decoded = await Promise.all(proofs.map((proof) => verify(proof)));
         // Keep proof order (including rollover and refunds), but share one wallet
         // read, commit and recovery checkpoint instead of repeating them per proof.
-        await transaction(async session => {
+        const user = await transaction(async session => {
             const user = await walletRecovery.ensure(code, session);
             const batch = { session, user, changed: new Set() };
             for (const payload of decoded) await savePayload(payload, code, batch);
             for (const id of batch.changed) await subscriptionRecovery.checkpoint(id, session);
-            await walletRecovery.checkpoint(code, session);
+            return walletRecovery.checkpoint(code, session);
         });
-        const user = await User.findOne({ recoveryCode: code }).lean();
+        const verified = await snapshot(user);
         return {
             success: true,
-            ...(await status(user)),
-            ...(await usage(user, await getAppConfig())),
+            ...(verified?.membership ?? await status(user)),
+            ...(verified?.usage ?? await usage(user, await getAppConfig())),
         };
     }
     async function webhook(event) {
@@ -577,7 +601,7 @@ function createAppleSubscriptions({
             payload.isUpgraded !== true
         ).map(payload => identity(payload.environment, payload.originalTransactionId)))];
     }
-    return { attach, status, usage, webhook, active, recordFor, resolveStoreKitScope, backfillTrialGrants };
+    return { attach, status, usage, snapshot, webhook, active, recordFor, resolveStoreKitScope, backfillTrialGrants };
 }
 module.exports = {
     canUseAppleRecord,

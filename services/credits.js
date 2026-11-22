@@ -467,6 +467,9 @@ function createCredits({
         grantPurchase: (code, ids, amount, source) => withWallet(code, () => grantPurchase(code, ids, amount, source)),
         claimAd: code => withWallet(code, () => claimAd(code)),
         byCode: code => withWallet(code, () => byCode(code)),
+        // Subscription polling does not mutate the wallet. Keep deletion checks
+        // and recovery, without rewriting an unchanged financial checkpoint.
+        readAccount: code => transactions.run(() => byCode(code)),
         ensureAccount: recovery.ensure,
         checkpointAccount: recovery.checkpoint,
         async backfill(code) { return withWallet(code, () => byCode(code)); },
