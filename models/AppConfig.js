@@ -139,6 +139,7 @@ const AppConfigSchema = new mongoose.Schema({
     generationBillingRequired: { type: Boolean, default: false },
     generationMediaPricing: {
         audioExtra: { type: Number, min: 1, max: 5, validate: Number.isSafeInteger },
+        audioLongExtra: { type: Number, min: 2, max: 6, validate: Number.isSafeInteger },
         narrationExtra: { type: Number, min: 1, max: 5, validate: Number.isSafeInteger },
         pdfPagesPerCredit: { type: Number, min: 1, max: 10, validate: Number.isSafeInteger },
     },

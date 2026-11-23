@@ -1,5 +1,6 @@
 const { monthlyUsage, reserveMonthly, settleMonthly } = require('./subscription-credit-ledger');
 const { generationUnits } = require('./media-note-billing');
+const { validateImageBatch } = require('./image-attachments');
 const { canUseAppleRecord } = require('./apple-subscriptions');
 const { requestHistoryUsage } = require('./subscription-usage');
 const { validateNarration } = require('./walkthrough');
@@ -26,7 +27,7 @@ const REQUEST_ID =
 const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'website', 'import', 'documents', 'video', 'location', 'calendar', 'sketch']);
 const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
 const PRO_SOURCES = new Set(['location', 'calendar', 'sketch']);
-const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'mediaCreditQuote', 'pdfEvidence']
+const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'mediaCreditQuote', 'pdfEvidence', 'additionalImages']
     .some(field => body?.[field] !== undefined);
 const requiresPro = (body) => PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
     (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));
@@ -36,6 +37,9 @@ function validateInput(endpoint, body) {
         throw new CreditError(400, 'Invalid AI request');
     if (Buffer.byteLength(JSON.stringify(body)) > 23 * 1024 * 1024)
         throw new CreditError(413, 'The source is too large');
+    if (body.additionalImages !== undefined && endpoint !== '/notes')
+        throw new CreditError(400, 'Image batches require an image note.');
+    validateImageBatch(body);
     if (body.billingMode !== undefined && !['free', 'purchased', ...(body.desktopMediaBilling === 1 || body.mobileMediaBilling === 1 ? ['mixed'] : [])].includes(body.billingMode))
         throw new CreditError(400, 'Invalid billing mode');
     const text = (value, max = 2000000) => {

@@ -756,7 +756,7 @@ test('desktop media charges two credits once and rejects oversize media before m
     assert.equal((await request(code, id, pdf)).body.billing.creditBalance.totalAvailable, 5);
     for (let i = 3; i < 11; i++) doc.addPage();
     assert.equal((await request(code, randomUUID(), { ...pdf, content: await doc.saveAsBase64() })).status, 400);
-    assert.equal((await request(code, randomUUID(), { type: 'voice', content: noteAudio(181), desktopMediaBilling: 1 })).status, 400);
+    assert.equal((await request(code, randomUUID(), { type: 'voice', content: noteAudio(301), desktopMediaBilling: 1 })).status, 400);
     const narration = { type: 'image', sourceKind: 'walkthrough', content: 'AAAA', narration: noteAudio(61), desktopMediaBilling: 1 };
     assert.equal((await request(code, randomUUID(), narration)).status, 400);
     assert.equal(calls, 1);
@@ -852,4 +852,44 @@ test('both client transports use configured media pricing and stale quotes reser
     }
     assert.equal(calls, 2);
     assert.equal((await credits.balance(code)).totalAvailable, 1);
+});
+
+function fiveImages() {
+    const image = Buffer.from('ffd8ffc00011080064006403011100021100031100ffd9', 'hex').toString('base64');
+    return { type: 'image', sourceKind: 'image', content: image, additionalImages: Array(4).fill(image),
+        desktopMediaBilling: 1, mediaCreditQuote: 3 };
+}
+
+test('five-image notes work without Pro, debit three once, and reject underquotes before charging', async t => {
+    const code = await account(), request = await api(t), body = fiveImages();
+    assert.equal((await request(code, randomUUID(), { ...body, mediaCreditQuote: 1 })).status, 409);
+    assert.equal((await request(code, randomUUID(), { ...body, desktopMediaBilling: undefined })).status, 426);
+    assert.equal(calls, 0);
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
+    const id = randomUUID(), first = await request(code, id, body);
+    assert.equal(first.status, 200); assert.equal(first.body.billing.creditCost, 3);
+    assert.equal((await request(code, id, body)).body.billing.creditBalance.totalAvailable, 4);
+    assert.equal(calls, 1);
+    const parallel = await Promise.all([request(code, randomUUID(), body), request(code, randomUUID(), body)]);
+    assert.deepEqual(parallel.map(result => result.status).sort(), [200, 402]);
+    assert.equal((await credits.balance(code)).totalAvailable, 1);
+    assert.equal(calls, 2);
+});
+
+test('five-minute audio verifies its quote and failure returns all three reserved Pro units', async t => {
+    const code = await account(), request = await api(t);
+    const audio = { type: 'voice', content: noteAudio(300), desktopMediaBilling: 1, mediaCreditQuote: 3 };
+    assert.equal((await request(code, randomUUID(), { ...audio, mediaCreditQuote: 2 })).status, 409);
+    assert.equal(calls, 0);
+    const result = await request(code, randomUUID(), audio);
+    assert.equal(result.status, 200); assert.equal(result.body.billing.creditCost, 3);
+    assert.equal((await credits.balance(code)).totalAvailable, 4);
+    member = { isPro: true }; config.subscriberDailyLimit = 6;
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    const { record } = await reserve(code, randomUUID(), fiveImages());
+    assert.equal(record.reservation.proUnits, 3);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 3);
+    await generation.finish(record._id, 500, { error: 'Provider failed' });
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 6);
+    assert.equal((await credits.balance(code)).totalAvailable, 4);
 });

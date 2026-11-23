@@ -369,6 +369,7 @@ const styleGuides = {
 // ==================== NOTES ENDPOINT ====================
 const { appendNarration } = require('./services/walkthrough');
 const { buildNotePrompt } = require('./services/note-prompts');
+const { noteImageParts } = require('./services/image-attachments');
 app.post('/api/notes', async (req, res) => {
     try {
         const { type, content, pdfEvidence, websiteText, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', sourceKind, isPro = false } = req.body;
@@ -404,9 +405,9 @@ app.post('/api/notes', async (req, res) => {
                 break;
             case 'image':
             case 'pdf':
-                result = await generate([promptFor(), {
-                    inlineData: { mimeType: type === 'pdf' ? 'application/pdf' : 'image/jpeg', data: content },
-                }]);
+                result = await generate([promptFor() + (req.body.additionalImages
+                    ? '\nUse all selected images, in their supplied order, to produce one coherent note. Preserve meaningful differences and avoid repeating overlapping content.' : ''),
+                    ...noteImageParts(req.body)]);
                 break;
             case 'voice':
                 result = await generate(promptFor(await transcribe(content, generationSignal())));
@@ -828,7 +829,7 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         // Explicitly normalized below so raw database copy cannot expand the consent UI.
-        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

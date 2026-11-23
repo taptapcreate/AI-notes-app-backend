@@ -1,5 +1,6 @@
 const { PDFDocument } = require('pdf-lib');
 const { CreditError } = require('./credit-policy');
+const { validateImageBatch } = require('./image-attachments');
 
 function generationMediaPricing(config) {
     const overrides = config?.generationMediaPricing;
@@ -9,15 +10,23 @@ function generationMediaPricing(config) {
             throw new CreditError(503, 'Media credit pricing is temporarily unavailable.');
         return value;
     };
+    const audioExtra = rate('audioExtra', 1, 5);
+    const audioLongExtra = rate('audioLongExtra', audioExtra + 1, 6);
+    if (audioLongExtra <= audioExtra)
+        throw new CreditError(503, 'Media credit pricing is temporarily unavailable.');
     return {
-        audioExtra: rate('audioExtra', 1, 5),
+        audioExtra,
+        audioLongExtra,
         narrationExtra: rate('narrationExtra', 1, 5),
         pdfPagesPerCredit: rate('pdfPagesPerCredit', 3, 10),
     };
 }
 
 function validatePCM(value, seconds) {
-    const error = new CreditError(400, `Choose an audio recording of ${seconds === 60 ? '60 seconds' : '3 minutes'} or less.`);
+    const label = seconds === 60 ? '60 seconds' : `${seconds / 60} minutes`;
+    const error = new CreditError(400, `Choose an audio recording of ${label} or less.`);
+    if (typeof value !== 'string' || value.length > Math.ceil((44 + seconds * 32000) / 3) * 4 ||
+        value.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) throw error;
     const data = Buffer.from(value, 'base64');
     const length = data.length - 44;
     // The desktop encodes 16 kHz, mono, signed 16-bit PCM with a single data chunk.
@@ -30,6 +39,17 @@ function validatePCM(value, seconds) {
         data.readUInt32LE(28) !== 32000 || data.readUInt16LE(32) !== 2 ||
         data.readUInt16LE(34) !== 16 || data.toString('ascii', 36, 40) !== 'data' ||
         data.readUInt32LE(40) !== length) throw error;
+    return length / 32000;
+}
+
+function isPreparedPCM(value) {
+    if (typeof value !== 'string' || !value.startsWith('UklGR')) return false;
+    const header = Buffer.from(value.slice(0, 60), 'base64');
+    return header.length >= 44 && header.toString('ascii', 8, 16) === 'WAVEfmt ' &&
+        header.readUInt32LE(16) === 16 && header.readUInt16LE(20) === 1 &&
+        header.readUInt16LE(22) === 1 && header.readUInt32LE(24) === 16000 &&
+        header.readUInt32LE(28) === 32000 && header.readUInt16LE(32) === 2 &&
+        header.readUInt16LE(34) === 16 && header.toString('ascii', 36, 40) === 'data';
 }
 
 function validatePdfEvidence(endpoint, body) {
@@ -56,8 +76,16 @@ function validatePdfEvidence(endpoint, body) {
 
 async function generationUnits(endpoint, body, config) {
     validatePdfEvidence(endpoint, body);
+    validateImageBatch(body);
     const desktop = body.desktopMediaBilling !== undefined;
     const mobile = body.mobileMediaBilling !== undefined;
+    if (body.additionalImages !== undefined &&
+        (body.desktopMediaBilling !== 1 || mobile || body.mediaCreditQuote === undefined))
+        throw new CreditError(426, 'Update AI Notes to use image-batch credit pricing.');
+    const pcmDuration = body.type === 'voice' && (desktop || (!mobile && isPreparedPCM(body.content)))
+        ? validatePCM(body.content, 300) : null;
+    if (pcmDuration > 180 && (body.desktopMediaBilling !== 1 || body.mediaCreditQuote === undefined))
+        throw new CreditError(426, 'Update AI Notes to use recordings longer than 3 minutes.');
     if (body.mediaCreditQuote !== undefined &&
         (endpoint !== '/notes' || (!desktop && !mobile) || body.type === 'pdf' ||
             !Number.isSafeInteger(body.mediaCreditQuote)))
@@ -76,6 +104,8 @@ async function generationUnits(endpoint, body, config) {
                 { code: 'CREDIT_QUOTE_CHANGED' });
         return units;
     };
+    if (body.additionalImages !== undefined)
+        return verifyQuote(1 + Math.ceil(body.additionalImages.length / 2));
     if (body.type === 'pdf') {
         let pages;
         try {
@@ -98,10 +128,9 @@ async function generationUnits(endpoint, body, config) {
         return units;
     }
     if (body.type === 'voice') {
-        if (desktop) validatePCM(body.content, 180);
-        else if (Buffer.byteLength(body.content, 'base64') > 15 * 1024 * 1024)
+        if (!desktop && Buffer.byteLength(body.content, 'base64') > 15 * 1024 * 1024)
             throw new CreditError(400, 'Choose an audio file up to 15 MB.');
-        return verifyQuote(1 + pricing.audioExtra);
+        return verifyQuote(1 + (desktop && pcmDuration > 180 ? pricing.audioLongExtra : pricing.audioExtra));
     }
     if (desktop && body.sourceKind === 'walkthrough' && body.narration) {
         validatePCM(body.narration, 60);
