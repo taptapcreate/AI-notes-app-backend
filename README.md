@@ -28,6 +28,9 @@ npm start
 
 ## API Endpoints
 
+Desktop consent providers and short privacy copy are configurable in the
+existing master configuration; see [processing disclosure](docs/processing-disclosure.md).
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/notes` | POST | Generate notes from text, images, voice, PDFs, websites, and YouTube transcripts |

@@ -18,6 +18,16 @@ const PlatformBillingSchema = new mongoose.Schema({
 }, { _id: false });
 
 const AppConfigSchema = new mongoose.Schema({
+    // Public consent copy only; changing these fields does not change AI routing or retention.
+    processingDisclosure: {
+        type: new mongoose.Schema({
+            providers: { type: [{ type: String, trim: true, maxlength: 40 }], default: undefined },
+            cloudPdfProviders: { type: [{ type: String, trim: true, maxlength: 40 }], default: undefined },
+            recoveryMessage: { type: String, trim: true, maxlength: 140 },
+            details: { type: String, trim: true, maxlength: 180 },
+        }, { _id: false }),
+        default: undefined,
+    },
     key: {
         type: String,
         required: true,
