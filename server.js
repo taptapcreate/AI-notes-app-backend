@@ -4,7 +4,6 @@ const OpenAI = require('openai');
 const { MODEL, InvalidSource, createOpenRouter } = require('./services/openrouter');
 const mongoose = require('mongoose');
 const axios = require('axios');
-const cheerio = require('cheerio');
 const { cleanSourceText, websiteText } = require('./services/source-cleanup');
 const { YoutubeTranscript } = require('youtube-transcript');
 const { Expo } = require('expo-server-sdk');
@@ -211,41 +210,7 @@ const fetchWebsiteContent = async (url, fallbackText = '') => {
     }
 };
 
-// Helper: Manual Transcript Fetch (Fallback)
-const fetchManualTranscript = async (videoId) => {
-    try {
-        const { data } = await axios.get(`https://www.youtube.com/watch?v=${videoId}`, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }
-        });
-
-        const regex = /"captionTracks":(\[.*?\])/;
-        const match = regex.exec(data);
-        if (!match) return null;
-
-        const tracks = JSON.parse(match[1]);
-        // Prefer English, fallback to first available
-        const track = tracks.find(t => t.languageCode === 'en') || tracks[0];
-
-        if (!track) return null;
-
-        const { data: transcriptXml } = await axios.get(track.baseUrl);
-        const $ = cheerio.load(transcriptXml, { xmlMode: true });
-
-        let text = '';
-        $('text').each((i, el) => {
-            text += $(el).text() + ' ';
-        });
-
-        // Clean up HTML entities
-        return text.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').trim();
-    } catch (error) {
-        console.error('Manual scraping failed:', error.message);
-        return null;
-    }
-};
+const fetchManualTranscript = require('./services/youtube-manual-transcript').createManualTranscript({ http: axios });
 
 // Helper: Fetch YouTube Transcript
 const fetchYouTubeTranscript = async (url) => {
@@ -280,7 +245,7 @@ const fetchYouTubeTranscript = async (url) => {
         // Fallback to manual scraping if library failed
         if (!transcript || transcript.trim().length === 0) {
             console.log('[DEBUG] Trying manual fallback...');
-            const manualTranscript = await fetchManualTranscript(videoId);
+            const manualTranscript = await fetchManualTranscript(videoId, { signal: generationSignal() });
             if (manualTranscript) {
                 transcript = manualTranscript;
             }
@@ -292,6 +257,7 @@ const fetchYouTubeTranscript = async (url) => {
 
         return transcript.substring(0, 15000); // Limit context window (Optimized from 25k)
     } catch (error) {
+        generationSignal()?.throwIfAborted();
         if (error.message.includes('YOUTUBE_BLOCK')) throw error;
         throw new Error(`Failed to fetch YouTube transcript: ${error.message}`);
     }

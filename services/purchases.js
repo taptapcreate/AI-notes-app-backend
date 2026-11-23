@@ -1,4 +1,5 @@
 const { CreditError } = require('./credit-policy');
+const { createHash } = require('node:crypto');
 const { appleVerifier, BUNDLE_ID } = require('./apple-subscriptions');
 
 const CREDIT_PACK_PRODUCTS = Object.freeze({
@@ -71,7 +72,9 @@ function purchaseAliases(product, purchase) {
 }
 
 const { timeSubscriptionOperation: timeSubscription } = require('./subscription-timing');
-function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions, verifyApple, applePackCutover = appleCreditPackCutover(), resolvePackAmount = (product, purchase) => creditPackAmount(product, purchase, applePackCutover) }) {
+function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSubscriptions, verifyApple, now = Date.now, applePackCutover = appleCreditPackCutover(), resolvePackAmount = (product, purchase) => creditPackAmount(product, purchase, applePackCutover) }) {
+    const routineSyncs = new Map();
+    const routineKey = user => createHash('sha256').update(user.recoveryCode).digest('hex');
     async function customer(user, { required = false } = {}) {
         if (!apiKey) {
             if (required)
@@ -163,7 +166,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
         }
         return sandboxMembership || { isPro: false };
     }
-    async function sync(user, options = {}) {
+    async function reconcile(user, options = {}) {
         const subscriber = await customer(user, options);
         if (!subscriber) return { synced: 0, credits: 0 };
         const purchases = subscriber.non_subscriptions;
@@ -229,7 +232,40 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
         }
         return { synced, credits: amount, ...(expected ? { purchase: confirmation } : {}) };
     }
+    function invalidateRoutine(user) {
+        routineSyncs.delete(routineKey(user));
+    }
+    // Only passive balance polling uses this window. Never cache balances, membership,
+    // failures, or explicit purchase/restore checks.
+    function syncRoutine(user) {
+        const key = routineKey(user);
+        const existing = routineSyncs.get(key);
+        if (existing?.pending) return existing.pending;
+        if (existing?.until > now()) return Promise.resolve({ synced: 0, credits: 0 });
+        for (const [id, entry] of routineSyncs)
+            if (!entry.pending && entry.until <= now()) routineSyncs.delete(id);
+        if (routineSyncs.size >= 512 && !routineSyncs.has(key))
+            return reconcile(user);
+        const entry = {};
+        routineSyncs.set(key, entry);
+        entry.pending = Promise.resolve().then(() => reconcile(user)).then(result => {
+            if (routineSyncs.get(key) === entry) {
+                entry.pending = null;
+                entry.until = now() + 30000;
+            }
+            return result;
+        }, error => {
+            if (routineSyncs.get(key) === entry) routineSyncs.delete(key);
+            throw error;
+        });
+        return entry.pending;
+    }
+    async function sync(user, options = {}) {
+        invalidateRoutine(user);
+        return reconcile(user, options);
+    }
     async function confirmApple(user, signed, expected) {
+        invalidateRoutine(user);
         verifyApple ||= appleVerifier();
         const proof = await verifyApple(signed);
         if (!Object.hasOwn(CREDIT_PACK_PRODUCTS, proof.productId) || proof.bundleId !== BUNDLE_ID || proof.type !== 'Consumable' ||
@@ -251,7 +287,7 @@ function createPurchases({ credits, axios, apiKey, allowSandbox = false, appleSu
             credits: confirmedPackAmount(result, aliases, amount), alreadyProcessed: !result.applied, sandbox: proof.environment === 'Sandbox',
         } };
     }
-    return { sync, subscriptionStatus, confirmApple };
+    return { sync, syncRoutine, subscriptionStatus, confirmApple };
 }
 
 module.exports = { createPurchases, CREDIT_PACK_PRODUCTS, creditPackAmount, appleCreditPackCutover, purchaseAliases };

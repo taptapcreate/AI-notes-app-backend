@@ -5,11 +5,12 @@ const id = 'ai_notes_lite_pack_credits';
 
 function setup() {
     const records = new Map();
+    const reads = [];
     let config = {};
     let time = new Date('2026-11-17T12:00:00Z');
     const copy = value => structuredClone(value);
     const History = {
-        findById(key) { return { async lean() { return copy(records.get(key)); } }; },
+        findById(key) { reads.push(key); return { async lean() { return copy(records.get(key)); } }; },
         async updateOne(query, update) {
             if (!records.has(query._id)) records.set(query._id, copy({ _id: query._id, ...update.$setOnInsert }));
         },
@@ -24,10 +25,23 @@ function setup() {
         },
     };
     return {
-        service: createCreditPackCatalog({ History, getAppConfig: async () => config, now: () => time }), records,
+        service: createCreditPackCatalog({ History, getAppConfig: async () => config, now: () => time }), records, reads,
         change(credits) { config = { creditPacks: { amounts: { [id]: credits } } }; time = new Date(time.getTime() + 60000); },
     };
 }
+
+test('public catalog reads Apple history once and observes the next configuration change', async () => {
+    const h = setup();
+    await h.service.publicCatalog();
+    h.reads.length = 0;
+    const first = await h.service.publicCatalog();
+    assert.deepEqual(h.reads.sort(), ['android', 'apple', 'windows']);
+    assert.deepEqual(first.platforms.ios, first.platforms.macos);
+    h.change(35);
+    const next = await h.service.publicCatalog();
+    assert.equal(next.platforms.ios.credits[id], 35);
+    assert.equal(next.platforms.macos.credits[id], 35);
+});
 
 test('current Apple catalog and verified purchase grants use the same server quantity', async () => {
     const { service } = setup();

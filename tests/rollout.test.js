@@ -194,7 +194,7 @@ test('the real application boots and mounts fixed routes without AI or external 
         });
         const rejected = await blocked.json();
         assert.equal(blocked.status, 502, rejected.error);
-        assert.match(rejected.error, /^WEB_ACCESS_BLOCKED:/);
+        assert.match(rejected.error, path === 'blocked' ? /^WEB_ACCESS_RESTRICTED:/ : /^WEB_ACCESS_UNAVAILABLE:/);
         assert.equal(rejected.billing.charged, false);
         assert.equal(rejected.billing.creditBalance.credits, 50);
         assert.equal((await User.findOne({ recoveryCode: 'DAILYAAA' })).credits, 50);

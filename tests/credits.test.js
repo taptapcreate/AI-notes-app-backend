@@ -60,6 +60,58 @@ beforeEach(async () => {
 });
 const register = (deviceId = 'device-1') => credits.register({ platform: 'ios', deviceId });
 
+test('routine balance reads fresh counters with fewer database operations and no unchanged checkpoint writes', async t => {
+    const { recoveryCode: code } = await register();
+    await credits.balance(code);
+    time = new Date(time.getTime() + 60000);
+    const before = await User.findOne({ recoveryCode: code }).lean();
+    const backup = await AccountRecovery.findOne({ identity: code }).lean();
+    const operations = [];
+    const debug = mongoose.get('debug');
+    try {
+        mongoose.set('debug', (collection, method) => operations.push(collection + '.' + method));
+        await credits.byCode(code); await credits.balance(code);
+        const legacyOperations = operations.length;
+        operations.length = 0;
+        await credits.readAccount(code);
+        const result = await credits.refreshBalance(code);
+        t.diagnostic(`Repeated balance polling: ${legacyOperations} → ${operations.length} model operations; no latency claim.`);
+        assert.equal(result.totalAvailable, 7);
+        assert.ok(operations.length < legacyOperations, 'ordinary refresh performs fewer DB operations');
+        assert.ok(!operations.some(label => /update|replace|insert/i.test(label)));
+    } finally { mongoose.set('debug', debug); }
+    // The comparison above deliberately used the old path, which writes activity.
+    const current = await User.findOne({ recoveryCode: code }).lean();
+    const currentBackup = await AccountRecovery.findOne({ identity: code }).lean();
+    time = new Date(time.getTime() + 60000);
+    await credits.refreshBalance(code);
+    assert.deepEqual(await User.findOne({ recoveryCode: code }).lean(), current);
+    assert.deepEqual(await AccountRecovery.findOne({ identity: code }).lean(), currentBackup);
+    assert.equal(current.credits, before.credits);
+    assert.equal(currentBackup.snapshot.credits, backup.snapshot.credits);
+    await credits.grantPurchase(code, ['refresh-payment'], 20, 'test');
+    assert.equal((await credits.refreshBalance(code)).totalAvailable, 27);
+    await credits.use(code, 1);
+    assert.equal((await credits.refreshBalance(code)).totalAvailable, 26);
+});
+
+test('routine refresh checkpoints infrequent activity updates, recovers accounts and applies daily rollover once', async () => {
+    const { recoveryCode: code } = await register();
+    await credits.balance(code);
+    time = new Date(time.getTime() + 300001);
+    await credits.refreshBalance(code);
+    assert.equal((await User.findOne({ recoveryCode: code })).lastActive.getTime(), time.getTime());
+    const backup = await AccountRecovery.findOne({ identity: code }).lean();
+    assert.equal(backup.snapshot.lastActive.getTime(), time.getTime());
+    await credits.use(code, 3);
+    await User.deleteOne({ recoveryCode: code });
+    assert.equal((await credits.refreshBalance(code)).totalAvailable, 4);
+    config.dailyFreeCreditsEnabled = true; config.freeDailyCredits = 3;
+    time = new Date(time.getTime() + 86400000);
+    const results = await Promise.all([credits.refreshBalance(code), credits.refreshBalance(code)]);
+    assert.deepEqual(results.map(value => value.freeCreditsRemaining), [3, 3]);
+});
+
 test('receipt reads fresh counters without rewriting an initialized wallet or recovery checkpoint', async () => {
     const { recoveryCode: code } = await register();
     await credits.use(code, 2);

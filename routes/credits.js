@@ -47,13 +47,13 @@ function createCreditRouter({ credits, purchases, appleSubscriptions, logger = c
     router.get(
         '/balance/:code',
         endpoint(async (req) => {
-            const user = await credits.byCode(req.params.code);
+            const user = await subscriptionAccount(req.params.code);
             try {
-                await purchases.sync(user);
+                await (purchases.syncRoutine ? purchases.syncRoutine(user) : purchases.sync(user));
             } catch (error) {
                 logger.warn('Purchase sync deferred:', error.message);
             }
-            return credits.balance(user.recoveryCode);
+            return credits.refreshBalance ? credits.refreshBalance(user.recoveryCode) : credits.balance(user.recoveryCode);
         }),
     );
     router.post('/apple-subscription', rateLimit({ windowMs: 60000, limit: 60, standardHeaders: true, legacyHeaders: false }), endpoint(async req => {

@@ -1,5 +1,46 @@
 # Generation latency improvements
 
+## Routine balance refresh and source fallback (2026-11-23)
+
+The balance endpoint now uses a deletion-checked account lookup and a fresh
+wallet snapshot. Initialized wallets skip redundant initialization and recovery
+checkpoint writes. Missing wallets, legacy welcome grants, and daily rollover
+retain the existing transactional path. Activity timestamps are checkpointed at
+most once per five minutes during routine polling, in the same transaction as
+the timestamp update. Generation receipts keep their read-only behavior.
+
+Passive purchase reconciliation is shared for concurrent polls of the same
+account and reused for 30 seconds after success. This process-local map has at
+most 512 entries, hashes account identifiers, and retains no wallet balance,
+membership, or generated content. Failures are not cached. Explicit purchase
+checks, signed Apple consumables, and restores bypass and invalidate passive
+reuse; subscription authorization always remains fresh. A first poll after the
+window can still wait for the existing provider timeout. Passive discovery of a
+purchase on another device may wait until the next eligible poll; explicit
+verification and webhooks remain immediate.
+
+Public catalog reads now share one Apple history lookup between iOS and macOS.
+There is no cross-request configuration cache: the next request still reads
+current settings and historical receipts keep their original credit amounts.
+
+Both HTTP calls in the manual YouTube transcript fallback have ten-second
+timeouts, a shared twenty-second deadline, a response-size cap, and generation
+cancellation. This bounds the manual fallback only; the primary transcript
+library is unchanged.
+
+Isolated MongoDB tests counted 17 model operations for the previous balance
+lookup + refresh path versus 4 for the new account lookup + refresh path on an
+initialized non-Apple wallet within the activity window. Public catalog tests
+counted 4 history reads previously versus 3 now. These are operation counts,
+not production latency measurements. Tests cover current balances after
+spending/purchases, account recovery, daily rollover, purchase-check failures,
+overlapping explicit checks, and timeout/cancellation behavior.
+
+Deployment requires only pushing/deploying this backend revision. No desktop
+build, production database edits, provider/model changes, or new environment
+settings are required. Database index changes remain deferred until query
+diagnostics justify them.
+
 ## Observations
 
 Public production GET requests during this investigation returned health in 0.464 s and 0.325 s, and config in 0.809 s. These samples indicate a responsive server at that moment; they do not measure model time, authenticated credit checks or cold starts. No production AI calls or user credits were used to benchmark these changes.

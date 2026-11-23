@@ -197,27 +197,38 @@ function createCredits({
         };
     }
 
-    async function receiptBalance(value, sandboxIds, requestConfig) {
+    async function receiptBalance(value, sandboxIds, requestConfig, recordActivity = false) {
         const code = recoveryCode(value);
         const config = requestConfig ?? await getAppConfig();
         const rules = policy(config);
-        // Generation has already reserved/settled credits and checkpointed all mutations.
-        // A receipt needs fresh counters, not another allowance migration, activity write,
-        // and wallet checkpoint. Keep deletion checks and a consistent wallet read.
+        // A receipt or routine refresh needs fresh counters, not another unchanged
+        // allowance migration and checkpoint. Activity is recorded at most once per
+        // five minutes for polling; receipts remain read-only for initialized wallets.
+        const initialized = (user, timestamp) => {
+            const midnight = new Date(timestamp); midnight.setUTCHours(0, 0, 0, 0);
+            const reset = new Date(user?.lastFreeCreditsReset || 0).getTime();
+            return user &&
+                (user.welcomePackVersion == null || (Number.isSafeInteger(user.welcomePackVersion) && user.welcomePackVersion >= 0)) &&
+                (rules.daily ? reset >= midnight.getTime() && reset < midnight.getTime() + 86400000
+                    : Boolean(user.welcomeGrantClaimedAt));
+        };
         const user = await transactions.run(async () => {
             await recovery.assertRecoverable(code, transactions.session());
-            return User.findOne({ recoveryCode: code }).lean();
+            const account = await User.findOne({ recoveryCode: code }).lean();
+            const timestamp = now();
+            if (recordActivity && initialized(account, timestamp)) {
+                const lastActive = new Date(account.lastActive || 0).getTime();
+                if (!Number.isFinite(lastActive) || lastActive <= timestamp.getTime() - 300000 || lastActive > timestamp.getTime()) {
+                    await User.updateOne({ _id: account._id }, { $set: { lastActive: timestamp } });
+                    await recovery.checkpoint(code, transactions.session());
+                }
+            }
+            return account;
         });
-        const timestamp = now();
-        const midnight = new Date(timestamp); midnight.setUTCHours(0, 0, 0, 0);
-        const reset = new Date(user?.lastFreeCreditsReset || 0).getTime();
-        const initialized = user &&
-            (user.welcomePackVersion == null || (Number.isSafeInteger(user.welcomePackVersion) && user.welcomePackVersion >= 0)) &&
-            (rules.daily ? reset >= midnight.getTime() && reset < midnight.getTime() + 86400000
-                : Boolean(user.welcomeGrantClaimedAt));
         // Missing/recoverable accounts, legacy grants and a UTC rollover still take the
         // original transactional initialization path. Nothing is inferred from a cache.
-        if (!initialized) return withWallet(code, () => getBalance(code, sandboxIds, config));
+        const timestamp = now();
+        if (!initialized(user, timestamp)) return withWallet(code, () => getBalance(code, sandboxIds, config));
         return { ...balance(user, rules), ...await subscriptionUsageFor(user, config, timestamp, sandboxIds) };
     }
 
@@ -462,6 +473,7 @@ function createCredits({
         balance: (code, sandboxIds, requestConfig) =>
             withWallet(code, () => getBalance(code, sandboxIds, requestConfig)),
         receiptBalance,
+        refreshBalance: (code, sandboxIds, requestConfig) => receiptBalance(code, sandboxIds, requestConfig, true),
         use: (code, amount) => withWallet(code, () => use(code, amount)),
         recover: (code, currentCode) => withWallet(code, () => recover(code, currentCode)),
         grantPurchase: (code, ids, amount, source) => withWallet(code, () => grantPurchase(code, ids, amount, source)),

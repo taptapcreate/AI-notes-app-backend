@@ -69,8 +69,13 @@ function createCreditPackCatalog({ History, getAppConfig, now = () => new Date()
         return [...state.revisions].reverse().find(entry => new Date(entry.effectiveAt).getTime() <= time)?.credits[product];
     }
     async function publicCatalog(config) {
-        const entries = await Promise.all(PLATFORMS.map(async platform => [platform, await current(platform, config)]));
-        return { version: 1, platforms: Object.fromEntries(entries) };
+        config ??= await getAppConfig();
+        const [apple, android, windows] = await Promise.all(
+            ['ios', 'android', 'windows'].map(platform => current(platform, config)),
+        );
+        return { version: 1, platforms: {
+            ios: apple, macos: { ...apple, credits: { ...apple.credits } }, android, windows,
+        } };
     }
     return { current, amount, publicCatalog };
 }
