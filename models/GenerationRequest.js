@@ -8,7 +8,7 @@ const schema = new mongoose.Schema({
     bodyHash: { type: String, required: true },
     state: {
         type: String,
-        enum: ['pending', 'succeeded', 'failed'],
+        enum: ['pending', 'succeeded', 'unchanged', 'failed'],
         required: true,
     },
     reservation: { type: mongoose.Schema.Types.Mixed, required: true },

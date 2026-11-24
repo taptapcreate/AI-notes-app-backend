@@ -899,20 +899,20 @@ test('five-minute audio verifies its quote and failure returns all three reserve
     assert.equal((await credits.balance(code)).totalAvailable, 4);
 });
 
-const reviewBody = { type: 'note', writingReviewVersion: 1, context: JSON.stringify({ task: 'writing-review-grammar', segments: [{ id: 's0', text: 'This is correct.' }] }), question: 'Review grammar' };
-test('a no-change writing review uses one allowance and replays without another debit', async t => {
+const reviewBody = { type: 'note', writingReviewVersion: 1, writingReviewPolicyVersion: 2, context: JSON.stringify({ task: 'writing-review-grammar', segments: [{ id: 's0', text: 'This is correct.' }] }), question: 'Review grammar' };
+test('a no-change writing review releases its allowance and replays without another debit', async t => {
     member = { isPro: true };
     const code = await account(), id = randomUUID();
     const request = await api(t);
     const result = await request(code, id, reviewBody, '/api/followup');
     assert.equal(result.status, 200);
-    assert.equal(result.body.billing.charged, true);
+    assert.equal(result.body.billing.charged, false);
     assert.deepEqual(JSON.parse(result.body.response), { edits: [] });
-    assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 0);
     const again = await request(code, id, reviewBody, '/api/followup');
     assert.equal(again.status, 200);
     assert.equal(calls, 1);
-    assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 0);
 });
 test('unusable writing reviews refund the allowance before returning and retrying does not charge again', async t => {
     member = { isPro: true };
@@ -989,4 +989,52 @@ test('Book Studio failures restore a partial Pro allowance plus wallet fallback 
     const restored=await credits.balance(code);
     assert.equal(restored.totalAvailable,7);
     assert.equal(restored.subscriberDailyRemaining,1);
+});
+
+
+test('unchanged and identical-edit reviews return wallet credits once; useful polish still charges once', async t => {
+    member = { isPro: true };
+    for (const edits of [[], [{ id: 's0', text: 'This is correct.' }]]) {
+        const code = await account(), id = randomUUID();
+        await User.updateOne({ recoveryCode: code }, { $set: { credits: 5, dailyRequestCount: 2, lastRequestReset: time } });
+        const before = await credits.balance(code);
+        const request = await api(t, (_, res) => res.json({ response: JSON.stringify({ edits }) }));
+        const result = await request(code, id, { ...reviewBody, billingMode: 'purchased' }, '/api/followup');
+        assert.equal(result.status, 200);
+        assert.equal(result.body.billing.charged, false);
+        assert.equal(result.body.billing.totalCreditCost, 0);
+        assert.equal((await credits.byCode(code)).dailyRequestCount, 2);
+        assert.equal((await credits.byCode(code)).credits, 5);
+        assert.equal((await credits.balance(code)).totalAvailable, before.totalAvailable);
+        await request(code, id, { ...reviewBody, billingMode: 'purchased' }, '/api/followup');
+        assert.equal((await credits.balance(code)).totalAvailable, before.totalAvailable);
+    }
+    member = { isPro: true };
+    const code = await account();
+    const request = await api(t, (_, res) => res.json({ response: JSON.stringify({ edits: [{ id: 's0', text: 'This wording is clear.' }] }) }));
+    const result = await request(code, randomUUID(), reviewBody, '/api/followup');
+    assert.equal(result.body.billing.charged, true);
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
+});
+
+
+test('unchanged reviews do not reappear as usage when counters are reconstructed from request history', async t => {
+    member = { isPro: true };
+    const code = await account();
+    config.billingControls = { usePrimarySubscriptionTracking: false };
+    const request = await api(t);
+    const result = await request(code, randomUUID(), reviewBody, '/api/followup');
+    assert.equal(result.body.billing.charged, false);
+    assert.equal((await credits.balance(code)).subscriberDailyUsage, 0);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 2);
+});
+
+test('older review clients retain their original receipt contract until upgraded', async t => {
+    member = { isPro: true };
+    const code = await account();
+    const { writingReviewPolicyVersion, ...legacy } = reviewBody;
+    const request = await api(t);
+    const result = await request(code, randomUUID(), legacy, '/api/followup');
+    assert.equal(result.status, 200);
+    assert.equal(result.body.billing.charged, true);
 });

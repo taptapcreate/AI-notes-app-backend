@@ -236,7 +236,7 @@ function createGeneration({
         }
         return code;
     }
-    async function finish(id, status, result) {
+    async function finish(id, status, result, unchangedReview = false) {
         return transaction(async (session) => {
             const record = await GenerationRequest.findById(id)
                 .session(session)
@@ -249,15 +249,17 @@ function createGeneration({
                     error: 'The AI request expired. Your credit was returned; please try again.',
                 };
             }
+            // A validated review with no useful edits is retained for replay, but its reservation is released.
+            const billable = status < 400 && !unchangedReview;
             const held = record.reservation;
             let subscription;
-            if (held.ledger || (status >= 400 && held.subscriptionId)) {
+            if (held.ledger || (!billable && held.subscriptionId)) {
                 try { subscription = await subscriptionRecovery.ensure(held.subscriptionId, session); }
                 catch (error) { if (error.status !== 404) throw error; }
             }
             if (held.ledger)
-                await settleMonthly(held.ledger, id, status < 400, subscription, now(), session);
-            if (status >= 400) {
+                await settleMonthly(held.ledger, id, billable, subscription, now(), session);
+            if (!billable) {
                 if (!held.subscriptionId || held.free || held.ad || held.paid)
                     await credits.ensureAccount(record.recoveryCode, session);
                 if (held.pro && !held.ledger) {
@@ -287,7 +289,7 @@ function createGeneration({
                     );
                 }
             }
-            if (status >= 400) {
+            if (!billable) {
                 if (record.reservation.subscriptionId) {
                     if (await Subscription.exists({ _id: record.reservation.subscriptionId }).session(session))
                         await subscriptionRecovery.checkpoint(record.reservation.subscriptionId, session);
@@ -299,7 +301,7 @@ function createGeneration({
                 { _id: id, state: 'pending' },
                 {
                     $set: {
-                        state: status >= 400 ? 'failed' : 'succeeded',
+                        state: status >= 400 ? 'failed' : unchangedReview ? 'unchanged' : 'succeeded',
                         result,
                         httpStatus: status,
                         expiresAt: new Date(now().getTime() + 86400000),
@@ -534,6 +536,7 @@ function createGeneration({
                 ...(record.reservation.sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),
                 requestId: record.requestId,
                 charged: succeeded,
+                ...(record.state === 'unchanged' && { noChargeReason: 'unchanged-writing-review' }),
                 creditCost: walletCost,
                 subscriptionCreditCost: subscriptionCost,
                 totalCreditCost: walletCost + subscriptionCost,
@@ -555,7 +558,7 @@ function createGeneration({
         let timer, stream;
         const abort = new AbortController();
         let finishing = false;
-        const complete = async (status, value, id) => {
+        const complete = async (status, value, id, unchangedReview = false) => {
             if (finishing) return;
             finishing = true;
             if (status >= 400) abort.abort();
@@ -570,7 +573,7 @@ function createGeneration({
                     }), finalizationMs: Math.round(elapsed) }); } catch { /* Diagnostics cannot lose a paid result. */ }
             };
             try {
-                const record = await finish(id, status, value);
+                const record = await finish(id, status, value, unchangedReview);
                 status = record.httpStatus;
                 settlementMs = performance.now() - finalizationStarted;
                 const body = await response(record);
@@ -634,7 +637,13 @@ function createGeneration({
                         error: 'The AI server returned an empty or invalid result. Your credit was returned.',
                     };
                 }
-                void complete(status, value, record._id);
+                let unchangedReview = false;
+                if (status < 400 && endpoint === '/followup' && req.body.writingReviewPolicyVersion === 2) {
+                    const review = reviewContext(req.body);
+                    if (review) unchangedReview = reviewResult(value.response, review).edits.every(edit =>
+                        edit.text.trim() === review.segments.find(segment => segment.id === edit.id).text.trim());
+                }
+                void complete(status, value, record._id, unchangedReview);
                 return res;
             };
             timer = setTimeout(
