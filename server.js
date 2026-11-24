@@ -36,6 +36,7 @@ const AppConfig = require('./models/AppConfig');
 const { noteOutputLimit, initializeNoteOutputLimits } = require('./services/note-output-limits');
 const { releaseConfig } = require('./services/release-config');
 const { processingDisclosure } = require('./services/processing-disclosure');
+const { helpSupport, initializeHelpSupport } = require('./services/help-support');
 const { publicMaintenance, createMaintenanceGate } = require('./services/maintenance');
 
 const CreditRegistration = require('./models/CreditRegistration');
@@ -97,6 +98,7 @@ const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: 
             ['credit packs', () => require('./services/credit-pack-catalog').initializeCreditPacks(AppConfig)],
             ['credit pack catalog', async () => creditPackCatalog.publicCatalog(await getAppConfig())],
             ['subscription credit ledger', () => require('./services/subscription-credit-ledger').initializeLedger()],
+            ['help support', () => initializeHelpSupport(AppConfig)],
             ['note output limits', () => initializeNoteOutputLimits(AppConfig)],
             ['subscription controls', () => initializeSubscriptionControls(AppConfig)],
             ['subscription rollover', () => require('./services/subscription-credit-policy').initializeSubscriptionRollover(AppConfig)],
@@ -831,7 +833,7 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         // Explicitly normalized below so raw database copy cannot expand the consent UI.
-        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, bookSuggestionsVersion: 1, writingReviewVersion: 1, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), helpSupport: helpSupport(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, bookSuggestionsVersion: 1, writingReviewVersion: 1, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

@@ -18,6 +18,17 @@ const PlatformBillingSchema = new mongoose.Schema({
 }, { _id: false });
 
 const AppConfigSchema = new mongoose.Schema({
+    // Public Help & FAQ support card. Operators can change it without releasing a desktop build.
+    helpSupport: {
+        type: new mongoose.Schema({
+            enabled: { type: Boolean, default: false },
+            title: { type: String, trim: true, maxlength: 80 },
+            message: { type: String, trim: true, maxlength: 600 },
+            buttonLabel: { type: String, trim: true, maxlength: 40 },
+            url: { type: String, trim: true, maxlength: 2048 },
+        }, { _id: false }),
+        default: undefined,
+    },
     // Public consent copy only; changing these fields does not change AI routing or retention.
     processingDisclosure: {
         type: new mongoose.Schema({
