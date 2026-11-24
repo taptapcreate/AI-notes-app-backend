@@ -1,3 +1,5 @@
+const { suggestionContext, suggestionResult } = require('./book-suggestions');
+const { reviewContext, reviewResult } = require('./writing-review');
 const { monthlyUsage, reserveMonthly, settleMonthly } = require('./subscription-credit-ledger');
 const { generationUnits } = require('./media-note-billing');
 const { validateImageBatch } = require('./image-attachments');
@@ -27,9 +29,9 @@ const REQUEST_ID =
 const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'website', 'import', 'documents', 'video', 'location', 'calendar', 'sketch']);
 const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
 const PRO_SOURCES = new Set(['location', 'calendar', 'sketch']);
-const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'mediaCreditQuote', 'pdfEvidence', 'additionalImages']
+const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'mediaCreditQuote', 'pdfEvidence', 'additionalImages', 'bookSuggestionsVersion', 'writingReviewVersion', 'desktopProFormatVersion']
     .some(field => body?.[field] !== undefined);
-const requiresPro = (body) => PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
+const requiresPro = (body) => body.bookSuggestionsVersion === 1 || body.writingReviewVersion === 1 || body.desktopProFormatVersion === 1 || PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
     (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));
 
 function validateInput(endpoint, body) {
@@ -40,12 +42,23 @@ function validateInput(endpoint, body) {
     if (body.additionalImages !== undefined && endpoint !== '/notes')
         throw new CreditError(400, 'Image batches require an image note.');
     validateImageBatch(body);
-    if (body.billingMode !== undefined && !['free', 'purchased', ...(body.desktopMediaBilling === 1 || body.mobileMediaBilling === 1 ? ['mixed'] : [])].includes(body.billingMode))
+    if (body.billingMode !== undefined && !['free', 'purchased', ...(body.desktopMediaBilling === 1 || body.mobileMediaBilling === 1 || body.bookSuggestionsVersion === 1 ? ['mixed'] : [])].includes(body.billingMode))
         throw new CreditError(400, 'Invalid billing mode');
     const text = (value, max = 2000000) => {
         if (typeof value !== 'string' || !value.trim() || value.length > max)
             throw new CreditError(400, 'Enter valid source content');
     };
+    try {
+        const suggestions = suggestionContext(body);
+        if (suggestions && endpoint !== '/notes') throw Error('Book suggestions require the notes endpoint.');
+    } catch (error) { throw new CreditError(400, error.message); }
+    if (body.writingReviewVersion !== undefined && endpoint !== '/followup')
+        throw new CreditError(400, 'Writing reviews require the review endpoint.');
+    if (body.desktopProFormatVersion !== undefined && (body.desktopProFormatVersion !== 1 || endpoint !== '/notes' || !['email', 'recipe'].includes(body.format)))
+        throw new CreditError(400, 'Invalid desktop Pro format.');
+    if (endpoint === '/followup') {
+        try { reviewContext(body); } catch (error) { throw new CreditError(400, error.message); }
+    }
     if (body.featurePolicyVersion !== undefined && body.featurePolicyVersion !== 1)
         throw new CreditError(400, 'Invalid feature policy');
     if (body.appFeature !== undefined && (endpoint !== '/notes' || !APP_FEATURES.has(body.appFeature)))
@@ -125,9 +138,21 @@ function validateInput(endpoint, body) {
     )
         throw new CreditError(400, 'Instructions are too long');
 }
-function validResult(endpoint, value) {
+function validResult(endpoint, value, body) {
     if (Buffer.byteLength(JSON.stringify(value ?? null)) > 2 * 1024 * 1024)
         return false;
+    if (endpoint === '/notes' && body) {
+        try {
+            const suggestions = suggestionContext(body);
+            if (suggestions) { suggestionResult(value?.notes, suggestions); return true; }
+        } catch { return false; }
+    }
+    if (endpoint === '/followup' && body) {
+        try {
+            const review = reviewContext(body);
+            if (review) { reviewResult(value?.response, review); return true; }
+        } catch { return false; }
+    }
     const text = (x) =>
         typeof x === 'string' && !!x.trim() && x.length <= 2000000;
     if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -603,7 +628,7 @@ function createGeneration({
                 req.body.message = req.body.message ?? req.body.text;
             res.json = (value) => {
                 let status = res.statusCode;
-                if (status < 400 && !validResult(endpoint, value)) {
+                if (status < 400 && !validResult(endpoint, value, req.body)) {
                     status = 502;
                     value = {
                         error: 'The AI server returned an empty or invalid result. Your credit was returned.',

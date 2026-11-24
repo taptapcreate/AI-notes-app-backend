@@ -149,6 +149,11 @@ async function api(t, handler, service = generation) {
         if (handler) await handler(req, res);
         else res.json({ notes: 'A useful note', pro: req.body.isPro });
     });
+    app.post('/api/followup', async (req, res) => {
+        calls++;
+        if (handler) await handler(req, res);
+        else res.json({ response: '{"edits":[]}' });
+    });
     const server = app.listen(0, '127.0.0.1');
     await once(server, 'listening');
     t.after(
@@ -892,4 +897,96 @@ test('five-minute audio verifies its quote and failure returns all three reserve
     await generation.finish(record._id, 500, { error: 'Provider failed' });
     assert.equal((await credits.balance(code)).subscriberDailyRemaining, 6);
     assert.equal((await credits.balance(code)).totalAvailable, 4);
+});
+
+const reviewBody = { type: 'note', writingReviewVersion: 1, context: JSON.stringify({ task: 'writing-review-grammar', segments: [{ id: 's0', text: 'This is correct.' }] }), question: 'Review grammar' };
+test('a no-change writing review uses one allowance and replays without another debit', async t => {
+    member = { isPro: true };
+    const code = await account(), id = randomUUID();
+    const request = await api(t);
+    const result = await request(code, id, reviewBody, '/api/followup');
+    assert.equal(result.status, 200);
+    assert.equal(result.body.billing.charged, true);
+    assert.deepEqual(JSON.parse(result.body.response), { edits: [] });
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
+    const again = await request(code, id, reviewBody, '/api/followup');
+    assert.equal(again.status, 200);
+    assert.equal(calls, 1);
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
+});
+test('unusable writing reviews refund the allowance before returning and retrying does not charge again', async t => {
+    member = { isPro: true };
+    for (const response of ['not JSON', '{"edits":[{"id":"unknown","text":"Unsafe"}]}', '{"edits":[{"id":"s0","text":"Wrong\\nline"}]}']) {
+        const code = await account(), id = randomUUID();
+        const request = await api(t, (_, res) => res.json({ response }));
+        const failed = await request(code, id, reviewBody, '/api/followup');
+        assert.equal(failed.status, 502);
+        assert.equal(failed.body.billing.charged, false);
+        assert.equal((await credits.byCode(code)).dailyRequestCount, 0);
+        await request(code, id, reviewBody, '/api/followup');
+        assert.equal((await credits.byCode(code)).dailyRequestCount, 0);
+    }
+});
+test('new desktop Pro formats cannot bypass server membership checks', async t => {
+    const code = await account();
+    const request = await api(t);
+    for (const format of ['email', 'recipe']) {
+        const result = await request(code, randomUUID(), { ...source, format, desktopProFormatVersion: 1 });
+        assert.equal(result.status, 403);
+    }
+    assert.equal(calls, 0);
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
+});
+
+const bookSuggestionRequest = (extra = {}) => {
+    const value = { task:'book-suggestions-alternatives', book:'A story', template:'fiction', language:'English', length:'page', count:3, includeContext:false, selectedPassage:'The monster waited.', ...extra };
+    return { type:'text', bookSuggestionsVersion:1, bookSuggestionQuote:2, content:JSON.stringify(value) };
+};
+test('Book Studio two-credit suggestions require Pro and reserve both units with cached-result idempotency', async t => {
+    const code = await account();
+    const body = bookSuggestionRequest();
+    const options = Array.from({length:3},(_,i)=>({title:`Option ${i}`,text:`A distinct replacement ${i}.`}));
+    const request = await api(t, (req,res)=>res.json({notes:JSON.stringify({options})}));
+    assert.equal((await request(code,randomUUID(),body)).status,403);
+    assert.equal(calls,0);
+    member = { isPro:true };
+    const id=randomUUID();
+    const first=await request(code,id,body);
+    assert.equal(first.status,200);
+    const record=await GenerationRequest.findOne({requestId:id}).lean();
+    assert.equal(record.reservation.proUnits,2);
+    assert.equal((await request(code,id,body)).status,200);
+    assert.equal(calls,1);
+});
+test('invalid Book Studio alternatives refund both reserved credits once and cannot be underquoted', async t => {
+    const code=await account(); member={isPro:true};
+    const request=await api(t,(req,res)=>res.json({notes:'ordinary prose instead of the selected alternatives'}));
+    const id=randomUUID(),body=bookSuggestionRequest();
+    const failed=await request(code,id,body);
+    assert.equal(failed.status,502);
+    const record=await GenerationRequest.findOne({requestId:id}).lean();
+    assert.equal(record.state,'failed');
+    assert.equal(record.reservation.proUnits,2);
+    const usage=await credits.balance(code);
+    assert.equal(usage.subscriberDailyRemaining,2);
+    assert.equal((await request(code,id,body)).status,502); assert.equal(calls,1);
+    assert.equal((await request(code,randomUUID(),{...body,bookSuggestionQuote:1})).status,400);
+    assert.equal(calls,1);
+});
+test('Book Studio failures restore a partial Pro allowance plus wallet fallback exactly once', async () => {
+    const code=await account(); member={isPro:true};
+    config.billingControls={usePrimarySubscriptionTracking:false};
+    await reserve(code);
+    const body=bookSuggestionRequest();
+    await assert.rejects(reserve(code,randomUUID(),body),{status:429});
+    const {record}=await reserve(code,randomUUID(),{...body,billingMode:'free'});
+    assert.equal(record.reservation.pro,true);
+    assert.equal(record.reservation.proUnits ?? 1,1);
+    assert.equal(record.reservation.free,1);
+    assert.equal((await credits.balance(code)).totalAvailable,6);
+    await generation.finish(record._id,502,{error:'Invalid suggestions'});
+    await generation.finish(record._id,502,{error:'Invalid suggestions'});
+    const restored=await credits.balance(code);
+    assert.equal(restored.totalAvailable,7);
+    assert.equal(restored.subscriberDailyRemaining,1);
 });

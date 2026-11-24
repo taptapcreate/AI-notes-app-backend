@@ -1,3 +1,5 @@
+const { suggestionContext, suggestionPrompt } = require('./services/book-suggestions');
+const { reviewContext, reviewPrompt } = require('./services/writing-review');
 const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
@@ -373,6 +375,7 @@ const { noteImageParts } = require('./services/image-attachments');
 app.post('/api/notes', async (req, res) => {
     try {
         const { type, content, pdfEvidence, websiteText, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', sourceKind, isPro = false } = req.body;
+        const bookSuggestions = suggestionContext(req.body);
         const instruction = await appendNarration(requestedInstruction, req.body.narration, transcribe, generationSignal());
 
         if (!content) {
@@ -392,7 +395,7 @@ app.post('/api/notes', async (req, res) => {
             ? `IMPORTANT: Generate ALL content in ${language}. Provide the SAME level of detail and number of points as you would in English. Do NOT shorten or summarize when translating. Use natural ${language} phrasing.`
             : 'Keep the output in English.';
 
-        const promptFor = (sourceContent = content) => buildNotePrompt({
+        const promptFor = (sourceContent = content) => bookSuggestions ? suggestionPrompt(bookSuggestions) : buildNotePrompt({
             type, sourceKind, content: ['text', 'voice', 'website', 'youtube'].includes(type) ? cleanSourceText(sourceContent) : sourceContent, instruction,
             lengthInstruction, formatInstruction, toneInstruction, languageInstruction, isPro, pdfEvidence,
             url: ['website', 'youtube'].includes(type) ? content : undefined,
@@ -428,7 +431,7 @@ app.post('/api/notes', async (req, res) => {
         const finishReason = result.finishReason;
 
         // Truncation cleanup instead of continuation (Saves tokens/cost)
-        if (finishReason === 'length') {
+        if (finishReason === 'length' && !bookSuggestions) {
             console.log('Notes truncated. Trimming last incomplete sentence to save cost.');
             const lastCompleteEnd = Math.max(
                 notes.lastIndexOf('. '),
@@ -602,7 +605,6 @@ Generate ${replyCount} replies now:`;
 });
 
 // ==================== FOLLOW-UP ENDPOINT ====================
-const { writingReviewPrompt } = require('./services/writing-review');
 app.post('/api/followup', async (req, res) => {
     try {
         const { context, question, type = 'note', replyTool, language = 'English' } = req.body;
@@ -612,9 +614,9 @@ app.post('/api/followup', async (req, res) => {
         }
 
         let prompt;
-        const writingReview = !replyTool && writingReviewPrompt(context, question);
+        const writingReview = !replyTool && reviewContext(req.body);
         if (writingReview) {
-            prompt = writingReview;
+            prompt = reviewPrompt(writingReview);
         } else if (replyTool === 'explain' || replyTool === 'sound') {
             const task = replyTool === 'explain'
                 ? 'Explain what the sender explicitly asks for, what is unclear, and which questions the user could ask before replying. Distinguish the text from your interpretation.'
@@ -829,7 +831,7 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         // Explicitly normalized below so raw database copy cannot expand the consent UI.
-        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, bookSuggestionsVersion: 1, writingReviewVersion: 1, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }
