@@ -13,11 +13,11 @@ test('writing reviews request only changed JSON segments, while ordinary follow-
 
 const { reviewContext, reviewResult, reviewPrompt } = require('../services/writing-review');
 const body = { writingReviewVersion: 1, context: JSON.stringify({ task: 'writing-review-grammar', segments: [{ id: 's0', text: 'This is correct.' }] }) };
-test('reviews have a dedicated JSON prompt and request useful polish without manufacturing edits', () => {
+test('reviews have a dedicated JSON prompt and preserve expressive prose without manufacturing edits', () => {
  const context = reviewContext(body);
  assert.deepEqual(reviewResult('{"edits":[]}', context), { edits: [] });
- assert.match(reviewPrompt(context), /If grammar is already correct/);
- assert.match(reviewPrompt(context), /Do not invent errors/);
+ assert.match(reviewPrompt(context), /smallest useful change/);
+ assert.match(reviewPrompt(context), /invent errors/);
  assert.match(reviewPrompt(context), /Return ONLY valid JSON/);
  assert.doesNotMatch(reviewPrompt(context), /Follow-up Answer/);
  for (const result of ['oops', '{"edits":null}', '{"edits":[{"id":"bad","text":"Changed"}]}', '{"edits":[{"id":"s0","text":""}]}'])
