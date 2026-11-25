@@ -7,6 +7,8 @@ const {
 const { BookGenerationError } = require('./book-generation');
 const retentionMs = 24 * 60 * 60 * 1000;
 const maxChunkAttempts = 4;
+const maxBatchValidationAttempts = 2;
+const batchConcurrency = 3;
 
 function createBookReview({
     Checkpoint,
@@ -20,17 +22,45 @@ function createBookReview({
         const batches = reviewBatches(context);
         const request = getRequest() || {};
         request.bookOperation = context.task;
+        const wrapReviewError = (error) => {
+            if (error instanceof BookGenerationError) return error;
+            const message =
+                error instanceof SyntaxError
+                    ? 'The AI returned an unreadable review. Your credits are returned.'
+                    : error?.message || 'The AI review could not be validated.';
+            return new BookGenerationError(message, 'BOOK_REVIEW_INVALID', 502);
+        };
         const runBatch = async (batch, beforeAttempt) => {
-            const result = await generate(8000, reviewPrompt(batch), {
-                beforeAttempt,
-            });
-            if (result.finishReason === 'length')
-                throw new BookGenerationError(
-                    'The revision was incomplete. Your credits are returned.',
-                    'BOOK_REVIEW_INCOMPLETE',
-                    502,
-                );
-            return reviewResult(result.text, batch).edits;
+            const basePrompt = reviewPrompt(batch);
+            let lastReason = '';
+            for (let attempt = 0; attempt < maxBatchValidationAttempts; attempt++) {
+                const prompt =
+                    attempt === 0
+                        ? basePrompt
+                        : `IMPORTANT: Your previous response could not be validated (${lastReason}). Return ONLY valid JSON using the exact segment IDs, keep every line break unchanged, and do not shorten any passage below 70% of its original word count.\n\n${basePrompt}`;
+                const result = await generate(8000, prompt, {
+                    beforeAttempt,
+                });
+                if (result.finishReason === 'length') {
+                    lastReason = 'output truncated before finishing JSON';
+                    if (attempt + 1 < maxBatchValidationAttempts) continue;
+                    throw new BookGenerationError(
+                        'The revision was incomplete. Your credits are returned.',
+                        'BOOK_REVIEW_INCOMPLETE',
+                        502,
+                    );
+                }
+                try {
+                    return reviewResult(result.text, batch).edits;
+                } catch (error) {
+                    lastReason =
+                        error instanceof SyntaxError
+                            ? 'invalid JSON'
+                            : error.message;
+                    if (attempt + 1 < maxBatchValidationAttempts) continue;
+                    throw wrapReviewError(error);
+                }
+            }
         };
         // Small operations retain one request and do not create persistent job records.
         if (batches.length === 1) {
@@ -129,50 +159,83 @@ function createBookReview({
         });
         let invalid = false;
         try {
-            const edits = [];
+            const results = Array(batches.length);
+            const pending = [];
             for (let index = 0; index < batches.length; index++) {
-                request.signal?.throwIfAborted();
-                let saved = checkpoint.chunks[index];
+                const saved = checkpoint.chunks[index];
                 // Empty edit arrays are complete, validated no-change chunks too.
-                if (!Array.isArray(saved)) {
-                    saved = await runBatch(batches[index], async () => {
-                        request.signal?.throwIfAborted();
-                        const attempt = await Checkpoint.updateOne(
-                            {
-                                ...owned(),
-                                [`attempts.${index}`]: {
-                                    $lt: maxChunkAttempts,
-                                },
-                            },
-                            { $inc: { [`attempts.${index}`]: 1 } },
-                        );
-                        if (attempt.modifiedCount !== 1)
-                            throw new BookGenerationError(
-                                'The retry limit for this unchanged draft was reached. Your credits are returned. Try later or contact support.',
-                                'BOOK_REVIEW_RETRY_LIMIT',
-                            );
-                    });
-                    request.signal?.throwIfAborted();
-                    const stored = await Checkpoint.updateOne(owned(), {
-                        $set: { [`chunks.${index}`]: saved },
-                    });
-                    if (stored.modifiedCount !== 1)
-                        throw new BookGenerationError(
-                            'The revision was interrupted. Retry to recover completed sections.',
-                        );
-                } else
+                if (Array.isArray(saved)) {
                     reviewResult(
                         JSON.stringify({ edits: saved }),
                         batches[index],
                     );
-                edits.push(...saved);
+                    results[index] = saved;
+                } else {
+                    pending.push(index);
+                }
             }
+            const processChunk = async (index) => {
+                request.signal?.throwIfAborted();
+                const saved = await runBatch(batches[index], async () => {
+                    request.signal?.throwIfAborted();
+                    const attempt = await Checkpoint.updateOne(
+                        {
+                            ...owned(),
+                            [`attempts.${index}`]: {
+                                $lt: maxChunkAttempts,
+                            },
+                        },
+                        { $inc: { [`attempts.${index}`]: 1 } },
+                    );
+                    if (attempt.modifiedCount !== 1)
+                        throw new BookGenerationError(
+                            'The retry limit for this unchanged draft was reached. Your credits are returned. Try later or contact support.',
+                            'BOOK_REVIEW_RETRY_LIMIT',
+                        );
+                });
+                request.signal?.throwIfAborted();
+                const stored = await Checkpoint.updateOne(owned(), {
+                    $set: { [`chunks.${index}`]: saved },
+                });
+                if (stored.modifiedCount !== 1)
+                    throw new BookGenerationError(
+                        'The revision was interrupted. Retry to recover completed sections.',
+                    );
+                results[index] = saved;
+            };
+            if (pending.length) {
+                // Run the first pending chunk before fanning out so persistent chunk failures
+                // stop at the attempt limit without burning attempts on later chunks.
+                await processChunk(pending.shift());
+                if (pending.length) {
+                    let cursor = 0;
+                    let firstError = null;
+                    const workers = Array.from(
+                        { length: Math.min(batchConcurrency, pending.length) },
+                        async () => {
+                            while (!firstError) {
+                                const next = cursor++;
+                                if (next >= pending.length) break;
+                                try {
+                                    await processChunk(pending[next]);
+                                } catch (error) {
+                                    firstError ||= error;
+                                    break;
+                                }
+                            }
+                        },
+                    );
+                    await Promise.allSettled(workers);
+                    if (firstError) throw firstError;
+                }
+            }
+            const edits = results.flat();
             let result;
             try {
                 result = reviewResult(JSON.stringify({ edits }), context);
             } catch (error) {
                 invalid = true;
-                throw error;
+                throw wrapReviewError(error);
             }
             return result;
         } finally {

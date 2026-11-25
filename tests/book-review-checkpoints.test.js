@@ -298,3 +298,100 @@ test('expired workers cannot overwrite a checkpoint reclaimed by another request
     assert(JSON.stringify(saved.chunks).includes('new worker'));
     assert(!JSON.stringify(saved.chunks).includes('old worker'));
 });
+test('transient validation errors retry with guidance and persistent omissions return BookGenerationError', async () => {
+    const { BookGenerationError } = require('../services/book-generation');
+    const ctx = context();
+    let seenRetryGuidance = false;
+    let firstBatchAttempt = 0;
+    const retried = createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model: 'retry-validation',
+        now: () => new Date(time),
+        getRequest: () => request,
+        generate: async (_cap, prompt, { beforeAttempt }) => {
+            await beforeAttempt?.();
+            const batch = JSON.parse(prompt.split('SOURCE: ')[1]);
+            if (batch.segments[0].id === 's0') {
+                firstBatchAttempt++;
+                if (firstBatchAttempt === 1) return { text: 'not json', finishReason: 'stop' };
+                seenRetryGuidance = prompt.includes('invalid JSON');
+            }
+            return {
+                text: JSON.stringify({
+                    edits: batch.segments.map((s) => ({
+                        id: s.id,
+                        text: s.text.replaceAll('traveler', 'writer'),
+                    })),
+                }),
+                finishReason: 'stop',
+            };
+        },
+    });
+    const res = await retried(ctx);
+    assert.equal(res.edits.length, ctx.segments.length);
+    assert.equal(seenRetryGuidance, true);
+
+    await GenerationRequest.updateOne({ _id: request.generationId }, { $set: { state: 'failed' } });
+    request = await attempt();
+    const persistent = createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model: 'persistent-omission',
+        now: () => new Date(time),
+        getRequest: () => request,
+        generate: async (_cap, prompt, { beforeAttempt }) => {
+            await beforeAttempt?.();
+            const batch = JSON.parse(prompt.split('SOURCE: ')[1]);
+            return {
+                text: JSON.stringify({
+                    edits: batch.segments.map((s) => ({ id: s.id, text: 'Too short.' })),
+                }),
+                finishReason: 'stop',
+            };
+        },
+    });
+    await assert.rejects(
+        persistent(ctx),
+        (error) =>
+            error instanceof BookGenerationError &&
+            error.code === 'BOOK_REVIEW_INVALID' &&
+            error.status === 502 &&
+            /omitted too much/.test(error.message),
+    );
+});
+test('remaining batches run concurrently after the first batch while preserving segment order', async () => {
+    const ctx = context();
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const run = createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model: 'concurrent',
+        now: () => new Date(time),
+        getRequest: () => request,
+        generate: async (_cap, prompt, { beforeAttempt }) => {
+            await beforeAttempt?.();
+            inFlight++;
+            peakInFlight = Math.max(peakInFlight, inFlight);
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            inFlight--;
+            const batch = JSON.parse(prompt.split('SOURCE: ')[1]);
+            return {
+                text: JSON.stringify({
+                    edits: batch.segments.map((s) => ({
+                        id: s.id,
+                        text: s.text.replaceAll('traveler', 'voyager'),
+                    })),
+                }),
+                finishReason: 'stop',
+            };
+        },
+    });
+    const res = await run(ctx);
+    assert.ok(peakInFlight >= 2, `expected concurrent execution, saw peak ${peakInFlight}`);
+    assert.deepEqual(
+        res.edits.map((e) => e.id),
+        ctx.segments.map((s) => s.id),
+    );
+});

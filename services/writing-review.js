@@ -80,7 +80,7 @@ function reviewBatches(context) {
 }
 function reviewResult(response, context) {
   if (typeof response !== 'string') throw Error('The AI returned an unreadable review.');
-  const value = JSON.parse(response.trim().replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, ''));
+  const value = JSON.parse(response.trim().replace(/^```(?:json)?\s*\r?\n/i, '').replace(/\r?\n```\s*$/, ''));
   if (!value || !Array.isArray(value.edits) || value.edits.length > context.segments.length) throw Error('The AI returned an incomplete review.');
   const seen = new Set();
   for (const edit of value.edits) {
