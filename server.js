@@ -142,7 +142,9 @@ const { complete, transcribe } = createOpenRouter(new OpenAI({
     apiKey: process.env.OPEN_ROUTER_API_KEY,
     timeout: 60000,
     maxRetries: 0,
-}), { getCacheScope: () => generationContext.getStore()?.accountScope, onTiming: timing => {
+}), { getCacheScope: () => generationContext.getStore()?.accountScope,
+    isSmartNote: () => { const request = generationContext.getStore(); return request?.endpoint === '/notes' && !request.bookOperation; },
+    onTiming: timing => {
     const request = generationContext.getStore();
     console.info('AI provider timing', { ...timing, endpoint: request?.endpoint, ...(request?.bookOperation && {operation: request.bookOperation}),
         ...(request?.startedAt === undefined ? {} : {
@@ -385,10 +387,12 @@ const styleGuides = {
 const { appendNarration } = require('./services/walkthrough');
 const { buildNotePrompt } = require('./services/note-prompts');
 const { noteImageParts } = require('./services/image-attachments');
+const generateSmartNote = require('./services/single-attempt').createSingleAttempt({ complete, getSignal: generationSignal });
 app.post('/api/notes', async (req, res) => {
     try {
         const { type, content, pdfEvidence, websiteText, noteLength = 'standard', format = 'bullet', tone = 'professional', language = 'english', instruction: requestedInstruction = '', sourceKind, isPro = false } = req.body;
         const bookSuggestions = suggestionContext(req.body);
+        if (!bookSuggestions) req.body = await require('./services/media-preflight').prepareNoteImages(req.body);
         const instruction = await appendNarration(requestedInstruction, req.body.narration, transcribe, generationSignal());
 
         if (!content) {
@@ -413,7 +417,7 @@ app.post('/api/notes', async (req, res) => {
             lengthInstruction, formatInstruction, toneInstruction, languageInstruction, isPro, pdfEvidence,
             url: ['website', 'youtube'].includes(type) ? content : undefined,
         });
-        const generate = value => bookSuggestions ? bookGenerate(maxTokens, value) : generateWithRetry(maxTokens, value, 3, 2000, req.noteStream?.delta);
+        const generate = value => bookSuggestions ? bookGenerate(maxTokens, value) : generateSmartNote(maxTokens, value, req.noteStream?.delta);
         let result;
         switch (type) {
             case 'text':
@@ -460,6 +464,7 @@ app.post('/api/notes', async (req, res) => {
         res.json({ notes });
 
     } catch (error) {
+        if (error instanceof require('./services/credit-policy').CreditError) return res.status(error.status).json({ error: error.message, ...error.details });
         if (error instanceof InvalidSource) return res.status(400).json({ error: error.message });
         if (/^(WEB_ACCESS_(RESTRICTED|UNAVAILABLE)|WEB_(UNSUPPORTED_CONTENT|NO_READABLE_CONTENT)|YOUTUBE_BLOCK):/.test(error.message)) {
             return res.status(502).json({ error: error.message });
@@ -850,7 +855,7 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         // Explicitly normalized below so raw database copy cannot expand the consent UI.
-        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), helpSupport: helpSupport(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, bookSuggestionsVersion: 1, writingReviewVersion: 1, writingReviewPolicyVersion: 2, bookPageBillingVersion: 1, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), helpSupport: helpSupport(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, generationBillingRequired: true, smartNoteSafetyVersion: 1, smartNoteLimits: { sourceBytes: 24000, instructionBytes: 4000, promptBytes: 32000 }, bookSuggestionsVersion: 1, writingReviewVersion: 1, writingReviewPolicyVersion: 2, bookPageBillingVersion: 1, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

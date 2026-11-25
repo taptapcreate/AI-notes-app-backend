@@ -89,6 +89,10 @@ async function generationUnits(endpoint, body, config) {
             return review.pages.length;
         } catch (error) { throw new CreditError(400, error.message); }
     }
+    if (body.narration !== undefined) {
+        validatePCM(body.narration, 60);
+        if (body.desktopMediaBilling !== 1) throw new CreditError(426, 'Update AI Notes to use narration credit pricing.');
+    }
     validatePdfEvidence(endpoint, body);
     validateImageBatch(body);
     const desktop = body.desktopMediaBilling !== undefined;
@@ -96,8 +100,8 @@ async function generationUnits(endpoint, body, config) {
     if (body.additionalImages !== undefined &&
         (body.desktopMediaBilling !== 1 || mobile || body.mediaCreditQuote === undefined))
         throw new CreditError(426, 'Update AI Notes to use image-batch credit pricing.');
-    const pcmDuration = body.type === 'voice' && (desktop || (!mobile && isPreparedPCM(body.content)))
-        ? validatePCM(body.content, 300) : null;
+    const pcmDuration = body.type === 'voice'
+        ? await require('./media-preflight').audioDuration(body.content, desktop ? 300 : 180) : null;
     if (pcmDuration > 180 && (body.desktopMediaBilling !== 1 || body.mediaCreditQuote === undefined))
         throw new CreditError(426, 'Update AI Notes to use recordings longer than 3 minutes.');
     if (body.mediaCreditQuote !== undefined &&
@@ -131,6 +135,7 @@ async function generationUnits(endpoint, body, config) {
             throw new CreditError(400, 'Choose a readable, unlocked PDF.');
         }
         if (pages < 1 || pages > 10) throw new CreditError(400, 'Choose a PDF with 1 to 10 pages.');
+        await require('./media-preflight').validatePdfSource(body.content);
         if (body.pdfEvidence && body.pdfEvidence.cloudPages.length !== pages)
             throw new CreditError(400, 'The cloud page list does not match the PDF attachment.');
         const units = 1 + Math.ceil(pages / pricing.pdfPagesPerCredit);
@@ -152,4 +157,4 @@ async function generationUnits(endpoint, body, config) {
     }
     throw new CreditError(400, 'Unsupported media billing request');
 }
-module.exports = { generationUnits, generationMediaPricing };
+module.exports = { generationUnits, generationMediaPricing, validatePCM, isPreparedPCM };

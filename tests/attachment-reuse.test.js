@@ -116,3 +116,17 @@ test('an in-stream stale parse error retries fresh once before text, but never r
     emit = true; await assert.rejects(router.complete(source, 500, undefined, text => previews.push(text)), /stream failed/);
     assert.equal(requests.length, 4); assert.equal(previews.at(-1), 'Existing preview');
 });
+
+test('Smart Notes evicts stale PDF annotations without a second paid attempt', async t => {
+    const cache = createAttachmentCache(); t.after(() => cache.dispose()); const requests = [];
+    const router = createOpenRouter({ chat: { completions: { create: async body => {
+        requests.push(body);
+        if (body.messages.length === 3) throw Object.assign(new Error('Stale annotation'), { status: 422 });
+        return completion(annotation());
+    } } } }, { getCacheScope: () => 'account', attachmentCache: cache, isSmartNote: () => true });
+    await router.complete(['First question', pdf('one')], 500);
+    await assert.rejects(router.complete(['Second question', pdf('one')], 500), { status: 422 });
+    assert.deepEqual(requests.map(body => body.messages.length), [1, 3]);
+    await router.complete(['Explicit new request', pdf('one')], 500);
+    assert.deepEqual(requests.map(body => body.messages.length), [1, 3, 1]);
+});

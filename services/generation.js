@@ -29,8 +29,6 @@ const REQUEST_ID =
 const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'website', 'import', 'documents', 'video', 'location', 'calendar', 'sketch']);
 const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
 const PRO_SOURCES = new Set(['location', 'calendar', 'sketch']);
-const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'mediaCreditQuote', 'pdfEvidence', 'additionalImages', 'bookSuggestionsVersion', 'bookPageBillingVersion', 'writingReviewVersion', 'desktopProFormatVersion']
-    .some(field => body?.[field] !== undefined);
 const requiresPro = (body) => body.bookSuggestionsVersion === 1 || body.writingReviewVersion === 1 || body.desktopProFormatVersion === 1 || PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
     (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));
 
@@ -115,6 +113,7 @@ function validateInput(endpoint, body) {
         text(body.question, 20000);
     } else if (endpoint === '/sentiment') text(body.message ?? body.text);
     else text(body.text);
+    require('./smart-note-safety').validateNoteSource(endpoint, body);
     for (const field of [
         'language',
         'targetLanguage',
@@ -361,6 +360,7 @@ function createGeneration({
         const existing = await GenerationRequest.findById(id).lean();
         if (existing) return check(existing);
         const config = requestConfig ?? await getAppConfig();
+        await require('./generation-safety').checkFailureCooldown(GenerationRequest, code, now());
         const units = await generationUnits(endpoint, body, config);
         await credits.balance(code, undefined, config); // Initialize any legacy allowance before reserving.
         const rules = policy(config);
@@ -374,6 +374,7 @@ function createGeneration({
                     .lean();
                 if (duplicate) return check(duplicate);
                 const user = await credits.ensureAccount(code, session);
+                await require('./generation-safety').checkConcurrentRequests(GenerationRequest, code, now(), session);
                 if (!user)
                     throw new CreditError(401, 'Reconnect your AI account');
                 const timestamp = now();
@@ -495,6 +496,7 @@ function createGeneration({
                             endpoint,
                             bodyHash,
                             state: 'pending',
+                            createdAt: timestamp,
                             reservation: {
                                 ...reservation,
                                 membershipPro: pro,
@@ -597,14 +599,7 @@ function createGeneration({
                 );
             const config = await getAppConfig();
             res.locals.appConfig = config;
-            // A staged deployment must continue serving installed legacy mobile
-            // builds until the operator deliberately enables the strict cutover.
-            if (
-                config.generationBillingRequired === false &&
-                !req.headers.authorization && !needsAuthenticatedBilling(req.body) &&
-                !(endpoint === '/notes' && req.body?.type === 'pdf')
-            )
-                return next();
+            // All AI requests require authenticated credit reservation, including legacy request shapes.
             const code = await authenticate(req.headers.authorization);
             validateInput(endpoint, req.body);
             const { storeKitProofs, ...body } = req.body;

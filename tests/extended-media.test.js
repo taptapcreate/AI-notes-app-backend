@@ -52,7 +52,7 @@ test('desktop audio uses actual duration, enforces five minutes and preserves sh
         await assert.rejects(generationUnits('/notes', { ...body, mediaCreditQuote: cost + 1 }), { status: 409 });
         if (seconds > 180) {
             await assert.rejects(generationUnits('/notes', { ...body, mediaCreditQuote: undefined }), { status: 426 });
-            await assert.rejects(generationUnits('/notes', { ...body, desktopMediaBilling: undefined }), { status: 426 });
+            await assert.rejects(generationUnits('/notes', { ...body, desktopMediaBilling: undefined }), { status: 400 });
         }
     }
     await assert.rejects(generationUnits('/notes', {
@@ -61,9 +61,10 @@ test('desktop audio uses actual duration, enforces five minutes and preserves sh
     assert.deepEqual(generationMediaPricing(), { audioExtra: 1, audioLongExtra: 2, narrationExtra: 1, pdfPagesPerCredit: 3 });
     assert.equal(generationMediaPricing({ generationMediaPricing: { audioExtra: 2 } }).audioLongExtra, 3);
     assert.throws(() => generationMediaPricing({ generationMediaPricing: { audioExtra: 2, audioLongExtra: 2 } }), { status: 503 });
-    // Mobile keeps its existing compressed-audio contract.
-    assert.equal(await generationUnits('/notes', { type: 'voice', content: Buffer.from('ID3audio').toString('base64'), mobileMediaBilling: 1 }), 2);
-    assert.equal(await generationUnits('/notes', { type: 'voice', content: Buffer.from('RIFF0000WAVElegacy-stereo').toString('base64') }), 1);
+    // Real mobile recordings keep their price; synthetic/corrupt headers fail before AI.
+    assert.equal(await generationUnits('/notes', { type: 'voice', content: pcm(1), mobileMediaBilling: 1 }), 2);
+    await assert.rejects(generationUnits('/notes', { type: 'voice', content: Buffer.from('ID3audio').toString('base64'), mobileMediaBilling: 1 }), { status: 400 });
+    await assert.rejects(generationUnits('/notes', { type: 'voice', content: Buffer.from('RIFF0000WAVElegacy-stereo').toString('base64') }), { status: 400 });
 });
 
 test('all five selected images reach the provider in one ordered request', async () => {

@@ -147,7 +147,7 @@ const AppConfigSchema = new mongoose.Schema({
     },
     // Enable only after the updated mobile builds are available. The cutover
     // script enables this together with the one-time allowance.
-    generationBillingRequired: { type: Boolean, default: false },
+    generationBillingRequired: { type: Boolean, default: true },
     generationMediaPricing: {
         audioExtra: { type: Number, min: 1, max: 5, validate: Number.isSafeInteger },
         audioLongExtra: { type: Number, min: 2, max: 6, validate: Number.isSafeInteger },

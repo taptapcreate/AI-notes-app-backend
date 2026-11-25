@@ -19,6 +19,8 @@ const schema = new mongoose.Schema({
     expiresAt: Date,
 });
 schema.index({ state: 1, leaseUntil: 1 });
+schema.index({ recoveryCode: 1, state: 1, createdAt: 1 });
+schema.index({ state: 1, createdAt: 1 });
 schema.index({ 'reservation.subscriptionId': 1, 'reservation.quotaEpoch': 1, 'reservation.day': 1, state: 1 });
 schema.index({ recoveryCode: 1, 'reservation.day': 1, state: 1 });
 schema.index({ 'reservation.subscriptionId': 1, 'reservation.quotaEpoch': 1, 'reservation.periodTransactionId': 1, state: 1 }, {

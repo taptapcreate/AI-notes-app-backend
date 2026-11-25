@@ -226,14 +226,15 @@ test('a completed request replays its result without another model call or charg
         409,
     );
 });
-test('parallel unique reservations cannot overdraw the available balance', async () => {
+test('parallel unique reservations allow only two running requests and cannot overdraw', async () => {
     const code = await account();
     const results = await Promise.allSettled(
         Array.from({ length: 14 }, () => reserve(code)),
     );
-    assert.equal(results.filter((x) => x.status === 'fulfilled').length, 7);
-    assert.equal((await credits.balance(code)).totalAvailable, 0);
-    assert.equal(await GenerationRequest.countDocuments(), 7);
+    assert.equal(results.filter((x) => x.status === 'fulfilled').length, 2);
+    assert.equal((await credits.balance(code)).totalAvailable, 5);
+    assert.equal(await GenerationRequest.countDocuments(), 2);
+    assert(results.filter(x => x.status === 'rejected').every(x => x.reason.status === 429));
 });
 test('concurrent retries of one request reserve only once and remain pending until completion', async () => {
     const code = await account();
@@ -374,18 +375,19 @@ test('RevenueCat subscription status honors expiry, grace, known products and sa
     );
 });
 
-test('staged deployment keeps legacy clients working until strict cutover', async (t) => {
+test('legacy compatibility cannot bypass authentication or charging even when the old flag is false', async (t) => {
     config.generationBillingRequired = false;
     const request = await api(t);
-    assert.equal((await request(null, null)).status, 200);
-    assert.equal(calls, 1);
+    assert.equal((await request(null, null)).status, 426);
+    assert.equal(calls, 0);
     const code = await account();
     const billed = await request(code, randomUUID());
     assert.equal(billed.body.billing.version, 2);
     assert.equal((await credits.balance(code)).totalAvailable, 6);
+    assert.equal(calls, 1);
     config.generationBillingRequired = true;
     assert.equal((await request(null, null)).status, 426);
-    assert.equal(calls, 2);
+    assert.equal(calls, 1);
 });
 
 test('purged result content leaves an idempotency record and cannot charge a late retry again', async () => {
@@ -638,10 +640,11 @@ test('a client-provided counter cannot bypass the protected fallback', async () 
     const code = await account();
     member = { isPro: true };
     config.billingControls = { usePrimarySubscriptionTracking: false };
-    await reserve(code);
+    const first = await reserve(code);
     await reserve(code);
     await assert.rejects(reserve(code, randomUUID(), { ...source, localSubscriptionUsage: { used: 0 } }),
         error => error.status === 429);
+    await generation.finish(first.record._id, 200, { notes: 'Completed note' });
     member = { isPro: false };
     const paid = await reserve(code, randomUUID(), { ...source, isPro: true, localSubscriptionUsage: { used: 0 } });
     assert.equal(paid.record.reservation.pro, false);
@@ -1090,4 +1093,46 @@ test('bulk checkpoint recovery integrates with reservations, refunds and explici
  assert.equal((await credits.byCode(code)).dailyRequestCount,5);assert.equal(providerCalls,batches+1);
  await request(code,id,body,'/api/followup');assert.equal(providerCalls,batches+1);assert.equal((await credits.byCode(code)).dailyRequestCount,5);
  await request(code,randomUUID(),body,'/api/followup');assert.equal(providerCalls,batches*2+1);assert.equal((await credits.byCode(code)).dailyRequestCount,10);
+});
+
+test('three failed requests pause fresh attempts without charging; cached failure remains free and cooldown expires', async t => {
+    const code = await account();
+    const request = await api(t, (_, res) => res.status(502).json({ error: 'Provider unavailable' }));
+    let last;
+    for (let i = 0; i < 3; i++) {
+        last = randomUUID();
+        assert.equal((await request(code, last)).status, 502);
+    }
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
+    assert.equal((await request(code, last)).status, 502);
+    const blocked = await request(code, randomUUID());
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.code, 'AI_FAILURE_COOLDOWN');
+    assert.equal(calls, 3);
+    time = new Date(time.getTime() + 15 * 60000 + 1);
+    assert.equal((await request(code, randomUUID())).status, 502);
+    assert.equal(calls, 4);
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
+});
+test('widespread provider failures pause new generation before billing or API; malformed client errors do not trip the global circuit', async t => {
+    const code = await account();
+    const failures = Array.from({ length: 20 }, (_, index) => ({
+        _id: `other-failure-${index}`, recoveryCode: `OTHER${index}`, requestId: randomUUID(),
+        endpoint: '/notes', bodyHash: 'fixture', state: 'failed', reservation: {},
+        leaseUntil: time, createdAt: time, httpStatus: 400,
+    }));
+    await GenerationRequest.insertMany(failures);
+    const request = await api(t);
+    assert.equal((await request(code, randomUUID())).status, 200);
+    await GenerationRequest.updateMany({ _id: /^other-failure-/ }, { $set: { httpStatus: 502 } });
+    const blocked = await request(code, randomUUID());
+    assert.equal(blocked.status, 503); assert.equal(blocked.body.code, 'AI_FAILURE_COOLDOWN');
+    assert.equal(calls, 1); assert.equal((await credits.balance(code)).totalAvailable, 6);
+});
+test('oversized source and instructions fail before any reservation or model execution', async t => {
+    const code = await account(); const request = await api(t);
+    for (const body of [{ ...source, content: 'x'.repeat(25000) }, { ...source, instruction: 'x'.repeat(4001) }])
+        assert.equal((await request(code, randomUUID(), body)).status, 413);
+    assert.equal(calls, 0); assert.equal(await GenerationRequest.countDocuments(), 0);
+    assert.equal((await credits.balance(code)).totalAvailable, 7);
 });

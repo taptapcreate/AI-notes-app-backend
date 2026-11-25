@@ -64,11 +64,12 @@ function measuredUsage(value) {
 }
 
 function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => undefined,
-    attachmentCache = createAttachmentCache() } = {}) {
+    isSmartNote = () => false, attachmentCache = createAttachmentCache() } = {}) {
     return {
         async complete(content, maxTokens, signal, onDelta) {
             const started = performance.now();
             let firstTextMs, success = false, usage;
+            const guardedNote = isSmartNote();
             try {
                 signal?.throwIfAborted();
                 let hasPdf = false;
@@ -107,6 +108,7 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                         ] : [{ role: 'user', content: parts }],
                         max_completion_tokens: maxTokens,
                         reasoning: { effort: 'none' },
+                        ...(guardedNote && { provider: { max_price: { prompt: 0.10, completion: 0.50 }, allow_fallbacks: false } }),
                         ...(onDelta && { stream: true }),
                         ...(hasPdf && { plugins: [{ id: 'file-parser', pdf: { engine: PDF_ENGINE } }] }),
                     }, { signal });
@@ -153,6 +155,7 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                     // A stale/unusable annotation gets one normal parse retry, before any preview.
                     if (!cached || emitted || ![400, 422].includes(error.status) || signal?.aborted) throw error;
                     attachmentCache.delete(pdfKey);
+                    if (guardedNote) throw error;
                     return await request();
                 }
             } finally {
