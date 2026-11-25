@@ -1,0 +1,300 @@
+const { test, before, after, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
+const mongoose = require('mongoose');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
+const Checkpoint = require('../models/BookReviewCheckpoint');
+const GenerationRequest = require('../models/GenerationRequest');
+const { createBookReview } = require('../services/book-review');
+const { reviewBatches } = require('../services/writing-review');
+let mongo, time, request, calls, failAt;
+before(async () => {
+    mongo = await MongoMemoryReplSet.create({
+        binary: { version: '8.0.17' },
+        replSet: { count: 1 },
+    });
+    await mongoose.connect(mongo.getUri(), {
+        dbName: 'book_review_checkpoints',
+    });
+    await Promise.all([Checkpoint.init(), GenerationRequest.init()]);
+});
+after(async () => {
+    await mongoose.disconnect();
+    await mongo?.stop();
+});
+beforeEach(async () => {
+    await Promise.all([
+        Checkpoint.deleteMany({}),
+        GenerationRequest.deleteMany({}),
+    ]);
+    time = new Date();
+    calls = [];
+    failAt = 0;
+    request = await attempt();
+});
+async function attempt(owner = 'owner-a') {
+    const id = randomUUID(),
+        leaseUntil = new Date(time.getTime() + 180000);
+    await GenerationRequest.create({
+        _id: id,
+        recoveryCode: 'TEST-OWNER',
+        requestId: id,
+        endpoint: '/followup',
+        bodyHash: id,
+        state: 'pending',
+        reservation: {},
+        leaseUntil,
+    });
+    return {
+        accountScope: owner,
+        generationId: id,
+        leaseUntil,
+        signal: new AbortController().signal,
+    };
+}
+const context = () => ({
+    task: 'writing-review-revise',
+    pages: Array.from({ length: 8 }, (_, i) => ({
+        number: i + 1,
+        ids: ['s' + i],
+    })),
+    segments: Array.from({ length: 8 }, (_, i) => ({
+        id: 's' + i,
+        text: (
+            'Passage ' +
+            i +
+            ' follows the traveler through the city. '
+        ).repeat(25),
+    })),
+});
+function runner(model = 'test-model') {
+    return createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model,
+        now: () => new Date(time),
+        getRequest: () => request,
+        generate: async (_cap, prompt, { beforeAttempt } = {}) => {
+            await beforeAttempt?.();
+            const batch = JSON.parse(prompt.split('SOURCE: ')[1]);
+            calls.push(batch.segments.map((s) => s.id));
+            if (failAt && calls.length === failAt)
+                throw Error('Provider failed');
+            return {
+                text: JSON.stringify({
+                    edits: batch.segments.map((s) => ({
+                        id: s.id,
+                        text: s.text.replaceAll('traveler', 'writer'),
+                    })),
+                }),
+                finishReason: 'stop',
+            };
+        },
+    });
+}
+test('late failure persists completed chunks; a new request resumes only the missing sections', async () => {
+    const ctx = context(),
+        run = runner(),
+        batches = reviewBatches(ctx);
+    failAt = batches.length;
+    await assert.rejects(run(ctx), /Provider failed/);
+    const first = request;
+    await GenerationRequest.updateOne(
+        { _id: first.generationId },
+        { $set: { state: 'failed' } },
+    );
+    request = await attempt();
+    const result = await run(ctx);
+    assert.equal(result.edits.length, ctx.segments.length);
+    assert.equal(calls.length, batches.length + 1);
+    assert.equal(calls.filter((c) => c.includes('s0')).length, 1);
+    const record = await Checkpoint.findOne().lean();
+    assert.equal(record.expiresAt - time, 86400000);
+    assert.equal(record.recoveryCode, undefined);
+    assert.equal(record.context, undefined);
+    assert.equal(record.prompt, undefined);
+});
+test('delivered successful reviews start fresh on explicit new polish and other owners cannot reuse edits', async () => {
+    const ctx = context(),
+        run = runner(),
+        n = reviewBatches(ctx).length;
+    await run(ctx);
+    await GenerationRequest.updateOne(
+        { _id: request.generationId },
+        { $set: { state: 'succeeded' } },
+    );
+    request = await attempt();
+    await run(ctx);
+    assert.equal(calls.length, n * 2);
+    request = await attempt('owner-b');
+    await run(ctx);
+    assert.equal(calls.length, n * 3);
+    assert.equal(await Checkpoint.countDocuments(), 2);
+});
+test('active requests block duplicate generation even after chunk work has finished but billing is pending', async () => {
+    const run = runner();
+    await run(context());
+    request = await attempt();
+    await assert.rejects(
+        run(context()),
+        (error) => error.code === 'BOOK_REVIEW_BUSY',
+    );
+});
+test('a changed model or draft invalidates old checkpoints', async () => {
+    const run = runner();
+    failAt = 2;
+    await assert.rejects(run(context()));
+    await GenerationRequest.updateOne(
+        { _id: request.generationId },
+        { $set: { state: 'failed' } },
+    );
+    request = await attempt();
+    await runner('new-model')(context());
+    assert.equal(await Checkpoint.countDocuments(), 2);
+    const changed = context();
+    changed.segments[0].text += ' A new fact.';
+    request = await attempt();
+    await run(changed);
+    assert.equal(await Checkpoint.countDocuments(), 3);
+});
+test('expired processing can be reclaimed after a restart and expired content is regenerated', async () => {
+    const run = runner();
+    failAt = 2;
+    await assert.rejects(run(context()));
+    time = new Date(time.getTime() + 180001);
+    request = await attempt();
+    await run(context());
+    assert.equal(calls.filter((c) => c.includes('s0')).length, 1);
+    time = new Date(time.getTime() + 86400001);
+    request = await attempt();
+    await run(context());
+    assert.equal(calls.filter((c) => c.includes('s0')).length, 2);
+});
+test('repeated failures stop at the persistent per-chunk attempt budget', async () => {
+    const run = createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model: 'test',
+        now: () => new Date(time),
+        getRequest: () => request,
+        generate: async (_cap, _prompt, { beforeAttempt } = {}) => {
+            await beforeAttempt?.();
+            calls.push('call');
+            throw Error('Provider failed');
+        },
+    });
+    for (let i = 0; i < 5; i++) {
+        await assert.rejects(
+            run(context()),
+            i < 4 ? /Provider failed/ : /retry limit/,
+        );
+        await GenerationRequest.updateOne(
+            { _id: request.generationId },
+            { $set: { state: 'failed' } },
+        );
+        request = await attempt();
+    }
+    assert.equal(calls.length, 4);
+});
+test('small reviews keep the lightweight path and cancellation creates no checkpoint or provider call', async () => {
+    const ctx = context();
+    ctx.segments = ctx.segments.slice(0, 1);
+    ctx.pages = ctx.pages.slice(0, 1);
+    await runner()(ctx);
+    assert.equal(await Checkpoint.countDocuments(), 0);
+    const abort = new AbortController();
+    abort.abort();
+    request.signal = abort.signal;
+    await assert.rejects(runner()(context()));
+    assert.equal(calls.length, 1);
+});
+
+test('completed no-change chunks are reused rather than regenerated', async () => {
+    const n = reviewBatches(context()).length;
+    let index = 0;
+    const run = createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model: 'empty',
+        now: () => new Date(time),
+        getRequest: () => request,
+        generate: async (_cap, _prompt, { beforeAttempt }) => {
+            await beforeAttempt?.();
+            index++;
+            if (index === n) throw Error('Failed last');
+            return { text: '{"edits":[]}', finishReason: 'stop' };
+        },
+    });
+    await assert.rejects(run(context()), /Failed last/);
+    await GenerationRequest.updateOne(
+        { _id: request.generationId },
+        { $set: { state: 'failed' } },
+    );
+    request = await attempt();
+    assert.deepEqual(await run(context()), { edits: [] });
+    assert.equal(index, n + 1);
+});
+test('expired workers cannot overwrite a checkpoint reclaimed by another request', async () => {
+    let started, release;
+    const entered = new Promise((resolve) => {
+            started = resolve;
+        }),
+        gate = new Promise((resolve) => {
+            release = resolve;
+        });
+    const old = request;
+    const first = createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model: 'fenced',
+        now: () => new Date(time),
+        getRequest: () => old,
+        generate: async (_cap, prompt, { beforeAttempt }) => {
+            await beforeAttempt?.();
+            started();
+            await gate;
+            const batch = JSON.parse(prompt.split('SOURCE: ')[1]);
+            return {
+                text: JSON.stringify({
+                    edits: batch.segments.map((s) => ({
+                        id: s.id,
+                        text: s.text.replaceAll('traveler', 'old worker'),
+                    })),
+                }),
+                finishReason: 'stop',
+            };
+        },
+    });
+    const stale = first(context());
+    await entered;
+    time = new Date(time.getTime() + 180001);
+    request = await attempt();
+    const current = request;
+    const fresh = createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model: 'fenced',
+        now: () => new Date(time),
+        getRequest: () => current,
+        generate: async (_cap, prompt, { beforeAttempt }) => {
+            await beforeAttempt?.();
+            const batch = JSON.parse(prompt.split('SOURCE: ')[1]);
+            return {
+                text: JSON.stringify({
+                    edits: batch.segments.map((s) => ({
+                        id: s.id,
+                        text: s.text.replaceAll('traveler', 'new worker'),
+                    })),
+                }),
+                finishReason: 'stop',
+            };
+        },
+    });
+    await fresh(context());
+    release();
+    await assert.rejects(stale, /interrupted/);
+    const saved = await Checkpoint.findOne().lean();
+    assert.equal(saved.generationId, current.generationId);
+    assert(JSON.stringify(saved.chunks).includes('new worker'));
+    assert(!JSON.stringify(saved.chunks).includes('old worker'));
+});

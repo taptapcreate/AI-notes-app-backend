@@ -19,7 +19,14 @@ function reviewContext(body) {
   if (total > (body.bookPageBillingVersion === 1 ? 80000 : 30000)) throw Error('Choose a shorter passage to review.');
   if (value.task === 'writing-review-revise' && body.bookPageBillingVersion !== 1) throw Error('Chapter revisions require page billing.');
   if (body.bookPageBillingVersion !== undefined) validateReviewPages(body, value);
-  return value;
+  if ((value.title !== undefined && (typeof value.title !== 'string' || value.title.length > 200)) ||
+      (value.language !== undefined && (typeof value.language !== 'string' || value.language.length > 80)) ||
+      (value.revisionMaxGrowth !== undefined && (!Number.isSafeInteger(value.revisionMaxGrowth) || value.revisionMaxGrowth < 0 || value.revisionMaxGrowth > 80000)))
+    throw Error('Choose valid review settings.');
+  return { task: value.task, segments: value.segments.map(({id, text}) => ({id, text})),
+    ...(value.pages && {pages: value.pages}), ...(value.title !== undefined && {title: value.title}),
+    ...(value.language !== undefined && {language: value.language}),
+    ...(value.revisionMaxGrowth !== undefined && {revisionMaxGrowth: value.revisionMaxGrowth}) };
 }
 function validateReviewPages(body, value) {
   if (body.writingReviewVersion !== 1 || body.bookPageBillingVersion !== 1 || body.writingReviewPolicyVersion !== 2 ||
@@ -65,6 +72,23 @@ function reviewResult(response, context) {
         (edit.text.match(/\r?\n/g) || []).join('') !== (segment.text.match(/\r?\n/g) || []).join(''))
       throw Error('The AI review could not be matched safely to your text.');
     seen.add(edit.id);
+  }
+  if (context.task === 'writing-review-revise' && context.pages) {
+    const replacements = new Map(value.edits.map(edit => [edit.id, edit.text]));
+    const before = context.segments.map(segment => segment.text).join(' ');
+    const after = context.segments.map(segment => replacements.get(segment.id) ?? segment.text).join(' ');
+    const words = text => text.trim().split(/\s+/u).filter(Boolean).length;
+    if (words(before) >= 120 && words(after) < Math.floor(words(before) * 0.7))
+      throw Error('The revision omitted too much prose. Your draft is unchanged.');
+    const escapedSize = text => text.replace(/\u200B/g, '').replace(/([\\`*_[\]<>])/g, '\\$1').length;
+    const growth = context.segments.reduce((sum, segment) => {
+      const replacement = replacements.get(segment.id);
+      if (replacement === undefined) return sum;
+      const normalized = (segment.text.match(/^\s*/)?.[0] || '') + replacement.trim() + (segment.text.match(/\s*$/)?.[0] || '');
+      return sum + escapedSize(normalized) - escapedSize(segment.text);
+    }, 0);
+    if (context.segments.reduce((sum, segment) => sum + (replacements.get(segment.id) ?? segment.text).length, 0) > 80000 || (context.revisionMaxGrowth !== undefined && growth > context.revisionMaxGrowth))
+      throw Error('The revision exceeds the chapter size limit. Your draft is unchanged.');
   }
   return value;
 }

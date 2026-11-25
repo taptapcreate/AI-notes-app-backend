@@ -8,6 +8,7 @@ const express = require('express');
 const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const User = require('../models/User');
 const GenerationRequest = require('../models/GenerationRequest');
+const BookReviewCheckpoint = require('../models/BookReviewCheckpoint');
 const CreditRegistration = require('../models/CreditRegistration');
 const PurchaseClaim = require('../models/PurchaseClaim');
 const { createCredits } = require('../services/credits');
@@ -23,6 +24,7 @@ before(async () => {
     await Promise.all([
         User.init(),
         GenerationRequest.init(),
+        BookReviewCheckpoint.init(),
         CreditRegistration.init(),
         PurchaseClaim.init(),
     ]);
@@ -36,6 +38,7 @@ beforeEach(async () => {
     await Promise.all([
         User.deleteMany({}),
         GenerationRequest.deleteMany({}),
+        BookReviewCheckpoint.deleteMany({}),
         CreditRegistration.deleteMany({}),
         PurchaseClaim.deleteMany({}),
     ]);
@@ -1051,4 +1054,40 @@ test('five-page chapter bills five units once; unchanged and failed reviews refu
   assert.equal((await credits.byCode(code)).dailyRequestCount,outcome==='changed'?5:0);
   await request(code,id,body,'/api/followup');assert.equal((await credits.byCode(code)).dailyRequestCount,outcome==='changed'?5:0);
  }
+});
+
+
+test('destructive chapter revisions refund all page credits before returning a result', async t => {
+ config.subscriberDailyLimit=10;member={isPro:true};
+ const code=await account(),id=randomUUID(),body=chapterPageBody();
+ const input=JSON.parse(body.context);input.segments.forEach(segment=>{segment.text='The traveler remembered the long journey. '.repeat(30)});body.context=JSON.stringify(input);
+ const request=await api(t,(_,res)=>res.json({response:JSON.stringify({edits:input.segments.map(segment=>({id:segment.id,text:'A summary.'}))})}));
+ const result=await request(code,id,body,'/api/followup');assert.equal(result.status,502);assert.equal(result.body.billing.charged,false);
+ assert.equal((await credits.byCode(code)).dailyRequestCount,0);
+ await request(code,id,body,'/api/followup');assert.equal((await credits.byCode(code)).dailyRequestCount,0);
+});
+
+
+test('bulk checkpoint recovery integrates with reservations, refunds and explicit fresh polish', async t => {
+ config.subscriberDailyLimit=10;member={isPro:true};
+ const code=await account(),body=chapterPageBody();
+ const source=JSON.parse(body.context);source.segments.forEach(segment=>{segment.text='The traveler remembered the journey through the changing city. '.repeat(30);});body.context=JSON.stringify(source);
+ const {createBookReview}=require('../services/book-review');
+ const {reviewContext,reviewBatches}=require('../services/writing-review');
+ const {context}=require('../services/generation-context');
+ const batches=reviewBatches(reviewContext(body)).length;
+ let providerCalls=0;
+ const run=createBookReview({Checkpoint:BookReviewCheckpoint,GenerationRequest,model:'mock',getRequest:()=>context.getStore(),generate:async(_limit,prompt,{beforeAttempt})=>{
+  await beforeAttempt?.();providerCalls++;
+  if(providerCalls===batches)throw Error('Last section failed');
+  const batch=JSON.parse(prompt.split('SOURCE: ')[1]);
+  return{text:JSON.stringify({edits:batch.segments.map(segment=>({id:segment.id,text:segment.text.replaceAll('traveler','writer')}))}),finishReason:'stop'};
+ }});
+ const request=await api(t,async(req,res)=>{try{const result=await run(reviewContext(req.body));res.json({response:JSON.stringify(result)});}catch{res.status(502).json({error:'Test interruption'});}});
+ const failed=await request(code,randomUUID(),body,'/api/followup');assert.equal(failed.status,502);assert.equal(failed.body.billing.charged,false);
+ assert.equal((await credits.byCode(code)).dailyRequestCount,0);
+ const id=randomUUID(),success=await request(code,id,body,'/api/followup');assert.equal(success.status,200);assert.equal(success.body.billing.charged,true);
+ assert.equal((await credits.byCode(code)).dailyRequestCount,5);assert.equal(providerCalls,batches+1);
+ await request(code,id,body,'/api/followup');assert.equal(providerCalls,batches+1);assert.equal((await credits.byCode(code)).dailyRequestCount,5);
+ await request(code,randomUUID(),body,'/api/followup');assert.equal(providerCalls,batches*2+1);assert.equal((await credits.byCode(code)).dailyRequestCount,10);
 });

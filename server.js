@@ -1,5 +1,5 @@
 const { suggestionContext, suggestionPrompt } = require('./services/book-suggestions');
-const { reviewContext, reviewPrompt, reviewResult, reviewBatches } = require('./services/writing-review');
+const { reviewContext, reviewPrompt } = require('./services/writing-review');
 const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
@@ -95,6 +95,7 @@ const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: 
         // initializing” for minutes (or forever if one noncritical task failed).
         accountRecoveryReady = true;
         const deferred = [
+            ['book review checkpoints', () => require('./models/BookReviewCheckpoint').init()],
             ['credit packs', () => require('./services/credit-pack-catalog').initializeCreditPacks(AppConfig)],
             ['credit pack catalog', async () => creditPackCatalog.publicCatalog(await getAppConfig())],
             ['subscription credit ledger', () => require('./services/subscription-credit-ledger').initializeLedger()],
@@ -143,12 +144,22 @@ const { complete, transcribe } = createOpenRouter(new OpenAI({
     maxRetries: 0,
 }), { getCacheScope: () => generationContext.getStore()?.accountScope, onTiming: timing => {
     const request = generationContext.getStore();
-    console.info('AI provider timing', { ...timing, endpoint: request?.endpoint,
+    console.info('AI provider timing', { ...timing, endpoint: request?.endpoint, ...(request?.bookOperation && {operation: request.bookOperation}),
         ...(request?.startedAt === undefined ? {} : {
             beforeModelMs: Math.max(0, Math.round(performance.now() - request.startedAt - timing.durationMs)),
         }),
     });
 } });
+
+const bookGenerate = require('./services/book-generation').createBookGenerator({ complete: (...args) => {
+    const request = generationContext.getStore();
+    if (request && !request.bookOperation) request.bookOperation = 'book-suggestion';
+    return complete(...args);
+}, getSignal: generationSignal });
+const runBookReview = require('./services/book-review').createBookReview({
+    Checkpoint: require('./models/BookReviewCheckpoint'), GenerationRequest, generate: bookGenerate,
+    model: MODEL, getRequest: () => generationContext.getStore(),
+});
 
 // Helper: Sleep function for delays
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -402,7 +413,7 @@ app.post('/api/notes', async (req, res) => {
             lengthInstruction, formatInstruction, toneInstruction, languageInstruction, isPro, pdfEvidence,
             url: ['website', 'youtube'].includes(type) ? content : undefined,
         });
-        const generate = value => generateWithRetry(maxTokens, value, 3, 2000, req.noteStream?.delta);
+        const generate = value => bookSuggestions ? bookGenerate(maxTokens, value) : generateWithRetry(maxTokens, value, 3, 2000, req.noteStream?.delta);
         let result;
         switch (type) {
             case 'text':
@@ -673,13 +684,8 @@ Generate the follow-up response now:`;
         }
 
         if (writingReview && req.body.bookPageBillingVersion === 1) {
-            const edits = [];
-            for (const batch of reviewBatches(writingReview)) {
-                const result = await generateWithRetry(8000, reviewPrompt(batch));
-                if (result.finishReason === 'length') throw Error('The page review was incomplete.');
-                edits.push(...reviewResult(result.text, batch).edits);
-            }
-            return res.json({ response: JSON.stringify({ edits }) });
+            const result = await runBookReview(writingReview);
+            return res.json({ response: JSON.stringify(result) });
         }
         const result = await generateWithRetry(2048, prompt);
         const response = result.text;
@@ -688,6 +694,8 @@ Generate the follow-up response now:`;
 
     } catch (error) {
         console.error('Follow-up generation error:', { status: error.status, code: error.code, name: error.name });
+        if (error instanceof require('./services/book-generation').BookGenerationError)
+            return res.status(error.status).json({ error: error.message, code: error.code });
         res.status(502).json({ error: 'AI Notes could not generate a follow-up right now. Please try again.' });
     }
 });

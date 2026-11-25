@@ -658,7 +658,7 @@ function createGeneration({
                 leaseMs,
             );
             timer.unref?.();
-            context.run({ signal: abort.signal, endpoint, startedAt,
+            context.run({ signal: abort.signal, endpoint, startedAt, generationId: record._id, leaseUntil: record.leaseUntil,
                 accountScope: createHash('sha256').update(code).digest('hex') }, () => next());
         })().catch((error) => {
             const status = error.status || 503;

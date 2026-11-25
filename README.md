@@ -63,3 +63,16 @@ request retains at most 128 spans; additional spans are counted in `omittedSpans
 Logging failures cannot change a subscription result. No additional database connection, migration,
 new environment setting, or desktop rebuild is needed to enable these logs; deploy the
 backend code through the existing Render workflow.
+
+
+## Book Studio cost and recovery controls
+
+Book Studio suggestion prompts keep small chapter contexts complete. Larger contexts use a hard 16,000-character JSON budget: the exact recent chapter ending, the author brief, nearby outline entries, and selected earlier excerpts. Excerpts are explicitly read-only context, not a generated summary; no extra summary-model request is made. Current 1–2-credit suggestion prices and page-based review prices are unchanged. Original manuscripts, selection/application snapshots and completed five-operation desktop history are preserved.
+
+Multi-batch page reviews checkpoint validated generated edits in the new `bookreviewcheckpoints` collection. Its expiring index deletes checkpoints after 24 hours; original manuscripts, prompt bodies and recovery codes are not stored there. The key binds the authenticated account scope, exact content/settings, model and prompts. Atomic leases and fencing prevent simultaneous or stale workers from changing another attempt. A retry after a failed/expired generation reuses completed sections; a new polish after a delivered successful/unchanged result starts fresh. Empty no-change chunks are reusable too. Single-batch requests skip checkpoint writes.
+
+Book Studio provider calls use at most three attempts per request, with jitter, cancellation and bounded `Retry-After` handling. A failed bulk section has at most four provider attempts total across resumptions within its checkpoint window. Permanent provider errors and truncated output do not trigger blind retries. Full revision validation rejects excessive shortening and (for updated desktops supplying the growth budget) chapter-size overflow before billing finalizes. Existing atomic reservations, mixed subscription/wallet allocation and refunds remain authoritative.
+
+This is retry recovery within the existing HTTP pipeline, not an unattended job queue: the three-minute server deadline still applies. After an interruption, retry the same unchanged content to resume. There is no new infrastructure or pricing configuration. MongoDB must allow creation of the checkpoint collection and its expiry index; startup and the first bulk review initialize them. Deploy the backend to activate server-side protections. Desktop request metadata/help changes take effect in the next separately requested build. Neither deployment nor a desktop build is performed by preparing these changes.
+
+Provider timing records now include available input/output/cache/reasoning token counts and reported USD cost, without prompt or response content. Missing provider usage is left unknown, never treated as free. Failed attempts can still have provider costs that were not returned; these controls reduce waste rather than guaranteeing zero API expense.

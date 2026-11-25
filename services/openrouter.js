@@ -51,12 +51,24 @@ function audioFormat(data) {
     throw new InvalidSource('Choose a supported audio recording, such as M4A, MP3, or WAV.');
 }
 
+function measuredUsage(value) {
+    if (!value || typeof value !== 'object') return undefined;
+    const fields = {
+        inputTokens: value.prompt_tokens, outputTokens: value.completion_tokens,
+        cachedTokens: value.prompt_tokens_details?.cached_tokens,
+        cacheWriteTokens: value.prompt_tokens_details?.cache_write_tokens,
+        reasoningTokens: value.completion_tokens_details?.reasoning_tokens, costUSD: value.cost,
+    };
+    const usage = Object.fromEntries(Object.entries(fields).filter(([, amount]) => typeof amount === 'number' && Number.isFinite(amount) && amount >= 0));
+    return Object.keys(usage).length ? usage : undefined;
+}
+
 function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => undefined,
     attachmentCache = createAttachmentCache() } = {}) {
     return {
         async complete(content, maxTokens, signal, onDelta) {
             const started = performance.now();
-            let firstTextMs, success = false;
+            let firstTextMs, success = false, usage;
             try {
                 signal?.throwIfAborted();
                 let hasPdf = false;
@@ -101,6 +113,7 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                     if (onDelta) {
                         let text = '', finishReason;
                         for await (const chunk of response) {
+                            usage = measuredUsage(chunk.usage) || usage;
                             const choice = chunk.choices?.[0];
                             if (chunk.error || choice?.finish_reason === 'error') {
                                 const error = new Error('AI stream failed');
@@ -123,8 +136,9 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                         signal?.throwIfAborted();
                         if (parsed && !conflicting) attachmentCache.set(pdfKey, parsed);
                         success = true;
-                        return { text, finishReason };
+                        return { text, finishReason, ...(usage && { usage }) };
                     }
+                    usage = measuredUsage(response.usage);
                     const choice = response.choices?.[0];
                     const text = choice?.message?.content;
                     if (typeof text !== 'string' || !text.trim()) throw new Error('Empty AI completion');
@@ -132,7 +146,7 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                     signal?.throwIfAborted();
                     if (parsed && !conflicting && ['stop', 'length'].includes(choice.finish_reason)) attachmentCache.set(pdfKey, parsed);
                     success = true;
-                    return { text, finishReason: choice.finish_reason };
+                    return { text, finishReason: choice.finish_reason, ...(usage && { usage }) };
                 };
                 try { return await request(cached); }
                 catch (error) {
@@ -144,7 +158,7 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
             } finally {
                 try { onTiming({ model: MODEL, durationMs: Math.round(performance.now() - started),
                     ...(firstTextMs === undefined ? {} : { firstTextMs: Math.round(firstTextMs) }),
-                    streamed: Boolean(onDelta), success }); } catch { /* Observability cannot lose a paid result. */ }
+                    streamed: Boolean(onDelta), success, ...(usage && { usage }) }); } catch { /* Observability cannot lose a paid result. */ }
             }
         },
         async transcribe(content, signal) {

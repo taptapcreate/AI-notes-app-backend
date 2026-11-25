@@ -104,3 +104,14 @@ test('provider timing reports latency without source text and observers cannot d
     assert.ok(!JSON.stringify(metrics).includes('Secret source'));
     assert.ok(!JSON.stringify(metrics).includes('Private manuscript'));
 });
+
+
+test('provider usage is retained without manuscript text and missing usage is not reported as zero cost', async () => {
+ const timing=[];
+ const router=createOpenRouter({chat:{completions:{create:async()=>({usage:{prompt_tokens:120,completion_tokens:30,cost:0.00003,prompt_tokens_details:{cached_tokens:20,cache_write_tokens:100},completion_tokens_details:{reasoning_tokens:0},unexpected:'PRIVATE'},choices:[{message:{content:'Generated prose'},finish_reason:'stop'}]})}}},{onTiming:value=>timing.push(value)});
+ const result=await router.complete('PRIVATE MANUSCRIPT',8000);
+ assert.deepEqual(result.usage,{inputTokens:120,outputTokens:30,cachedTokens:20,cacheWriteTokens:100,reasoningTokens:0,costUSD:0.00003});
+ assert.deepEqual(timing[0].usage,result.usage);assert(!JSON.stringify(timing).includes('PRIVATE'));
+ const missing=await createOpenRouter({chat:{completions:{create:async()=>({choices:[{message:{content:'Text'},finish_reason:'stop'}]})}}}).complete('Text',8000);
+ assert.equal(missing.usage,undefined);
+});
