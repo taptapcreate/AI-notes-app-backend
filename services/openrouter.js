@@ -66,7 +66,7 @@ function measuredUsage(value) {
 function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => undefined,
     isSmartNote = () => false, attachmentCache = createAttachmentCache() } = {}) {
     return {
-        async complete(content, maxTokens, signal, onDelta) {
+        async complete(content, maxTokens, signal, onDelta, { json = false } = {}) {
             const started = performance.now();
             let firstTextMs, success = false, usage;
             const guardedNote = isSmartNote();
@@ -108,6 +108,7 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                         ] : [{ role: 'user', content: parts }],
                         max_completion_tokens: maxTokens,
                         reasoning: { effort: 'none' },
+                        ...(json && { response_format: { type: 'json_object' } }),
                         ...(guardedNote && { provider: { max_price: { prompt: 0.10, completion: 0.50 }, allow_fallbacks: false } }),
                         ...(onDelta && { stream: true }),
                         ...(hasPdf && { plugins: [{ id: 'file-parser', pdf: { engine: PDF_ENGINE } }] }),

@@ -395,3 +395,42 @@ test('remaining batches run concurrently after the first batch while preserving 
         ctx.segments.map((s) => s.id),
     );
 });
+test('30-page grammar review requests json mode and succeeds with mixed empty and corrected batches', async () => {
+    const segments = Array.from({ length: 30 }, (_, i) => ({
+        id: `s${i}`,
+        text: (i % 6 === 0
+            ? `Chapter passage ${i} have an intentional verb error. `
+            : `Chapter passage ${i} reads cleanly without grammar errors. `).repeat(12),
+    }));
+    const ctx = {
+        task: 'writing-review-grammar',
+        pages: segments.map((s, i) => ({ number: i + 1, ids: [s.id] })),
+        segments,
+    };
+    const jsonFlags = [];
+    const run = createBookReview({
+        Checkpoint,
+        GenerationRequest,
+        model: 'grammar-30',
+        now: () => new Date(time),
+        getRequest: () => request,
+        generate: async (_cap, prompt, { beforeAttempt, json } = {}) => {
+            await beforeAttempt?.();
+            jsonFlags.push(Boolean(json));
+            const batch = JSON.parse(prompt.split('SOURCE: ')[1]);
+            const edits = batch.segments
+                .filter((s) => s.text.includes('have an intentional'))
+                .map((s) => ({
+                    id: s.id,
+                    text: s.text.replaceAll('have an intentional', 'has an intentional'),
+                }));
+            return {
+                text: `\`\`\`json\n${JSON.stringify({ edits })}\n\`\`\``,
+                finishReason: 'stop',
+            };
+        },
+    });
+    const res = await run(ctx);
+    assert.ok(jsonFlags.length > 1 && jsonFlags.every(Boolean));
+    assert.equal(res.edits.length, 5);
+});

@@ -282,11 +282,11 @@ const fetchYouTubeTranscript = async (url) => {
 };
 
 // Helper: API Call with Retry Logic (Exponential Backoff)
-const generateWithRetry = async (maxTokens, content, retries = 3, delay = 2000, onDelta) => {
+const generateWithRetry = async (maxTokens, content, retries = 3, delay = 2000, onDelta, options) => {
     let emitted = false;
     try {
         generationSignal()?.throwIfAborted();
-        return await complete(content, maxTokens, generationSignal(), onDelta && (text => { emitted = true; onDelta(text); }));
+        return await complete(content, maxTokens, generationSignal(), onDelta && (text => { emitted = true; onDelta(text); }), options);
     } catch (error) {
         const isRateLimit = error.message.includes('429') || error.message.includes('Too Many Requests');
         const isServiceUnavailable = error.message.includes('503') || error.message.includes('Overloaded');
@@ -294,7 +294,7 @@ const generateWithRetry = async (maxTokens, content, retries = 3, delay = 2000, 
         if (!emitted && retries > 0 && (isRateLimit || isServiceUnavailable)) {
             console.log(`⚠️ API Busy (Rate Limit). Retrying in ${delay / 1000}s... (${retries} attempts left)`);
             await sleep(delay);
-            return generateWithRetry(maxTokens, content, retries - 1, delay * 2, onDelta);
+            return generateWithRetry(maxTokens, content, retries - 1, delay * 2, onDelta, options);
         }
         throw error;
     }
@@ -693,7 +693,7 @@ Generate the follow-up response now:`;
             const result = await runBookReview(writingReview);
             return res.json({ response: JSON.stringify(result) });
         }
-        const result = await generateWithRetry(2048, prompt);
+        const result = await generateWithRetry(2048, prompt, undefined, undefined, undefined, writingReview ? { json: true } : undefined);
         const response = result.text;
 
         res.json({ response });

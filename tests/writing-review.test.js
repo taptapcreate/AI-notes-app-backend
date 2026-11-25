@@ -43,3 +43,45 @@ test('long chapters batch every prose segment exactly once', () => {
  const context=reviewContext(pageBody(30));context.segments.forEach(segment=>segment.text='prose '.repeat(500));
  const batches=reviewBatches(context);assert.ok(batches.length>1);assert.deepEqual(batches.flatMap(batch=>batch.segments),context.segments);
 });
+test('improve writing uses stylistic editing instructions distinct from fix grammar across selection, single-page, and multi-page scopes', () => {
+ const p1 = 'Julian was standing near the window. He was angry about the situation, and he was also frustrated because he could not leave the hotel. The weather outside was very bad. The wind was strong, and the snow was falling heavily.';
+ const p2 = 'Damian was sitting on the sofa. He looked at Julian and smiled because he knew that Julian was annoyed. Damian enjoyed annoying Julian, and he knew exactly what to say to make Julian even more annoyed. The room was quiet, but there was a lot of tension between the two men.';
+ for (const pages of [[{number:1,ids:['s0','s1']}],[{number:1,ids:['s0']},{number:2,ids:['s1']}]]) {
+  const ctx = reviewContext({writingReviewVersion:1,writingReviewPolicyVersion:2,bookPageBillingVersion:1,bookPageQuote:pages.length,context:JSON.stringify({task:'writing-review-improve',pages,segments:[{id:'s0',text:p1},{id:'s1',text:p2}]})});
+  const prompt = reviewPrompt(reviewBatches(ctx)[0]);
+  assert.match(prompt, /line and stylistic editor/);
+  assert.match(prompt, /even when grammar is already correct/);
+  assert.doesNotMatch(prompt, /First proofread every editable segment/);
+  assert.doesNotMatch(prompt, /When proofreading, preserve deliberate punctuation/);
+  const improved = {
+   edits: [
+    { id: 's0', text: 'Julian stood beside the frosted window, seething with anger and frustration at being trapped inside the hotel. Outside, a fierce gale howled down the street, driving heavy snow against the cold glass.' },
+    { id: 's1', text: 'Settled on the sofa, Damian watched him with a knowing smile, clearly reading Julian\'s irritation. He relished provoking his companion and knew precisely which quiet remark would push him past his breaking point, thickening the silence between them with unspoken tension.' },
+   ],
+  };
+  assert.equal(reviewResult(JSON.stringify(improved), ctx).edits.length, 2);
+  assert.throws(() => reviewResult(JSON.stringify({edits:[{id:'s0',text:'Julian was mad.'}]}), ctx), /omitted too much/);
+ }
+});
+test('grammar reviews parse wrapped or fenced JSON across 30-page chapters while rejecting truncated JSON', () => {
+ const segments = Array.from({ length: 30 }, (_, i) => ({
+  id: `s${i}`,
+  text: i % 5 === 0
+   ? `Page ${i + 1} have a clear grammar error in this sentence.`
+   : `Page ${i + 1} is already grammatically sound and reads cleanly.`,
+ }));
+ const pages = segments.map((s, i) => ({ number: i + 1, ids: [s.id] }));
+ const ctx = reviewContext({
+  writingReviewVersion: 1,
+  writingReviewPolicyVersion: 2,
+  bookPageBillingVersion: 1,
+  bookPageQuote: 30,
+  context: JSON.stringify({ task: 'writing-review-grammar', pages, segments }),
+ });
+ assert.deepEqual(reviewResult('No errors found.\n```json\n{"edits":[]}\n```', ctx), { edits: [] });
+ assert.deepEqual(
+  reviewResult('Here is your review:\n{"edits":[{"id":"s0","text":"Page 1 has a clear grammar error in this sentence."}]}\nDone.', ctx),
+  { edits: [{ id: 's0', text: 'Page 1 has a clear grammar error in this sentence.' }] },
+ );
+ assert.throws(() => reviewResult('{"edits":[{"id":"s0","text":"Truncated', ctx), SyntaxError);
+});

@@ -10,8 +10,9 @@ const limits = {
 const modes = ['next', 'alternatives', 'expand'];
 const bounded = (value, max) => typeof value === 'string' && value.length <= max;
 const wordCount = (text) => (text.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu) || []).length;
-function suggestionCost({ length = 'paragraph', includeContext = false } = {}, selectedText = '') {
-  return length === 'page' || includeContext || wordCount(selectedText) > limits.shortWords ? 2 : 1;
+function suggestionCost({ length = 'paragraph', count = 3, includeContext = false } = {}, selectedText = '') {
+  if (length === 'page') return count === 2 ? 2 : 3;
+  return includeContext || wordCount(selectedText) > limits.shortWords ? 2 : 1;
 }
 function suggestionContext(body) {
   let value;
@@ -52,9 +53,11 @@ function suggestionContext(body) {
   )
     fail();
   const mode = value.task.replace('book-suggestions-', '');
+  const allowedCounts =
+    mode === 'expand' ? [1] : mode === 'next' && value.length === 'page' ? [2, 3] : [3, 4];
   if (
     !['paragraph', 'page'].includes(value.length) ||
-    !(mode === 'expand' ? value.count === 1 : [3, 4].includes(value.count)) ||
+    !allowedCounts.includes(value.count) ||
     typeof value.includeContext !== 'boolean'
   )
     fail();
@@ -122,7 +125,7 @@ function suggestionResult(response, { count } = {}) {
   const options = parsed?.options;
   if (
     !Array.isArray(options) ||
-    (count ? options.length !== count : ![1, 3, 4].includes(options.length)) ||
+    (count ? options.length !== count : ![1, 2, 3, 4].includes(options.length)) ||
     options.some(
       (option) =>
         !bounded(option?.title, limits.title) ||

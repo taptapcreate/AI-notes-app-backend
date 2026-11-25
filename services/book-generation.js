@@ -16,7 +16,7 @@ function createBookGenerator({
     return async function generate(
         maxTokens,
         prompt,
-        { beforeAttempt = async () => {} } = {},
+        { beforeAttempt = async () => {}, json = false } = {},
     ) {
         const signal = getSignal();
         for (let attempt = 0; ; attempt++) {
@@ -24,7 +24,9 @@ function createBookGenerator({
             await beforeAttempt();
             signal?.throwIfAborted();
             try {
-                return await complete(prompt, maxTokens, signal);
+                return json
+                    ? await complete(prompt, maxTokens, signal, undefined, { json: true })
+                    : await complete(prompt, maxTokens, signal);
             } catch (error) {
                 if (signal?.aborted) throw error;
                 const status = Number(error.status || error.response?.status);

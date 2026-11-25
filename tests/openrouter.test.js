@@ -115,3 +115,14 @@ test('provider usage is retained without manuscript text and missing usage is no
  const missing=await createOpenRouter({chat:{completions:{create:async()=>({choices:[{message:{content:'Text'},finish_reason:'stop'}]})}}}).complete('Text',8000);
  assert.equal(missing.usage,undefined);
 });
+test('json option requests OpenRouter json_object response_format without affecting default completions', async () => {
+ const bodies = [];
+ const router = createOpenRouter({ chat: { completions: { create: async (body) => {
+  bodies.push(body);
+  return { choices: [{ message: { content: '{"edits":[]}' }, finish_reason: 'stop' }] };
+ } } } });
+ await router.complete('Return JSON', 8000, undefined, undefined, { json: true });
+ await router.complete('Return text', 8000);
+ assert.deepEqual(bodies[0].response_format, { type: 'json_object' });
+ assert.equal(bodies[1].response_format, undefined);
+});

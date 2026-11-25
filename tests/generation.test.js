@@ -945,7 +945,7 @@ test('new desktop Pro formats cannot bypass server membership checks', async t =
 });
 
 const bookSuggestionRequest = (extra = {}) => {
-    const value = { task:'book-suggestions-alternatives', book:'A story', template:'fiction', language:'English', length:'page', count:3, includeContext:false, selectedPassage:'The monster waited.', ...extra };
+    const value = { task:'book-suggestions-alternatives', book:'A story', template:'fiction', language:'English', length:'paragraph', count:3, includeContext:true, previousParagraph:'Before.', nextParagraph:'After.', selectedPassage:'The monster waited.', ...extra };
     return { type:'text', bookSuggestionsVersion:1, bookSuggestionQuote:2, content:JSON.stringify(value) };
 };
 test('Book Studio two-credit suggestions require Pro and reserve both units with cached-result idempotency', async t => {

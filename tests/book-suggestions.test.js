@@ -6,10 +6,13 @@ const { validateInput, validResult } = require('../services/generation');
 const context = { task:'book-suggestions-alternatives', book:'A story', template:'fiction', language:'English', length:'paragraph', count:3, includeContext:false, selectedPassage:'The monster waited.' };
 const request = extra => { const value={...context,...extra}; return { bookSuggestionsVersion:1, bookSuggestionQuote:suggestionCost(value,value.selectedPassage), type:'text', content:JSON.stringify(value) }; };
 test('backend computes each price from manuscript scope and refuses an underquote or a stripped capability marker', async () => {
- for (const extra of [{}, {selectedPassage:'word '.repeat(201)}, {length:'page'}, {includeContext:true,previousParagraph:'Before',nextParagraph:'After'}]) {
+ for (const extra of [{}, {selectedPassage:'word '.repeat(201)}, {task:'book-suggestions-next',selectedPassage:undefined,currentDraft:'Opening.',brief:'Brief.',outline:[],previousChapters:[],length:'page',count:2}, {task:'book-suggestions-next',selectedPassage:undefined,currentDraft:'Opening.',brief:'Brief.',outline:[],previousChapters:[],length:'page',count:3}, {includeContext:true,previousParagraph:'Before',nextParagraph:'After'}]) {
   const body=request(extra); assert.equal(await generationUnits('/notes',body),body.bookSuggestionQuote); validateInput('/notes',body);
  }
- assert.throws(()=>suggestionContext({...request({length:'page'}),bookSuggestionQuote:1}),/price changed/);
+ assert.equal(suggestionCost({ length: 'page', count: 2 }), 2);
+ assert.equal(suggestionCost({ length: 'page', count: 3 }), 3);
+ assert.throws(()=>suggestionContext({...request({length:'page',count:3}),bookSuggestionQuote:2}),/price changed/);
+ assert.throws(()=>suggestionContext({...request({task:'book-suggestions-next',selectedPassage:undefined,currentDraft:'Opening.',brief:'Brief.',outline:[],previousChapters:[],length:'page',count:4})}),/updated desktop/);
  assert.throws(()=>validateInput('/notes',{...request({}),bookSuggestionsVersion:undefined}),/updated desktop/);
  assert.throws(()=>validateInput('/followup',request({})),/notes endpoint/);
  assert.throws(()=>validateInput('/notes',request({currentDraft:'Unapproved whole chapter'})));

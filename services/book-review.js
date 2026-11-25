@@ -40,6 +40,7 @@ function createBookReview({
                         : `IMPORTANT: Your previous response could not be validated (${lastReason}). Return ONLY valid JSON using the exact segment IDs, keep every line break unchanged, and do not shorten any passage below 70% of its original word count.\n\n${basePrompt}`;
                 const result = await generate(8000, prompt, {
                     beforeAttempt,
+                    json: true,
                 });
                 if (result.finishReason === 'length') {
                     lastReason = 'output truncated before finishing JSON';
