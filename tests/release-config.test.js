@@ -32,3 +32,9 @@ test('schema persists platform settings without activating a forced update by de
     assert.equal(releaseConfig(new AppConfig({})).ios.forceUpdate, false);
     assert.ok(new AppConfig({ android: { minVersion: 'invalid' } }).validateSync());
 });
+
+test('mac release notes accept database lines and preserve optional versus forced policy', () => {
+ const config={macos:{minVersion:'1.0.0',latestVersion:'1.1.0',forceUpdate:false,releaseNotes:'Page reviews\nBetter layout'}};
+ const optional=releaseConfig(config).macos;assert.deepEqual(optional.releaseNotes,['Page reviews','Better layout']);assert.equal(optional.forceLatest,false);
+ config.macos.forceUpdate=true;assert.equal(releaseConfig(config).macos.forceLatest,true);
+});

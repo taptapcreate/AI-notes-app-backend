@@ -16,6 +16,10 @@ function storeURL(value, platform) {
     } catch { /* Use the app's official store URL. */ }
     return STORES[platform];
 }
+function releaseNotes(value) {
+    return (Array.isArray(value) ? value : [value]).filter(note => typeof note === 'string')
+        .flatMap(note => note.split(/\r?\n/)).map(note => note.trim()).filter(Boolean).slice(0, 10).map(note => note.slice(0, 500));
+}
 function releaseConfig(config) {
     const platforms = Object.fromEntries(['ios', 'android'].map(platform => {
         const settings = config[platform] || {};
@@ -31,12 +35,12 @@ function releaseConfig(config) {
             forceUpdate: settings.forceUpdate === true || compare(minVersion, '1.0.0') > 0,
             forceLatest: settings.forceUpdate === true,
             storeUrl: storeURL(settings.storeUrl || config.updateUrl, platform),
-            releaseNotes: Array.isArray(settings.releaseNotes) ? settings.releaseNotes.filter(note => typeof note === 'string' && note.trim()).slice(0, 10) : [],
+            releaseNotes: releaseNotes(settings.releaseNotes),
         }];
     }));
     // A mobile rollout must never force an update on the Mac.
     if (config.macos) {
-        const { minVersion, latestVersion, storeUrl, forceUpdate, releaseNotes } = config.macos;
+        const { minVersion, latestVersion, storeUrl, forceUpdate } = config.macos;
         const minimum = validVersion(minVersion) ? minVersion : '0.0.0';
         const latest = validVersion(latestVersion) && compare(latestVersion, minimum) >= 0
             ? latestVersion : minimum;
@@ -45,7 +49,7 @@ function releaseConfig(config) {
             latestVersion: latest,
             forceLatest: forceUpdate === true,
             storeUrl: storeURL(storeUrl, 'ios'),
-            releaseNotes: Array.isArray(releaseNotes) ? releaseNotes.filter(note => typeof note === 'string' && note.trim()).slice(0, 10) : [],
+            releaseNotes: releaseNotes(config.macos.releaseNotes),
         };
     }
     return platforms;

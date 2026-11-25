@@ -2,22 +2,56 @@ const writingStyle = 'Use natural punctuation in prose. Prefer commas, full stop
 function reviewContext(body) {
   let value;
   try { value = JSON.parse(body?.context); } catch {}
-  if (body?.writingReviewVersion === undefined && !['writing-review-grammar', 'writing-review-improve'].includes(value?.task)) return null;
+  if (body?.writingReviewVersion === undefined && !['writing-review-grammar', 'writing-review-improve', 'writing-review-revise'].includes(value?.task)) return null;
   if ((body.writingReviewVersion !== undefined && body.writingReviewVersion !== 1) ||
-      !['writing-review-grammar', 'writing-review-improve'].includes(value?.task) ||
-      !Array.isArray(value.segments) || !value.segments.length || value.segments.length > 500)
+      !['writing-review-grammar', 'writing-review-improve', 'writing-review-revise'].includes(value?.task) ||
+      !Array.isArray(value.segments) || !value.segments.length || value.segments.length > (body.bookPageBillingVersion === 1 ? 2000 : 500))
     throw Error('Choose valid prose to review.');
   if (body.writingReviewPolicyVersion !== undefined && body.writingReviewPolicyVersion !== 2)
     throw Error('Choose a supported writing review policy.');
   const seen = new Set();
   let total = 0;
   for (const segment of value.segments) {
-    if (!segment || typeof segment.id !== 'string' || !/^s\d{1,3}$/.test(segment.id) || seen.has(segment.id) ||
+    if (!segment || typeof segment.id !== 'string' || !/^s\d{1,4}$/.test(segment.id) || seen.has(segment.id) ||
         typeof segment.text !== 'string' || !segment.text.trim()) throw Error('Choose valid prose to review.');
     seen.add(segment.id); total += segment.text.length;
   }
-  if (total > 30000) throw Error('Review up to 30,000 characters at a time.');
+  if (total > (body.bookPageBillingVersion === 1 ? 80000 : 30000)) throw Error('Choose a shorter passage to review.');
+  if (value.task === 'writing-review-revise' && body.bookPageBillingVersion !== 1) throw Error('Chapter revisions require page billing.');
+  if (body.bookPageBillingVersion !== undefined) validateReviewPages(body, value);
   return value;
+}
+function validateReviewPages(body, value) {
+  if (body.writingReviewVersion !== 1 || body.bookPageBillingVersion !== 1 || body.writingReviewPolicyVersion !== 2 ||
+      !Array.isArray(value.pages) || !value.pages.length || value.pages.length > 500 ||
+      body.bookPageQuote !== value.pages.length || body.desktopMediaBilling !== undefined || body.additionalImages !== undefined)
+    throw Error('Refresh the selected-page credit estimate.');
+  const ids = new Set(value.segments.map(segment => segment.id));
+  const assigned = new Set();
+  let previous = 0;
+  for (const page of value.pages) {
+    if (!Number.isSafeInteger(page?.number) || page.number <= previous || page.number > 1000 ||
+        !Array.isArray(page.ids) || !page.ids.length) throw Error('Choose valid text pages.');
+    previous = page.number;
+    for (const id of page.ids) {
+      if (!ids.has(id) || assigned.has(id)) throw Error('Page text must appear exactly once.');
+      assigned.add(id);
+    }
+  }
+  if (assigned.size !== ids.size || value.segments.some(segment => /data:image\/|book-image:|data:application\//i.test(segment.text)))
+    throw Error('Only the selected page prose can be reviewed. Images stay on this device.');
+}
+function reviewBatches(context) {
+  const batches = [];
+  let segments = [], size = 0;
+  for (const segment of context.segments) {
+    if (segments.length && size + segment.text.length > 4500) {
+      batches.push({ ...context, segments, pages: undefined }); segments = []; size = 0;
+    }
+    segments.push(segment); size += segment.text.length;
+  }
+  if (segments.length) batches.push({ ...context, segments, pages: undefined });
+  return batches;
 }
 function reviewResult(response, context) {
   if (typeof response !== 'string') throw Error('The AI returned an unreadable review.');
@@ -36,7 +70,9 @@ function reviewResult(response, context) {
 }
 function reviewPrompt(context) {
   return [
-    context.task === 'writing-review-grammar'
+    context.task === 'writing-review-revise'
+      ? 'Revise this chapter prose for clearer writing, pacing, description, and dialogue. Preserve every substantive scene, event, character, relationship, fact, and plot beat. Preserve voice and comparable length. Do not summarize, omit material, or invent content. Return only the changed segments using their exact IDs.'
+      : context.task === 'writing-review-grammar'
       ? 'Proofread spelling, grammar, and punctuation, then polish awkward or wordy phrasing for fluent, natural prose. If grammar is already correct, look for useful improvements to precision, readability, and sentence flow. Preserve meaning, voice, dialect, intentional dialogue, and approximately the same length. Do not invent errors or change text merely to make it different.'
       : 'Improve clarity, flow, and phrasing while preserving meaning, tone, voice, language, and approximately the same length. Do not expand, summarize, or add new ideas.',
     writingStyle,
@@ -52,4 +88,4 @@ function writingReviewPrompt(context) {
   catch (error) { throw new Error('Invalid writing review source: ' + error.message); }
   return value ? reviewPrompt(value) : null;
 }
-module.exports = { reviewContext, reviewResult, reviewPrompt, writingStyle, writingReviewPrompt };
+module.exports = { reviewContext, reviewResult, reviewPrompt, writingStyle, writingReviewPrompt, validateReviewPages, reviewBatches };

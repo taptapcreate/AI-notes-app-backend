@@ -1,5 +1,5 @@
 const { suggestionContext, suggestionPrompt } = require('./services/book-suggestions');
-const { reviewContext, reviewPrompt } = require('./services/writing-review');
+const { reviewContext, reviewPrompt, reviewResult, reviewBatches } = require('./services/writing-review');
 const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
@@ -672,6 +672,15 @@ FORMAT YOUR RESPONSE AS:
 Generate the follow-up response now:`;
         }
 
+        if (writingReview && req.body.bookPageBillingVersion === 1) {
+            const edits = [];
+            for (const batch of reviewBatches(writingReview)) {
+                const result = await generateWithRetry(8000, reviewPrompt(batch));
+                if (result.finishReason === 'length') throw Error('The page review was incomplete.');
+                edits.push(...reviewResult(result.text, batch).edits);
+            }
+            return res.json({ response: JSON.stringify({ edits }) });
+        }
         const result = await generateWithRetry(2048, prompt);
         const response = result.text;
 
@@ -833,7 +842,7 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         // Explicitly normalized below so raw database copy cannot expand the consent UI.
-        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), helpSupport: helpSupport(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, bookSuggestionsVersion: 1, writingReviewVersion: 1, writingReviewPolicyVersion: 2, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), helpSupport: helpSupport(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, bookSuggestionsVersion: 1, writingReviewVersion: 1, writingReviewPolicyVersion: 2, bookPageBillingVersion: 1, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
     }

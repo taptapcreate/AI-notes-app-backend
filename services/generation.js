@@ -29,7 +29,7 @@ const REQUEST_ID =
 const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'website', 'import', 'documents', 'video', 'location', 'calendar', 'sketch']);
 const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
 const PRO_SOURCES = new Set(['location', 'calendar', 'sketch']);
-const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'mediaCreditQuote', 'pdfEvidence', 'additionalImages', 'bookSuggestionsVersion', 'writingReviewVersion', 'desktopProFormatVersion']
+const needsAuthenticatedBilling = (body) => ['appFeature', 'featurePolicyVersion', 'replyTool', 'attachmentText', 'mobileMediaBilling', 'desktopMediaBilling', 'pdfOcrCreditQuote', 'mediaCreditQuote', 'pdfEvidence', 'additionalImages', 'bookSuggestionsVersion', 'bookPageBillingVersion', 'writingReviewVersion', 'desktopProFormatVersion']
     .some(field => body?.[field] !== undefined);
 const requiresPro = (body) => body.bookSuggestionsVersion === 1 || body.writingReviewVersion === 1 || body.desktopProFormatVersion === 1 || PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
     (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));
@@ -42,7 +42,7 @@ function validateInput(endpoint, body) {
     if (body.additionalImages !== undefined && endpoint !== '/notes')
         throw new CreditError(400, 'Image batches require an image note.');
     validateImageBatch(body);
-    if (body.billingMode !== undefined && !['free', 'purchased', ...(body.desktopMediaBilling === 1 || body.mobileMediaBilling === 1 || body.bookSuggestionsVersion === 1 ? ['mixed'] : [])].includes(body.billingMode))
+    if (body.billingMode !== undefined && !['free', 'purchased', ...(body.desktopMediaBilling === 1 || body.mobileMediaBilling === 1 || body.bookSuggestionsVersion === 1 || body.bookPageBillingVersion === 1 ? ['mixed'] : [])].includes(body.billingMode))
         throw new CreditError(400, 'Invalid billing mode');
     const text = (value, max = 2000000) => {
         if (typeof value !== 'string' || !value.trim() || value.length > max)
@@ -52,7 +52,7 @@ function validateInput(endpoint, body) {
         const suggestions = suggestionContext(body);
         if (suggestions && endpoint !== '/notes') throw Error('Book suggestions require the notes endpoint.');
     } catch (error) { throw new CreditError(400, error.message); }
-    if (body.writingReviewVersion !== undefined && endpoint !== '/followup')
+    if ((body.writingReviewVersion !== undefined || body.bookPageBillingVersion !== undefined) && endpoint !== '/followup')
         throw new CreditError(400, 'Writing reviews require the review endpoint.');
     if (body.desktopProFormatVersion !== undefined && (body.desktopProFormatVersion !== 1 || endpoint !== '/notes' || !['email', 'recipe'].includes(body.format)))
         throw new CreditError(400, 'Invalid desktop Pro format.');

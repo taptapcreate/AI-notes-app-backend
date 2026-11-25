@@ -1038,3 +1038,17 @@ test('older review clients retain their original receipt contract until upgraded
     assert.equal(result.status, 200);
     assert.equal(result.body.billing.charged, true);
 });
+
+const chapterPageBody = () => ({...reviewBody,bookPageBillingVersion:1,bookPageQuote:5,context:JSON.stringify({task:'writing-review-revise',segments:Array.from({length:5},(_,i)=>({id:'s'+i,text:'Page prose '+i+'.'})),pages:Array.from({length:5},(_,i)=>({number:i+1,ids:['s'+i]}))})});
+test('five-page chapter bills five units once; unchanged and failed reviews refund all five', async t => {
+ config.subscriberDailyLimit=10; member={isPro:true};
+ for(const outcome of ['changed','unchanged','failed']) {
+  const code=await account(), id=randomUUID(), body=chapterPageBody();
+  const request=await api(t,(_,res)=>res.json({response:outcome==='failed'?'broken':JSON.stringify({edits:outcome==='changed'?[{id:'s0',text:'Improved first page prose.'}]:[]})}));
+  const result=await request(code,id,body,'/api/followup');
+  assert.equal(result.status,outcome==='failed'?502:200);
+  const record=await GenerationRequest.findOne({requestId:id}).lean();assert.equal(record.reservation.proUnits,5);
+  assert.equal((await credits.byCode(code)).dailyRequestCount,outcome==='changed'?5:0);
+  await request(code,id,body,'/api/followup');assert.equal((await credits.byCode(code)).dailyRequestCount,outcome==='changed'?5:0);
+ }
+});

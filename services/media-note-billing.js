@@ -82,6 +82,13 @@ async function generationUnits(endpoint, body, config) {
             return suggestions.cost;
         }
     } catch (error) { throw new CreditError(400, error.message); }
+    if (body.bookPageBillingVersion !== undefined) {
+        try {
+            const review = require('./writing-review').reviewContext(body);
+            if (endpoint !== '/followup' || !review) throw Error('Page reviews require the writing review endpoint.');
+            return review.pages.length;
+        } catch (error) { throw new CreditError(400, error.message); }
+    }
     validatePdfEvidence(endpoint, body);
     validateImageBatch(body);
     const desktop = body.desktopMediaBilling !== undefined;
