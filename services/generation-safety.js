@@ -39,4 +39,31 @@ async function checkConcurrentRequests(Request, code, now, session) {
             { code: 'AI_CONCURRENCY_LIMIT' },
         );
 }
-module.exports = { checkFailureCooldown, checkConcurrentRequests };
+async function checkUnchangedReviewLimit(Request, code, bodyHash, now) {
+    if (
+        (await Request.countDocuments({
+            recoveryCode: code,
+            bodyHash,
+            state: 'unchanged',
+            createdAt: { $gte: new Date(now.getTime() - 24 * 60 * 60000) },
+        })) >= 2
+    )
+        throw new CreditError(
+            429,
+            'This exact text already passed review with no changes needed. Edit the text before running another review.',
+            { code: 'UNCHANGED_REVIEW_LIMIT', retryAfterSeconds: 3600 },
+        );
+    if (
+        (await Request.countDocuments({
+            recoveryCode: code,
+            state: 'unchanged',
+            createdAt: { $gte: new Date(now.getTime() - 15 * 60000) },
+        })) >= 6
+    )
+        throw new CreditError(
+            429,
+            'Too many consecutive no-change reviews were requested in a short time. Wait a few minutes or edit your text before trying again.',
+            { code: 'UNCHANGED_REVIEW_COOLDOWN', retryAfterSeconds: 900 },
+        );
+}
+module.exports = { checkFailureCooldown, checkConcurrentRequests, checkUnchangedReviewLimit };

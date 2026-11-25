@@ -148,6 +148,8 @@ const { complete, transcribe } = createOpenRouter(new OpenAI({
     onTiming: timing => {
     const request = generationContext.getStore();
     console.info('AI provider timing', { ...timing, endpoint: request?.endpoint, ...(request?.bookOperation && {operation: request.bookOperation}),
+        ...(request?.retryCount && { retryCount: request.retryCount }),
+        ...(request?.validationRetries && { validationRetries: request.validationRetries }),
         ...(request?.startedAt === undefined ? {} : {
             beforeModelMs: Math.max(0, Math.round(performance.now() - request.startedAt - timing.durationMs)),
         }),
@@ -158,7 +160,10 @@ const bookGenerate = require('./services/book-generation').createBookGenerator({
     const request = generationContext.getStore();
     if (request && !request.bookOperation) request.bookOperation = 'book-suggestion';
     return complete(...args);
-}, getSignal: generationSignal });
+}, getSignal: generationSignal, onRetry: () => {
+    const request = generationContext.getStore();
+    if (request) request.retryCount = (request.retryCount || 0) + 1;
+} });
 const runBookReview = require('./services/book-review').createBookReview({
     Checkpoint: require('./models/BookReviewCheckpoint'), GenerationRequest, generate: bookGenerate,
     model: MODEL, getRequest: () => generationContext.getStore(),

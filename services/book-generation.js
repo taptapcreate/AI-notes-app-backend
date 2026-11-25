@@ -12,6 +12,7 @@ function createBookGenerator({
     getSignal = () => undefined,
     sleep = delay,
     random = Math.random,
+    onRetry = () => {},
 }) {
     return async function generate(
         maxTokens,
@@ -55,6 +56,7 @@ function createBookGenerator({
                     Number.isFinite(retryAfter) ? retryAfter : 0,
                     750 * 2 ** attempt + Math.floor(random() * 400),
                 );
+                onRetry({ attempt: attempt + 1, status, delayMs: milliseconds });
                 await sleep(milliseconds, undefined, { signal });
             }
         }

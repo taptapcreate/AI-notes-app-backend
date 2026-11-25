@@ -359,8 +359,10 @@ function createGeneration({
         };
         const existing = await GenerationRequest.findById(id).lean();
         if (existing) return check(existing);
-        const config = requestConfig ?? await getAppConfig();
         await require('./generation-safety').checkFailureCooldown(GenerationRequest, code, now());
+        if (endpoint === '/followup' && body.writingReviewPolicyVersion === 2)
+            await require('./generation-safety').checkUnchangedReviewLimit(GenerationRequest, code, bodyHash, now());
+        const config = requestConfig ?? await getAppConfig();
         const units = await generationUnits(endpoint, body, config);
         await credits.balance(code, undefined, config); // Initialize any legacy allowance before reserving.
         const rules = policy(config);

@@ -17,6 +17,7 @@ test('reviews have a dedicated JSON prompt and preserve expressive prose without
  const context = reviewContext(body);
  assert.deepEqual(reviewResult('{"edits":[]}', context), { edits: [] });
  assert.match(reviewPrompt(context), /smallest useful change/);
+ assert.match(reviewPrompt(context), /light, targeted polish/);
  assert.match(reviewPrompt(context), /invent errors/);
  assert.match(reviewPrompt(context), /Return ONLY valid JSON/);
  assert.doesNotMatch(reviewPrompt(context), /Follow-up Answer/);

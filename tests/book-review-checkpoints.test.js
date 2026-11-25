@@ -331,6 +331,7 @@ test('transient validation errors retry with guidance and persistent omissions r
     const res = await retried(ctx);
     assert.equal(res.edits.length, ctx.segments.length);
     assert.equal(seenRetryGuidance, true);
+    assert.ok(request.validationRetries >= 1);
 
     await GenerationRequest.updateOne({ _id: request.generationId }, { $set: { state: 'failed' } });
     request = await attempt();

@@ -1034,6 +1034,19 @@ test('unchanged reviews do not reappear as usage when counters are reconstructed
     assert.equal((await credits.balance(code)).subscriberDailyUsage, 0);
     assert.equal((await credits.balance(code)).subscriberDailyRemaining, 2);
 });
+test('repeated unchanged reviews on identical content allow one recheck then block free provider loops', async t => {
+    member = { isPro: true };
+    const code = await account();
+    const request = await api(t, (_, res) => res.json({ response: JSON.stringify({ edits: [] }) }));
+    const first = await request(code, randomUUID(), reviewBody, '/api/followup');
+    const second = await request(code, randomUUID(), reviewBody, '/api/followup');
+    const third = await request(code, randomUUID(), reviewBody, '/api/followup');
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(third.status, 429);
+    assert.equal(third.body.code, 'UNCHANGED_REVIEW_LIMIT');
+    assert.equal(calls, 2);
+});
 
 test('older review clients retain their original receipt contract until upgraded', async t => {
     member = { isPro: true };

@@ -34,6 +34,7 @@ function createBookReview({
             const basePrompt = reviewPrompt(batch);
             let lastReason = '';
             for (let attempt = 0; attempt < maxBatchValidationAttempts; attempt++) {
+                if (attempt > 0) request.validationRetries = (request.validationRetries || 0) + 1;
                 const prompt =
                     attempt === 0
                         ? basePrompt
