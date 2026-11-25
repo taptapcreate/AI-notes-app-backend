@@ -1136,3 +1136,20 @@ test('oversized source and instructions fail before any reservation or model exe
     assert.equal(calls, 0); assert.equal(await GenerationRequest.countDocuments(), 0);
     assert.equal((await credits.balance(code)).totalAvailable, 7);
 });
+
+test('local passage deletion in a page review refunds before billing finalizes and replays without another AI call', async t => {
+    const code = await account(); member = { isPro: true };
+    const sentence = 'The report says that Mira and Daniel Vale are — are — that they are — missing.';
+    const body = { type: 'note', writingReviewVersion: 1, writingReviewPolicyVersion: 2,
+        bookPageBillingVersion: 1, bookPageQuote: 1,
+        context: JSON.stringify({ task: 'writing-review-revise', pages: [{ number: 1, ids: ['s0','s1'] }], segments: [
+            { id: 's0', text: sentence }, { id: 's1', text: 'The rest of this chapter remains intact. '.repeat(80) },
+        ] }), question: 'Revise this chapter.' };
+    const request = await api(t, (_, res) => res.json({ response: JSON.stringify({ edits: [{ id: 's0', text: 'The report says that Mira and missing.' }] }) }));
+    const id = randomUUID(), before = await credits.balance(code);
+    const result = await request(code, id, body, '/api/followup');
+    assert.equal(result.status, 502); assert.equal(result.body.billing.charged, false);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, before.subscriberDailyRemaining);
+    assert.equal((await request(code,id,body,'/api/followup')).status,502);
+    assert.equal(calls,1);
+});

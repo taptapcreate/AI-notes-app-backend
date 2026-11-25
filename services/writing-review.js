@@ -71,6 +71,11 @@ function reviewResult(response, context) {
         edit.text.length > Math.max(1000, segment.text.length * 3) ||
         (edit.text.match(/\r?\n/g) || []).join('') !== (segment.text.match(/\r?\n/g) || []).join(''))
       throw Error('The AI review could not be matched safely to your text.');
+    // Aggregate chapter length can hide a destroyed sentence inside otherwise intact prose.
+    // Reject severe local omissions too; this is a structural guard, not a semantic guarantee.
+    const sourceWords = segment.text.trim().split(/\s+/u).length;
+    if (sourceWords >= 12 && edit.text.trim().split(/\s+/u).length < Math.ceil(sourceWords * 0.7))
+      throw Error('The AI review omitted too much of a passage. Your text is unchanged.');
     seen.add(edit.id);
   }
   if (context.task === 'writing-review-revise' && context.pages) {

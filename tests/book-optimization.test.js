@@ -248,3 +248,26 @@ test('unapproved nested metadata does not leak through short chapter context', (
     });
     assert.doesNotMatch(suggestionPrompt(value), /NESTED_PRIVATE/);
 });
+
+test('a truncated local dialogue cannot hide inside an otherwise intact chapter', () => {
+    const { reviewResult } = require('../services/writing-review');
+    const sentence = 'The report says that Mira and Daniel Vale are — are — that they are — missing.';
+    const context = { task: 'writing-review-revise', pages: [{ number: 1, ids: ['s0', 's1'] }], segments: [
+        { id: 's0', text: sentence }, { id: 's1', text: 'Unchanged surrounding prose. '.repeat(100) },
+    ] };
+    assert.throws(() => reviewResult(JSON.stringify({ edits: [{ id: 's0', text: 'The report says that Mira and missing.' }] }), context), /omitted too much/);
+    assert.equal(reviewResult(JSON.stringify({ edits: [{ id: 's0', text: sentence.replace('says that', 'says') }] }), context).edits.length, 1);
+});
+
+test('a 5000-word chapter keeps every source segment exactly once across batch boundaries', () => {
+    const { reviewBatches, reviewResult } = require('../services/writing-review');
+    const segments = Array.from({ length: 40 }, (_, index) => ({ id: `s${index}`, text: `Section ${index} ` + 'carefully documented facts remain in their original order '.repeat(16) }));
+    const context = { task: 'writing-review-revise', segments, pages: segments.map((s,index) => ({ number: index + 1, ids: [s.id] })) };
+    assert(segments.map(s => s.text).join(' ').split(/\s+/u).length > 5000);
+    const batches = reviewBatches(context);
+    assert(batches.length > 1);
+    assert.deepEqual(batches.flatMap(batch => batch.segments), segments);
+    const combined = batches.flatMap(batch => reviewResult(JSON.stringify({ edits: batch.segments.map(s => ({ id: s.id, text: s.text })) }), batch).edits);
+    assert.equal(reviewResult(JSON.stringify({ edits: combined }), context).edits.length, segments.length);
+    assert.throws(() => reviewResult(JSON.stringify({ edits: [combined[0],combined[0]] }), context), /matched safely/);
+});
