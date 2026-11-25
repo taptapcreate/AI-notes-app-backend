@@ -86,3 +86,10 @@ test('grammar reviews parse wrapped or fenced JSON across 30-page chapters while
  );
  assert.throws(() => reviewResult('{"edits":[{"id":"s0","text":"Truncated', ctx), SyntaxError);
 });
+test('revise chapter prompt requires evaluating every segment and repairing fused or corrupted words', () => {
+ const ctx = reviewContext(pageBody(3));
+ const prompt = reviewPrompt(reviewBatches(ctx)[0]);
+ assert.match(prompt, /Evaluate every segment in SOURCE\.segments thoroughly/);
+ assert.match(prompt, /fused or split words/);
+ assert.match(prompt, /accidental word or character corruption/);
+});
