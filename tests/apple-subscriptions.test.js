@@ -681,8 +681,8 @@ test('verified StoreKit grants weekly and monthly allowances per Apple transacti
     const request = await generation.begin(codes[1], randomUUID(), '/notes', source);
     await generation.finish(request.record._id, 200, { notes: 'Paid weekly note' });
     config.monthlySubscriptionCredits = 800;
-    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 800);
-    assert.equal((await credits.balance(codes[1])).subscriberDailyRemaining, 199);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 600);
+    assert.equal((await credits.balance(codes[1])).subscriberDailyRemaining, 149);
 
     time = new Date(weeklyProof.expiresDate);
     const renewed = await attach(codes[1], {
@@ -878,4 +878,65 @@ test('a failed generation at expiry returns credits for a late continuous renewa
     const { subscriberCreditBuckets: buckets } = await credits.balance(codes[0]);
     assert.equal(buckets.current.remaining, 8);
     assert.equal(buckets.rollover.remaining, 8);
+});
+
+for (const rollover of [false, true]) test(`paid monthly grant survives global reduction, restore and next renewal (rollover=${rollover})`, async () => {
+    Object.assign(config, { dailySubscriptionAllowanceEnabled: false, monthlySubscriptionCredits: 600,
+        subscriptionRollover: { monthlyEnabled: rollover, maxCarryPeriods: 1 } });
+    const original = proof();
+    await attach(codes[0], original);
+    const request = await generation.begin(codes[0], randomUUID(), '/notes', source);
+    await generation.finish(request.record._id, 200, { notes: 'Saved' });
+    config.monthlySubscriptionCredits = 300;
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 599);
+    await Subscription.deleteOne({ _id: (await status(codes[0])).quotaId });
+    await attach(codes[0], original);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 599);
+    await service.webhook({ type: 'CANCELLATION', store: 'APP_STORE', environment: 'SANDBOX',
+        original_transaction_id: original.originalTransactionId, transaction_id: original.transactionId,
+        event_timestamp_ms: time.getTime() + 1, expiration_at_ms: original.expiresDate, cancel_reason: 'UNSUBSCRIBE' });
+    assert.equal((await status(codes[0])).isPro, true);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 599);
+    time = new Date(original.expiresDate + 1000);
+    await attach(codes[0], { transactionId: '100000000099', purchaseDate: original.expiresDate,
+        expiresDate: original.expiresDate + 3600000 });
+    const renewed = await credits.balance(codes[0]);
+    assert.equal(renewed.subscriberDailyRemaining, rollover ? 899 : 300);
+    if (rollover) assert.equal(renewed.subscriberCreditBuckets.current.limit, 300);
+    await attach(codes[1], { originalTransactionId: '100000000101', transactionId: '100000000102' });
+    assert.equal((await credits.balance(codes[1])).subscriberDailyRemaining, 300);
+});
+
+test('backfill pins legacy monthly and weekly grants before config changes, including recovery-only records', async () => {
+    config.dailySubscriptionAllowanceEnabled = false;
+    await attach(codes[0]);
+    await attach(codes[1], { productId: 'ai_notes_pro_weekly_subscription', originalTransactionId: '100000000901', transactionId: '100000000902' });
+    await Subscription.updateMany({}, { $unset: { periodCreditLimit: '', periodCreditTransactionId: '' } });
+    await AccountRecovery.updateMany({ kind: 'subscription' }, { $unset: { 'snapshot.periodCreditLimit': '', 'snapshot.periodCreditTransactionId': '' } });
+    const id = (await status(codes[1])).quotaId;
+    await Subscription.deleteOne({ _id: id });
+    await service.backfillPaidGrants(config);
+    config.monthlySubscriptionCredits = 300;
+    await service.backfillPaidGrants(config);
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 600);
+    assert.equal((await credits.balance(codes[1])).subscriberDailyRemaining, 150);
+});
+
+test('weekly reduction and lapsed monthly resubscription use current terms only for the new period', async () => {
+    Object.assign(config, { dailySubscriptionAllowanceEnabled: false, monthlySubscriptionCredits: 600 });
+    const weekly = proof({ productId: 'ai_notes_pro_weekly_subscription' });
+    await attach(codes[0], weekly);
+    config.monthlySubscriptionCredits = 300;
+    assert.equal((await credits.balance(codes[0])).subscriberDailyRemaining, 150);
+    time = new Date(weekly.expiresDate + 1000);
+    const next = { ...weekly, transactionId: '100000000987', purchaseDate: time.getTime(), expiresDate: time.getTime() + 3600000 };
+    assert.equal((await attach(codes[0], next)).subscriberDailyRemaining, 75);
+    config.monthlySubscriptionCredits = 600;
+    const monthly = proof({ originalTransactionId: '100000000991', transactionId: '100000000992' });
+    await attach(codes[1], monthly);
+    config.monthlySubscriptionCredits = 300;
+    time = new Date(monthly.expiresDate + 86400000);
+    assert.equal((await status(codes[1])).isPro, false);
+    const resumed = await attach(codes[1], { ...monthly, transactionId: '100000000993', purchaseDate: time.getTime(), expiresDate: time.getTime() + 3600000 });
+    assert.equal(resumed.subscriberDailyRemaining, 300);
 });

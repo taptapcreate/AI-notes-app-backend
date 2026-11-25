@@ -110,6 +110,7 @@ const accountStorageReady = mongoose.connect(process.env.MONGODB_URI, { dbName: 
                 User, Subscription: AppleSubscription, Backup: require('./models/AccountRecovery'),
             })],
             ['trial grants', async () => appleSubscriptions.backfillTrialGrants(await getAppConfig())],
+            ['paid period grants', async () => appleSubscriptions.backfillPaidGrants(await getAppConfig())],
         ];
         const results = await Promise.allSettled(deferred.map(([, task]) => task()));
         for (const [index, result] of results.entries())

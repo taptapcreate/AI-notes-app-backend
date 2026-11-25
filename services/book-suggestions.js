@@ -210,6 +210,7 @@ function suggestionPrompt(value) {
         : length === 'page'
           ? 'Write roughly 350–500 words per alternative, several coherent paragraphs. Check the word count before returning; do not substitute a short paragraph for this length.'
           : 'Write roughly 120–180 words per alternative, a substantial paragraph or two. Check the word count before returning.',
+    ...(mode === 'next' ? ['Maintain the established timeline: compare the current time with stated deadlines, travel times, and waiting periods before writing. A future scheduled event must not happen immediately unless the prose explicitly accounts for the elapsed time. Do not change a stated departure time, compress a long wait into minutes, or contradict the latest clock reading. Keep unopened items unopened until an action opens them, and retain who knows or possesses each item. Each option title must describe events actually present in that option.'] : []),
     value.includeContext
       ? 'The previous and next paragraphs are context only. Use them to preserve continuity, chronology and character motivations. Treat the selection boundaries as exact, including partial sentences. Do not copy or rewrite the context, repeat its content, or add a transition that belongs outside the selection.'
       : 'Use only the supplied manuscript data. Do not invent missing context or facts.',

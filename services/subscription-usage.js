@@ -124,7 +124,9 @@ function allowanceWindow(subscription, config) {
         throw new CreditError(503, 'Subscription period needs support review');
     const limit = period === 'trial'
         ? configuredCreditLimit(subscription.trialCreditLimit, 0, 0)
-        : period === 'monthly' ? configuredMonthlyLimit(config) : getWeeklySubscriptionCredits(config);
+        : subscription.periodCreditTransactionId === subscription.transactionId
+            ? configuredCreditLimit(subscription.periodCreditLimit, NaN, 0)
+            : period === 'monthly' ? configuredMonthlyLimit(config) : getWeeklySubscriptionCredits(config);
     return { period, limit, reset, transactionId: subscription.transactionId };
 }
 

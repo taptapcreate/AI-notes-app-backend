@@ -6,7 +6,7 @@ const {
     Environment,
 } = require('@apple/app-store-server-library');
 const { CreditError } = require('./credit-policy');
-const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT, WEEKLY_PRODUCT, paidAllowancePeriod, trialCreditLimit } = require('./subscription-usage');
+const { dailySubscriptionUsage, requestHistoryUsage, MONTHLY_PRODUCT, WEEKLY_PRODUCT, paidAllowancePeriod, trialCreditLimit, subscriptionAllowances } = require('./subscription-usage');
 const { monthlyUsage } = require('./subscription-credit-ledger');
 const { timeSubscriptionOperation: timeSubscription } = require('./subscription-timing');
 const BUNDLE_ID = 'com.taptapcreate.ainotes';
@@ -149,6 +149,34 @@ function createAppleSubscriptions({
             await backfill(backup.identity);
     }
 
+    async function pinPaidGrant(record, config, timestamp, session, ledger) {
+        if (!record?.transactionId || !['monthly', 'weekly'].includes(record.allowancePeriod) ||
+            record.periodCreditTransactionId === record.transactionId ||
+            config.dailySubscriptionAllowanceEnabled === true) return record;
+        const limit = ledger?.subscriberCreditBuckets?.current?.limit ?? subscriptionAllowances(config)[record.allowancePeriod];
+        const set = { periodCreditTransactionId: record.transactionId, periodCreditLimit: limit };
+        await Subscription.updateOne({ _id: record._id, transactionId: record.transactionId }, { $set: set }, { session });
+        await subscriptionRecovery.checkpoint(record._id, session);
+        return { ...record, ...set };
+    }
+
+    async function backfillPaidGrants(config) {
+        // Run before changing global limits. Historical grants cannot be inferred from a new limit.
+        if (config.dailySubscriptionAllowanceEnabled === true) return;
+        const filter = { allowancePeriod: { $in: ['monthly', 'weekly'] }, expiresAt: { $gt: now() },
+            revokedAt: null, isUpgraded: { $ne: true } };
+        const backfill = id => transaction(async session => {
+            const record = await subscriptionRecovery.ensure(id, session);
+            if (!active(record) || !['monthly', 'weekly'].includes(record.allowancePeriod)) return;
+            const ledger = await monthlyUsage(record, config, now(), session, GenerationRequest);
+            await pinPaidGrant(record, config, now(), session, ledger);
+        });
+        for await (const record of Subscription.find(filter).select('_id').lean().cursor()) await backfill(record._id);
+        const snapshotFilter = Object.fromEntries(Object.entries(filter).map(([key, value]) => ['snapshot.' + key, value]));
+        for await (const backup of Backup.find({ kind: 'subscription', ...snapshotFilter }).select('identity').lean().cursor())
+            await backfill(backup.identity);
+    }
+
     async function installPeriod(record, set, timestamp, session) {
         const config = await getAppConfig();
         if (set.transactionId && set.transactionId !== record.transactionId && record.expiresAt &&
@@ -157,7 +185,15 @@ function createAppleSubscriptions({
             const previousTime = new Date(Math.min(timestamp.getTime(), record.expiresAt.getTime() - 1));
             await monthlyUsage(record, config, previousTime, session, GenerationRequest);
         }
-        await monthlyUsage({ ...record, ...set }, config, timestamp, session, GenerationRequest);
+        const next = { ...record, ...set };
+        const ledger = await monthlyUsage(next, config, timestamp, session, GenerationRequest);
+        if (next.transactionId && ['monthly', 'weekly'].includes(next.allowancePeriod) &&
+            config.dailySubscriptionAllowanceEnabled !== true && next.periodCreditTransactionId !== next.transactionId) {
+            set.periodCreditTransactionId = next.transactionId;
+            set.periodCreditLimit = ledger?.subscriberCreditBuckets?.current?.limit ?? subscriptionAllowances(config)[next.allowancePeriod];
+        }
+        return { ...(set.periodCreditTransactionId !== undefined && { periodCreditTransactionId: set.periodCreditTransactionId,
+            periodCreditLimit: set.periodCreditLimit }) };
     }
 
     async function promoteRenewal(record, session) {
@@ -221,8 +257,9 @@ function createAppleSubscriptions({
         return membershipFor(await recordFor(user, undefined, sandboxIds), sandboxIds);
     }
     async function usageFor(user, record, config, timestamp, session) {
-        const target = record || (user.appleSubscriptionIds?.length ? { recoveryCode: user.recoveryCode } : user);
         const ledger = await monthlyUsage(record, config, timestamp, session, GenerationRequest);
+        record = await pinPaidGrant(record, config, timestamp, session, ledger);
+        const target = record || (user.appleSubscriptionIds?.length ? { recoveryCode: user.recoveryCode } : user);
         return {
             ...(ledger ?? await requestHistoryUsage(target, config, timestamp, session, GenerationRequest)),
             subscriptionIdentityVersion: 1,
@@ -399,7 +436,7 @@ function createAppleSubscriptions({
                     set.subscriberDailyLimitOverride =
                         user.subscriberDailyLimitOverride;
             }
-            await installPeriod(current, { ...set, revokedTransactions: [...revoked] }, timestamp, session);
+            Object.assign(set, await installPeriod(current, { ...set, revokedTransactions: [...revoked] }, timestamp, session));
             const update = {
                 $set: set,
                 $addToSet: { revokedTransactions: { $each: [...revoked] } },
@@ -562,8 +599,8 @@ function createAppleSubscriptions({
                     );
                 }
             }
-            await installPeriod(record, { ...set, revokedTransactions: refunded
-                ? [...(record.revokedTransactions || []), event.transaction_id] : record.revokedTransactions }, now(), session);
+            Object.assign(set, await installPeriod(record, { ...set, revokedTransactions: refunded
+                ? [...(record.revokedTransactions || []), event.transaction_id] : record.revokedTransactions }, now(), session));
             const update = { $set: set };
             if (refunded)
                 update.$addToSet = {
@@ -615,7 +652,7 @@ function createAppleSubscriptions({
             payload.isUpgraded !== true
         ).map(payload => identity(payload.environment, payload.originalTransactionId)))];
     }
-    return { attach, status, usage, snapshot, webhook, active, recordFor, resolveStoreKitScope, backfillTrialGrants };
+    return { attach, status, usage, snapshot, webhook, active, recordFor, resolveStoreKitScope, backfillTrialGrants, backfillPaidGrants };
 }
 module.exports = {
     canUseAppleRecord,
