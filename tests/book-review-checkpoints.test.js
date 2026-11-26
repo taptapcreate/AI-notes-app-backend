@@ -494,3 +494,55 @@ test('cross-batch conflict preserves independently valid chunks and retries only
  await GenerationRequest.updateOne({_id:request.generationId},{$set:{state:'failed'}});request=await attempt();repair=true;
  assert.equal((await run(ctx)).edits.length,1);assert.equal(providerCalls,5);assert.equal(request.reusedChunks,1);
 });
+
+test('17-page bulk revise, grammar, and improve reviews recover when a batch returns malformed JSON via split-batch fallback', async () => {
+ for (const task of ['writing-review-revise', 'writing-review-grammar', 'writing-review-improve']) {
+  await Checkpoint.deleteMany({});
+  await GenerationRequest.deleteMany({});
+  request = await attempt();
+  // ~17 pages, ~4,872 words across 68 formatted paragraphs (~280 words each? 68 * 72 = ~4,896 words)
+  const para = '“Look at that old streetlamp by the iron gate,” Mira whispered while rain tapped against the windowpane and shadows stretched across the hall. She adjusted her wool coat, checked the pocket watch inside her sleeve, stepped quietly over the creaking floorboards toward the doorway, and waited for Daniel before opening the heavy wooden latch in the dim corridor.';
+  const segments = Array.from({ length: 84 }, (_, i) => ({
+   id: `s${i}`,
+   text: `Passage ${i + 1}: ${para}`,
+  }));
+  const pages = Array.from({ length: 17 }, (_, p) => ({
+   number: p + 1,
+   ids: segments.slice(p * 5, Math.min(segments.length, (p + 1) * 5)).map((s) => s.id),
+  })).filter((p) => p.ids.length);
+  const ctx = { task, pages, segments };
+  const batches = reviewBatches(ctx);
+  assert.ok(batches.length >= 5);
+  const failingBatchIds = new Set(batches[1].segments.map((s) => s.id));
+  const seenSplits = [];
+  const run = createBookReview({
+   Checkpoint,
+   GenerationRequest,
+   model: `bulk-${task}`,
+   now: () => new Date(time),
+   getRequest: () => request,
+   generate: async (_cap, prompt, { beforeAttempt }) => {
+    await beforeAttempt();
+    const input = JSON.parse(prompt.split('SOURCE: ')[1]);
+    const ids = input.segments.map((s) => s.id);
+    if (ids.length === failingBatchIds.size && ids.every((id) => failingBatchIds.has(id))) {
+     return { text: '{"edits":[{"id":"' + ids[0] + '","text":"unterminated', finishReason: 'stop' };
+    }
+    if (ids.some((id) => failingBatchIds.has(id))) seenSplits.push(ids);
+    return {
+     text: JSON.stringify({
+      edits: input.segments.map((s) => ({
+       id: s.id,
+       text: s.text.replace('iron gate', 'brass gate'),
+      })),
+     }),
+     finishReason: 'stop',
+    };
+   },
+  });
+  const res = await run(ctx);
+  assert.equal(res.edits.length, segments.length);
+  assert.equal(seenSplits.length, 2, `${task} should split the failing batch into 2 halves`);
+  assert.equal(seenSplits.flat().length, failingBatchIds.size);
+ }
+});

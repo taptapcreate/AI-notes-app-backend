@@ -5,6 +5,7 @@ const {
     reviewResult,
     parseReviewJson,
     isSplitContinuation,
+    sameFlowBoundary,
 } = require('./writing-review');
 const { BookGenerationError } = require('./book-generation');
 const { reviewDiagnostic } = require('./book-review-diagnostics');
@@ -106,11 +107,79 @@ function createBookReview({
                 throw combinedError;
             }
         };
+        const splitReviewBatch = (batch) => {
+            const segs = batch.segments;
+            if (!Array.isArray(segs) || segs.length < 2) return null;
+            const total = segs.reduce((sum, segment) => sum + segment.text.length, 0);
+            const half = total / 2;
+            const closesSentence = text => /[.!?…]["”’)\]]*\s*$/u.test(text.trim());
+            let running = 0, bestSentenceIdx = -1, bestSentenceDist = Infinity, bestAnyIdx = 1, bestAnyDist = Infinity;
+            for (let i = 0; i < segs.length - 1; i++) {
+                running += segs[i].text.length;
+                const dist = Math.abs(running - half);
+                if (dist < bestAnyDist) { bestAnyDist = dist; bestAnyIdx = i + 1; }
+                if (closesSentence(segs[i].text) && dist < bestSentenceDist) { bestSentenceDist = dist; bestSentenceIdx = i + 1; }
+            }
+            const splitAt = bestSentenceIdx > 0 ? bestSentenceIdx : bestAnyIdx;
+            const leftSegs = segs.slice(0, splitAt);
+            const rightSegs = segs.slice(splitAt);
+            const filterPages = (subset) => {
+                if (!batch.pages) return undefined;
+                const ids = new Set(subset.map(segment => segment.id));
+                return batch.pages.map(page => ({ ...page, ids: page.ids.filter(id => ids.has(id)) })).filter(page => page.ids.length);
+            };
+            const clip = (text, max) => text.slice(0, max).replace(/[\uD800-\uDBFF]$/, '');
+            const bridge = sameFlowBoundary(batch, splitAt - 1);
+            const baseCtx = batch.readOnlyContext || {};
+            const buildCtx = (preceding, following) => {
+                if (!preceding && !following && baseCtx.chapterExcerpts === undefined) return undefined;
+                return {
+                    description: baseCtx.description || 'Original neighboring selected prose only. Context IDs are not editable.',
+                    ...(baseCtx.chapterExcerpts !== undefined && { chapterExcerpts: baseCtx.chapterExcerpts }),
+                    preceding,
+                    following,
+                };
+            };
+            const leftCtx = buildCtx(baseCtx.preceding || '', bridge ? clip(rightSegs.map(s => s.text).join('\n'), 1200) : '');
+            const rightCtx = buildCtx(bridge ? leftSegs.map(s => s.text).join('\n').slice(-1200).replace(/^[\uDC00-\uDFFF]/, '') : '', baseCtx.following || '');
+            const leftPages = filterPages(leftSegs);
+            const rightPages = filterPages(rightSegs);
+            const makeHalf = (segments, pages, readOnlyContext) => {
+                const copy = { ...batch, segments };
+                if (pages) copy.pages = pages;
+                else delete copy.pages;
+                if (readOnlyContext) copy.readOnlyContext = readOnlyContext;
+                else delete copy.readOnlyContext;
+                return copy;
+            };
+            return [makeHalf(leftSegs, leftPages, leftCtx), makeHalf(rightSegs, rightPages, rightCtx)];
+        };
+        const isSplittableBatchFailure = (error) =>
+            error instanceof SyntaxError ||
+            error?.code === 'BOOK_REVIEW_INCOMPLETE' ||
+            ['response_not_text', 'edits_not_array', 'too_many_edits'].includes(error?.reviewValidation?.reason);
         const maxValidationAttempts = batches.length === 1 ? 2 : maxBatchValidationAttempts;
-        const runBatch = async (batch, beforeAttempt, batchIndex = 0) => {
+        const runBatch = async (batch, beforeAttempt, batchIndex = 0, { maxAttempts = maxValidationAttempts, splitDepth = 0 } = {}) => {
             const basePrompt = reviewPrompt(batch);
             let lastReason = '';
-            for (let attempt = 0; attempt < maxValidationAttempts; attempt++) {
+            const trySplitRecovery = async (failureError) => {
+                if (splitDepth > 0 || batch.segments.length < 2 || !isSplittableBatchFailure(failureError)) return null;
+                const halves = splitReviewBatch(batch);
+                if (!halves) return null;
+                request.validationRetries = (request.validationRetries || 0) + 1;
+                const leftEdits = await runBatch(halves[0], beforeAttempt, batchIndex, { maxAttempts: 1, splitDepth: splitDepth + 1 });
+                const rightEdits = await runBatch(halves[1], beforeAttempt, batchIndex, { maxAttempts: 1, splitDepth: splitDepth + 1 });
+                const combined = [...leftEdits, ...rightEdits];
+                try {
+                    const validated = reviewResult(JSON.stringify({ edits: combined }), batch);
+                    request.recoveredSegments = (request.recoveredSegments || 0) + batch.segments.length;
+                    return validated.edits;
+                } catch (combinedError) {
+                    if (combinedError.reviewValidation) diagnose(combinedError, 'repair', batchIndex);
+                    throw wrapReviewError(combinedError);
+                }
+            };
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 if (attempt > 0) request.validationRetries = (request.validationRetries || 0) + 1;
                 const prompt =
                     attempt === 0
@@ -130,15 +199,18 @@ function createBookReview({
                 if (result.finishReason === 'length') {
                     lastReason = 'output truncated before finishing JSON';
                     if (
-                        attempt + 1 < maxValidationAttempts &&
+                        attempt + 1 < maxAttempts &&
                         (batches.length > 1 || (request.providerCalls || 0) < 3)
                     )
                         continue;
-                    throw new BookGenerationError(
+                    const incomplete = new BookGenerationError(
                         'The revision was incomplete. Your credits are returned.',
                         'BOOK_REVIEW_INCOMPLETE',
                         502,
                     );
+                    const splitRecovered = await trySplitRecovery(incomplete);
+                    if (splitRecovered) return splitRecovered;
+                    throw incomplete;
                 }
                 try {
                     return reviewResult(result.text, batch).edits;
@@ -149,12 +221,12 @@ function createBookReview({
                             ? 'invalid JSON'
                             : error.message;
                     if (
-                        attempt + 1 < maxValidationAttempts &&
+                        attempt + 1 < maxAttempts &&
                         !nonRetryableValidation(lastReason) &&
                         (batches.length > 1 || (request.providerCalls || 0) < 3)
                     )
                         continue;
-                    if (!nonRetryableValidation(lastReason) && !(error instanceof SyntaxError)) {
+                    if (splitDepth === 0 && !nonRetryableValidation(lastReason) && !(error instanceof SyntaxError)) {
                         try {
                             const repaired = await repairBatch(result.text, batch, error, beforeAttempt);
                             if (repaired) return repaired;
@@ -165,6 +237,8 @@ function createBookReview({
                             // Never deliver an undisclosed subset: all combined edits must validate.
                         }
                     }
+                    const splitRecovered = await trySplitRecovery(error);
+                    if (splitRecovered) return splitRecovered;
                     throw wrapReviewError(error);
                 }
             }

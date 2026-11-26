@@ -118,20 +118,81 @@ function extractJsonObject(text) {
   }
   return null;
 }
+function sanitizeJsonCandidate(text) {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        // Models sometimes emit JS-style \' escapes inside JSON prose.
+        out += ch === "'" ? "'" : '\\' + ch;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        out += ch;
+        continue;
+      }
+      const code = ch.charCodeAt(0);
+      if (ch === '\n') { out += '\\n'; continue; }
+      if (ch === '\r') { out += '\\r'; continue; }
+      if (ch === '\t') { out += '\\t'; continue; }
+      if (code < 0x20) { out += '\\u' + code.toString(16).padStart(4, '0'); continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === ',') {
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j])) j++;
+      if (j < text.length && (text[j] === '}' || text[j] === ']')) continue;
+    }
+    out += ch;
+  }
+  if (escaped) out += '\\';
+  return out;
+}
+function tryParseJson(candidate) {
+  if (!candidate) return null;
+  try {
+    return { value: JSON.parse(candidate) };
+  } catch (error) {
+    const sanitized = sanitizeJsonCandidate(candidate);
+    if (sanitized !== candidate) {
+      try {
+        return { value: JSON.parse(sanitized) };
+      } catch {}
+    }
+    return { error };
+  }
+}
 function parseReviewJson(response) {
   const trimmed = response.trim();
   const unfenced = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  try {
-    return JSON.parse(unfenced);
-  } catch (error) {
-    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (fenced) {
-      try { return JSON.parse(fenced[1].trim()); } catch {}
-    }
-    const candidate = extractJsonObject(unfenced);
-    if (candidate) return JSON.parse(candidate);
-    throw error;
+  const initial = tryParseJson(unfenced);
+  if (initial && 'value' in initial) return initial.value;
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidates = [
+    fenced?.[1]?.trim(),
+    extractJsonObject(unfenced),
+    extractJsonObject(trimmed),
+  ];
+  for (const candidate of candidates) {
+    const parsed = tryParseJson(candidate);
+    if (parsed && 'value' in parsed) return parsed.value;
   }
+  throw initial.error;
 }
 const wordTokens = text => (text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu) || []);
 const boundaryTokens = text => (text.match(/\S+/gu) || [])
@@ -466,4 +527,4 @@ function writingReviewPrompt(context) {
   catch (error) { throw new Error('Invalid writing review source: ' + error.message); }
   return value ? reviewPrompt(value) : null;
 }
-module.exports = { reviewContext, reviewResult, reviewPrompt, writingStyle, writingReviewPrompt, validateReviewPages, reviewBatches, parseReviewJson, isSplitContinuation };
+module.exports = { reviewContext, reviewResult, reviewPrompt, writingStyle, writingReviewPrompt, validateReviewPages, reviewBatches, parseReviewJson, isSplitContinuation, sameFlowBoundary };

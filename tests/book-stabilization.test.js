@@ -138,3 +138,49 @@ test('wrapped split-line manuscripts allow synonym rewrites, coordinated reflow,
  assert.equal(recovered.edits.length, 3);
  assert.deepEqual(repairCalls, [['s0', 's1'], ['s3']]);
 });
+
+test('parseReviewJson recovers minor JSON syntax defects while still rejecting truncated output', () => {
+ const { parseReviewJson } = require('../services/writing-review');
+ const defectJson = '{\n  "edits": [\n    {"id": "s0", "text": "Don\\\'t forget —\\tthe train\nleaves soon.",},\n  ],\n}';
+ assert.deepEqual(parseReviewJson(defectJson), {
+  edits: [{ id: 's0', text: "Don't forget —\tthe train\nleaves soon." }],
+ });
+ assert.throws(() => parseReviewJson('{"edits":[{"id":"s0","text":"Still truncated'), SyntaxError);
+});
+
+test('single-batch multi-segment review recovers from repeated JSON syntax or length failures by splitting', async () => {
+ const { createBookReview } = require('../services/book-review');
+ const batchCalls = [];
+ const state = {};
+ const story = ctx([
+  'The first sentence in this paragraph has an error.',
+  'The second sentence in this paragraph also have an error.',
+  'The third sentence in this paragraph keeps steady pacing.',
+  'The fourth sentence in this paragraph closes the scene.',
+ ]);
+ const run = createBookReview({
+  getRequest: () => state,
+  model: 'mock',
+  generate: async (_cap, prompt, { beforeAttempt }) => {
+   await beforeAttempt();
+   const input = JSON.parse(prompt.split('SOURCE: ')[1]);
+   const ids = input.segments.map((s) => s.id);
+   batchCalls.push(ids);
+   if (ids.length === 4) {
+    return batchCalls.length === 1
+     ? { text: '{"edits":[{"id":"s0","text":"broken', finishReason: 'stop' }
+     : { text: '{"edits":[{"id":"s0","text":"truncated', finishReason: 'length' };
+   }
+   return {
+    text: response(ids.map((id) => ({ id, text: input.segments.find((s) => s.id === id).text.replace('have', 'has') }))),
+    finishReason: 'stop',
+   };
+  },
+ });
+ const result = await run(story);
+ assert.equal(batchCalls.length, 4);
+ assert.equal(batchCalls[2].length, 2);
+ assert.equal(batchCalls[3].length, 2);
+ assert.equal(result.edits.length, 4);
+ assert.equal(state.recoveredSegments, 4);
+});
