@@ -31,7 +31,7 @@ async function checkFailureCooldown(Request, code, now, { failureScope, endpoint
         throw new CreditError(
             429,
             `AI requests are paused after repeated failures. Please try again in ${waitText}. Your credits have not been charged.`,
-            { code: 'AI_FAILURE_COOLDOWN', retryAfterSeconds },
+            { code: 'AI_FAILURE_COOLDOWN', retryAfterSeconds, retryScope: bookScope ? 'request' : 'operation' },
         );
     }
     const accountProviderFailures = await Request.find(
@@ -58,22 +58,20 @@ async function checkFailureCooldown(Request, code, now, { failureScope, endpoint
         throw new CreditError(
             429,
             `AI requests are paused after repeated failures. Please try again in ${waitText}. Your credits have not been charged.`,
-            { code: 'AI_FAILURE_COOLDOWN', retryAfterSeconds },
+            { code: 'AI_FAILURE_COOLDOWN', retryAfterSeconds, retryScope: 'account' },
         );
     }
-    if (
-        (await Request.countDocuments({
-            state: 'failed',
-            httpStatus: { $gte: 500 },
-            failureCode: { $nin: [...internalFailures, 'BOOK_REVIEW_INVALID'] },
-            createdAt: { $gte: new Date(now.getTime() - 5 * 60000) },
-        })) >= 20
-    )
-        throw new CreditError(
-            503,
-            'AI processing is temporarily paused after repeated failures. Please try again in 5 minutes. Your credits have not been charged.',
-            { code: 'AI_FAILURE_COOLDOWN', retryAfterSeconds: 300 },
-        );
+    const serviceFailures=await Request.find({
+        state:'failed',httpStatus:{$gte:500},
+        failureCode:{$nin:[...internalFailures,'BOOK_REVIEW_INVALID']},
+        createdAt:{$gte:new Date(now.getTime()-5*60000)},
+    },{createdAt:1}).sort({createdAt:-1}).limit(20).lean();
+    if(serviceFailures.length>=20) {
+        const retryAfterSeconds=Math.max(1,Math.ceil((new Date(serviceFailures.at(-1).createdAt).getTime()+5*60000-now.getTime())/1000));
+        throw new CreditError(503,
+            'AI processing is temporarily paused after repeated failures. Your credits have not been charged.',
+            {code:'AI_FAILURE_COOLDOWN',retryAfterSeconds,retryScope:'service'});
+    }
 }
 async function checkConcurrentRequests(Request, code, now, session) {
     if (

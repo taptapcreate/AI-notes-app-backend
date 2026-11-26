@@ -507,7 +507,7 @@ app.post('/api/notes', async (req, res) => {
     } catch (error) {
         if (error instanceof require('./services/credit-policy').CreditError) return res.status(error.status).json({ error: error.message, ...error.details });
         if (error instanceof require('./services/book-generation').BookGenerationError)
-            return res.status(error.status).json({ error: error.message, code: error.code, ...(error.retryAfterSeconds && { retryAfterSeconds: error.retryAfterSeconds }) });
+            return res.status(error.status).json({ error: error.message, code: error.code, ...(error.retryAfterSeconds && { retryAfterSeconds: error.retryAfterSeconds, retryScope: error.code === 'BOOK_REVIEW_RETRY_LIMIT' ? 'request' : undefined }) });
         if (error instanceof InvalidSource) return res.status(400).json({ error: error.message });
         if (/^(WEB_ACCESS_(RESTRICTED|UNAVAILABLE)|WEB_(UNSUPPORTED_CONTENT|NO_READABLE_CONTENT)|YOUTUBE_BLOCK):/.test(error.message)) {
             return res.status(502).json({ error: error.message });
@@ -745,7 +745,7 @@ Generate the follow-up response now:`;
     } catch (error) {
         console.error('Follow-up generation error:', { requestId: generationContext.getStore()?.requestId, status: error.status, code: error.code, name: error.name, ...(error.reviewValidation && { reviewValidation: error.reviewValidation }) });
         if (error instanceof require('./services/book-generation').BookGenerationError)
-            return res.status(error.status).json({ error: error.message, code: error.code, ...(error.retryAfterSeconds && { retryAfterSeconds: error.retryAfterSeconds }) });
+            return res.status(error.status).json({ error: error.message, code: error.code, ...(error.retryAfterSeconds && { retryAfterSeconds: error.retryAfterSeconds, retryScope: error.code === 'BOOK_REVIEW_RETRY_LIMIT' ? 'request' : undefined }) });
         if (req.body?.writingReviewVersion === 1 || req.body?.bookPageBillingVersion === 1)
             return res.status(502).json({ error: 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.' });
         res.status(502).json({ error: 'AI Notes could not generate a follow-up right now. Please try again.' });

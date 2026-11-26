@@ -1207,6 +1207,7 @@ test('invalid review diagnostics accompany settled full-refund telemetry without
  const request=await api(t,async(req,res)=>{try{const result=await run(reviewContext(req.body));res.json({response:JSON.stringify(result)});}catch(error){res.status(error.status).json({error:error.message,code:error.code});}});
  const result=await request(code,id,body,'/api/followup');
  assert.equal(result.status,502);assert.equal(result.body.billing.charged,false);
+ assert.equal(result.body.billing.status,'refunded');assert.equal(result.body.billing.refundedCredits,5);
  const telemetry=logs.find(log=>log.requestId===id);
  assert.ok(telemetry);assert.equal(telemetry.providerCalls,2);
  assert.equal(telemetry.creditsCharged,0);assert.equal(telemetry.creditsRefunded,5);

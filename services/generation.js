@@ -637,6 +637,8 @@ function createGeneration({
                 ...(record.reservation.sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),
                 requestId: record.requestId,
                 charged: succeeded,
+                status: contentCacheHit ? 'cached' : record.state === 'failed' ? 'refunded' : succeeded ? 'charged' : 'no-charge',
+                ...(record.state === 'failed' && { refundedCredits: (held.pro ? held.proUnits ?? 1 : 0) + (held.free ?? 0) + (held.ad ?? 0) + (held.paid ?? 0) }),
                 ...(contentCacheHit && { cached: true, noChargeReason: 'cached-review-hit' }),
                 ...(!contentCacheHit && record.state === 'unchanged' && { noChargeReason: 'unchanged-writing-review' }),
                 ...(noEditsSuggested && { noEditsSuggested: true }),
