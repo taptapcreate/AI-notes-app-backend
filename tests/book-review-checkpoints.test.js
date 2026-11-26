@@ -186,7 +186,7 @@ test('repeated failures stop at the persistent per-chunk attempt budget', async 
     for (let i = 0; i < 5; i++) {
         await assert.rejects(
             run(context()),
-            i < 4 ? /Provider failed/ : /retry limit/,
+            i < 4 ? /Provider failed/ : (error) => error.code === 'BOOK_REVIEW_RETRY_LIMIT' && error.retryAfterSeconds > 0,
         );
         await GenerationRequest.updateOne(
             { _id: request.generationId },
@@ -434,4 +434,57 @@ test('30-page grammar review requests json mode and succeeds with mixed empty an
     const res = await run(ctx);
     assert.ok(jsonFlags.length > 1 && jsonFlags.every(Boolean));
     assert.equal(res.edits.length, 5);
+});
+
+test('automatic retries share a bounded 15-minute chunk budget while completed chunks persist for 24 hours', async () => {
+    const { createBookGenerator } = require('../services/book-generation');
+    let providerCalls = 0;
+    const generate = createBookGenerator({ getRequest: () => request, sleep: async () => {}, onRetry: () => request.retryCount = (request.retryCount || 0) + 1,
+        complete: async () => { providerCalls++; const error = Error('Transient provider failure'); error.status = 503; throw error; } });
+    const run = createBookReview({ Checkpoint, GenerationRequest, generate, model: 'budget-window', now: () => new Date(time), getRequest: () => request });
+    await assert.rejects(run(context()), /Transient provider failure/);
+    await GenerationRequest.updateOne({ _id: request.generationId }, { $set: { state: 'failed' } });
+    request = await attempt();
+    await assert.rejects(run(context()), error => error.code === 'BOOK_REVIEW_RETRY_LIMIT');
+    await GenerationRequest.updateOne({ _id: request.generationId }, { $set: { state: 'failed' } });
+    assert.equal(providerCalls, 4);
+    const saved = await Checkpoint.findOne().lean();
+    time = new Date(saved.attemptWindowEndsAt.getTime() + 1);
+    request = await attempt();
+    await assert.rejects(run(context()), /Transient provider failure/);
+    assert.equal(providerCalls, 7);
+    assert.equal(+(await Checkpoint.findOne().lean()).expiresAt, +saved.expiresAt);
+});
+
+test('lost leases are distinguished from retry exhaustion before contacting the provider', async () => {
+    const run = createBookReview({ Checkpoint, GenerationRequest, model: 'lost-lease', now: () => new Date(time), getRequest: () => request,
+        generate: async (_, prompt, { beforeAttempt }) => { time = new Date(time.getTime() + 180001); await beforeAttempt(); throw Error('Provider must not be called'); } });
+    await assert.rejects(run(context()), error => error.code === 'BOOK_REVIEW_LEASE_LOST');
+});
+
+test('an incompatible stored chunk is repaired instead of poisoning every future review', async () => {
+    const run = runner('stale-chunk'); failAt = 2;
+    await assert.rejects(run(context()));
+    await GenerationRequest.updateOne({ _id: request.generationId }, { $set: { state: 'failed' } });
+    const saved = await Checkpoint.findOne().lean();
+    await Checkpoint.updateOne({ _id: saved._id }, { $set: { 'chunks.0': [{ id: 's9999', text: 'Stale layout replacement.' }], attempts: [] } });
+    request = await attempt(); failAt = 0;
+    assert.equal((await run(context())).edits.length, context().segments.length);
+});
+
+test('cross-batch conflict preserves independently valid chunks and retries only affected boundaries',async()=>{
+ const ctx={task:'writing-review-improve',segments:[
+  {id:'s0',text:'A traveler follows the river through a quiet city. '.repeat(80)},
+  {id:'s1',text:'The traveler crossed quiet streets. '.repeat(110)+'We walked toward the aged'},
+  {id:'s2',text:'old bridge beside the river. '+'The lamps shone across the water. '.repeat(120)}
+ ],pages:[{number:1,ids:['s0']},{number:2,ids:['s1']},{number:3,ids:['s2']}]};
+ let repair=false;let providerCalls=0;
+ const run=createBookReview({Checkpoint,GenerationRequest,model:'boundary-recovery',getRequest:()=>request,now:()=>new Date(time),generate:async(_,prompt,{beforeAttempt})=>{
+  await beforeAttempt();providerCalls++;const b=JSON.parse(prompt.split('SOURCE: ')[1]);return {text:JSON.stringify({edits:b.segments.flatMap(s=>s.id==='s0'?[{id:s.id,text:s.text.replaceAll('traveler','writer')}]:s.id==='s1'&&!repair?[{id:s.id,text:s.text.replace(/aged$/,'old')}]:[])}),finishReason:'stop'};
+ }});
+ assert.equal(reviewBatches(ctx).length,3);
+ await assert.rejects(run(ctx),/duplicated words/);
+ const saved=await Checkpoint.findOne().lean();assert.ok(Array.isArray(saved.chunks[0]));assert.equal(saved.chunks[1],null);assert.equal(saved.chunks[2],null);
+ await GenerationRequest.updateOne({_id:request.generationId},{$set:{state:'failed'}});request=await attempt();repair=true;
+ assert.equal((await run(ctx)).edits.length,1);assert.equal(providerCalls,5);assert.equal(request.reusedChunks,1);
 });

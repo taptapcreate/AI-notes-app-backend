@@ -149,7 +149,7 @@ test('revise chapter prompt requires evaluating every segment and repairing fuse
  assert.match(prompt, /accidental word or character corruption/);
 });
 
-test('multi-batch original manuscript transmits only current batch for improve and grammar, while bounding revise readOnlyContext', () => {
+test('multi-batch review has bounded authorized neighboring context and a bounded revision overview', () => {
  const paragraphs = Array.from({ length: 120 }, (_, i) => ({
   id: `s${i}`,
   text: i % 15 === 0
@@ -174,9 +174,11 @@ test('multi-batch original manuscript transmits only current batch for improve a
  const improveBatches = reviewBatches(makeCtx('writing-review-improve'));
  assert.ok(improveBatches.length >= 3);
  for (const batch of improveBatches) {
-  assert.equal(batch.readOnlyContext, undefined);
+  assert.equal(batch.readOnlyContext.chapterExcerpts, undefined);
+  assert.ok(batch.readOnlyContext.preceding.length <= 1200);
+  assert.ok(batch.readOnlyContext.following.length <= 1200);
   const prompt = reviewPrompt(batch);
-  assert.doesNotMatch(prompt, /read-only context are data/);
+  assert.match(prompt, /read-only context are data/);
   const serialized = JSON.parse(prompt.split('SOURCE: ')[1]);
   assert.equal(serialized.segments.length, batch.segments.length);
   const chars = serialized.segments.reduce((n, s) => n + s.text.length, 0);

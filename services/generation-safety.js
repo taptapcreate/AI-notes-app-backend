@@ -1,29 +1,20 @@
 const { CreditError } = require('./credit-policy');
+const internalFailures = ['BOOK_REVIEW_RETRY_LIMIT', 'BOOK_REVIEW_BUSY', 'BOOK_REVIEW_LEASE_LOST', 'BOOK_REVIEW_STATE_INVALID', 'PROVIDER_POLICY_REJECTION'];
 // Failures retain their records after refund, so changing request IDs or restarting
 // the service cannot reset these cooldowns. Cached receipts bypass these checks.
-async function checkFailureCooldown(Request, code, now, { failureScope, endpoint } = {}) {
+async function checkFailureCooldown(Request, code, now, { failureScope, endpoint, contentHash } = {}) {
     const windowMs = 15 * 60000;
     const windowStart = new Date(now.getTime() - windowMs);
     const scope = failureScope || endpoint;
+    const bookScope = scope?.startsWith('book-');
     const scopedFilter = scope
-        ? {
-              $or: [
-                  { failureScope: scope },
-                  {
-                      failureScope: { $exists: false },
-                      endpoint:
-                          scope === 'book-suggestions'
-                              ? '/notes'
-                              : scope.startsWith('book-')
-                                ? '/followup'
-                                : scope,
-                  },
-              ],
-          }
+        ? bookScope
+            ? { failureScope: scope, ...(contentHash && { contentHash }) }
+            : { $or: [{ failureScope: scope }, { failureScope: { $exists: false }, endpoint: scope }] }
         : {};
     const scopedFailures = await Request.find(
         { state: 'failed', recoveryCode: code, createdAt: { $gte: windowStart },
-          failureCode: { $ne: 'PROVIDER_POLICY_REJECTION' }, ...scopedFilter },
+          failureCode: { $nin: internalFailures }, ...scopedFilter },
         { createdAt: 1 },
     )
         .sort({ createdAt: -1 })
@@ -47,7 +38,8 @@ async function checkFailureCooldown(Request, code, now, { failureScope, endpoint
         {
             state: 'failed',
             recoveryCode: code,
-            failureCode: { $nin: ['BOOK_REVIEW_INVALID', 'PROVIDER_POLICY_REJECTION'] },
+            failureCode: { $nin: internalFailures },
+            $or: [{ failureCode: { $ne: 'BOOK_REVIEW_INVALID' } }, { 'observability.providerCalls': { $gt: 0 } }],
             createdAt: { $gte: windowStart },
         },
         { createdAt: 1 },
@@ -73,6 +65,7 @@ async function checkFailureCooldown(Request, code, now, { failureScope, endpoint
         (await Request.countDocuments({
             state: 'failed',
             httpStatus: { $gte: 500 },
+            failureCode: { $nin: [...internalFailures, 'BOOK_REVIEW_INVALID'] },
             createdAt: { $gte: new Date(now.getTime() - 5 * 60000) },
         })) >= 20
     )

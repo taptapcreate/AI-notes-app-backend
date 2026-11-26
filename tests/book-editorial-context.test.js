@@ -22,9 +22,9 @@ test('revision includes bounded original continuity context and every editable s
   }
   assert.equal(JSON.stringify(source), before);
 });
-test('Grammar and Improve do not acquire chapter context; request-supplied context is discarded', () => {
+test('Grammar and Improve use only bounded neighboring approved segments; request-supplied context is discarded', () => {
   for (const task of ['writing-review-grammar','writing-review-improve']) {
-    assert(reviewBatches({...chapter(),task}).every(b => !b.readOnlyContext));
+    assert(reviewBatches({...chapter(),task}).every(b => !b.readOnlyContext?.chapterExcerpts && (b.readOnlyContext?.preceding || '').length <= 1200 && (b.readOnlyContext?.following || '').length <= 1200));
     const value = reviewContext({writingReviewVersion:1,context:JSON.stringify({task, segments:[{id:'s0',text:'Approved page.'}],readOnlyContext:'Other unapproved pages'})});
     assert.equal(value.readOnlyContext,undefined);
   }

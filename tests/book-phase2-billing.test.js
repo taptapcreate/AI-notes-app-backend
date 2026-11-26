@@ -419,7 +419,7 @@ test('multi-batch checkpoint recovery reuses completed chunks without charging o
 });
 
 
-test('concise legitimate edits pass reviewResult while real omissions remain blocked, and isolated bad edits drop cleanly without aborting valid batches', async () => {
+test('concise legitimate edits pass reviewResult while real omissions remain blocked, and unrecoverable edits fail without silently delivering partial results', async () => {
     const { reviewResult } = require('../services/writing-review');
     const ctx = {
         task: 'writing-review-improve',
@@ -483,9 +483,8 @@ test('concise legitimate edits pass reviewResult while real omissions remain blo
             finishReason: 'stop',
         }),
     });
-    const rescued = await isolatedRun(batchCtx);
-    assert.equal(rescued.edits.length, 3);
-    assert.equal(reqState.droppedUnsafeEdits, 1);
+    await assert.rejects(isolatedRun(batchCtx), /omitted too much/);
+    assert.equal(reqState.droppedUnsafeEdits, undefined);
 });
 
 test('three bulk review validation failures pause further bulk reviews with dynamic retryAfterSeconds without blocking small reviews, suggestions, or Smart Notes', async (t) => {
@@ -622,4 +621,35 @@ test('createBookGenerator and createBookReview do not retry provider HTTP 400 po
     assert.equal(providerCalls, 1);
     assert.equal(reqState.retryCount, 0);
     assert.equal(reqState.validationRetries, 0);
+});
+
+test('successful-result cache invalidates on server model changes without mixing editing modes', async t => {
+    const code = await account(); const body = makeReviewBody();
+    const request = await api(t, (_req, res) => res.json({ response: '{"edits":[]}' }));
+    const first = await request(code, randomUUID(), body); assert.equal(first.status, 200);
+    const router = require('../services/openrouter'); const before = router.MODEL;
+    try {
+        router.MODEL = 'test-updated-model';
+        const fresh = await request(code, randomUUID(), body); assert.equal(fresh.status, 200); assert.equal(fresh.body.billing.charged, true);
+        assert.equal(calls, 2);
+    } finally { router.MODEL = before; }
+});
+
+test('checkpoint refusals do not count as provider outages or block unrelated operations', async t => {
+    const code = await account();
+    const request = await api(t, (req, res) => req.path.endsWith('/notes') ? res.json({notes:'A valid ordinary note.'}) : res.status(429).json({error:'Review retry budget paused. Your credits are returned.', code:'BOOK_REVIEW_RETRY_LIMIT', retryAfterSeconds:60}));
+    for (let i = 0; i < 6; i++) assert.equal((await request(code,randomUUID(),makeReviewBody({pages:5}))).status,429);
+    assert.equal((await request(code,randomUUID(),{type:'text',content:'An ordinary note.'},'/api/notes')).status,200);
+});
+
+test('zero-provider internal failures cannot trigger the service-wide provider circuit',async t=>{
+ const code=await account();
+ await GenerationRequest.insertMany(Array.from({length:20},(_,i)=>({_id:randomUUID(),requestId:randomUUID(),recoveryCode:'OTHER-AUDIT-'+i,endpoint:'/followup',bodyHash:String(i),state:'failed',reservation:{},leaseUntil:time,createdAt:time,httpStatus:503,failureCode:'BOOK_REVIEW_RETRY_LIMIT',failureScope:'book-bulk-review',observability:{providerCalls:0}})));
+ const request=await api(t,(_req,res)=>res.json({notes:'A valid ordinary note.'}));
+ assert.equal((await request(code,randomUUID(),{type:'text',content:'Ordinary source.'},'/api/notes')).status,200);
+});
+test('actual provider expenditure on repeatedly failed validation retains account-level protection',async()=>{
+ const code=await account();
+ await GenerationRequest.insertMany(Array.from({length:5},(_,i)=>({_id:randomUUID(),requestId:randomUUID(),recoveryCode:code,endpoint:'/followup',bodyHash:String(i),state:'failed',reservation:{},leaseUntil:time,createdAt:time,httpStatus:502,failureCode:'BOOK_REVIEW_INVALID',failureScope:'book-bulk-review:writing-review-improve',observability:{providerCalls:2}})));
+ await assert.rejects(require('../services/generation-safety').checkFailureCooldown(GenerationRequest,code,time,{failureScope:'/notes',endpoint:'/notes'}),error=>error.status===429);
 });

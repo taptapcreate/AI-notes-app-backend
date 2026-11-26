@@ -1,5 +1,5 @@
-const { suggestionContext, suggestionResult } = require('./book-suggestions');
-const { reviewContext, reviewResult } = require('./writing-review');
+const { suggestionContext, suggestionResult, suggestionPrompt } = require('./book-suggestions');
+const { reviewContext, reviewResult, reviewPrompt, reviewBatches } = require('./writing-review');
 const { monthlyUsage, reserveMonthly, settleMonthly } = require('./subscription-credit-ledger');
 const { generationUnits } = require('./media-note-billing');
 const { validateImageBatch } = require('./image-attachments');
@@ -192,7 +192,11 @@ function bookCacheFingerprint(endpoint, body) {
         (endpoint === '/notes' && body?.bookSuggestionsVersion === 1);
     if (!cacheable) return undefined;
     return createHash('sha256')
-        .update(JSON.stringify(stable({ endpoint, body }, ['isPro', 'billingMode'])))
+        .update(JSON.stringify(stable({ endpoint, body,
+            compatibility: require('./book-review').reviewCompatibility,
+            model: require('./openrouter').MODEL,
+            prompts: endpoint === '/followup' ? reviewBatches(reviewContext(body)).map(reviewPrompt) : suggestionPrompt(suggestionContext(body)),
+        }, ['isPro', 'billingMode'])))
         .digest('hex');
 }
 function failureScopeFor(endpoint, body) {
@@ -201,9 +205,9 @@ function failureScopeFor(endpoint, body) {
         body?.bookPageBillingVersion === 1 &&
         Number(body?.bookPageQuote) > 3
     )
-        return 'book-bulk-review';
+        return 'book-bulk-review:' + (reviewContext(body)?.task || 'unknown');
     if (endpoint === '/followup' && body?.writingReviewVersion === 1)
-        return 'book-small-review';
+        return 'book-small-review:' + (reviewContext(body)?.task || 'unknown');
     if (endpoint === '/notes' && body?.bookSuggestionsVersion === 1)
         return 'book-suggestions';
     return endpoint;
@@ -233,6 +237,7 @@ function summarizeTelemetry(reqState, status, record, noEditsSuggested = false) 
         eligiblePages: reqState.eligiblePages ?? null,
         batchCount: reqState.batchCount ?? 1,
         reusedChunks: reqState.reusedChunks ?? 0,
+        recoveredSegments: reqState.recoveredSegments ?? 0,
         providerCalls: reqState.providerCalls ?? 0,
         retryCount: reqState.retryCount ?? 0,
         validationRetries: reqState.validationRetries ?? 0,
@@ -446,7 +451,7 @@ function createGeneration({
             }
         }
         const failureScope = failureScopeFor(endpoint, body);
-        await require('./generation-safety').checkFailureCooldown(GenerationRequest, code, now(), { failureScope, endpoint });
+        await require('./generation-safety').checkFailureCooldown(GenerationRequest, code, now(), { failureScope, endpoint, contentHash });
         if (endpoint === '/followup' && body.writingReviewPolicyVersion === 2)
             await require('./generation-safety').checkUnchangedReviewLimit(GenerationRequest, code, bodyHash, now());
         const config = requestConfig ?? await getAppConfig();
@@ -800,6 +805,8 @@ function createGeneration({
         })().catch((error) => {
             const status = error.status || 503;
             const body = { error: error.status ? error.message : 'AI charging is temporarily unavailable. Please try again.', ...(error.details || {}) };
+            if (['AI_FAILURE_COOLDOWN','UNCHANGED_REVIEW_LIMIT','UNCHANGED_REVIEW_COOLDOWN','AI_CONCURRENCY_LIMIT'].includes(body.code))
+                body.billing = { version: 2, requestId: req.headers['idempotency-key'], charged: false, creditCost: 0, subscriptionCreditCost: 0, totalCreditCost: 0, noChargeReason: 'request-not-started' };
             if (stream) stream.finish(status, body);
             else { res.status(status); send(body); }
         });

@@ -56,17 +56,21 @@ function reviewBatches(context) {
     const segment = context.segments[i];
     const nextSize = size + segment.text.length;
     if (segments.length && nextSize > 4500 && (closesSentence(segments[segments.length - 1].text) || nextSize > 5500)) {
-      batches.push({ ...context, segments, pages: undefined }); segments = []; size = 0;
+      batches.push({ ...context, segments, ...(context.pages && { pages: context.pages.map(p => ({ ...p, ids: p.ids.filter(id => segments.some(s => s.id === id)) })).filter(p => p.ids.length) }) }); segments = []; size = 0;
     }
     segments.push(segment); size += segment.text.length;
   }
-  if (segments.length) batches.push({ ...context, segments, pages: undefined });
+  if (segments.length) batches.push({ ...context, segments, ...(context.pages && { pages: context.pages.map(p => ({ ...p, ids: p.ids.filter(id => segments.some(s => s.id === id)) })).filter(p => p.ids.length) }) });
   // Only chapter revision has permission to use the rest of the chapter. These
   // original-source excerpts add continuity without extra model calls or editable IDs.
   if (context.task === 'writing-review-revise' && batches.length > 1) {
     const clip = (text, max) => text.slice(0, max).replace(/[\uD800-\uDBFF]$/, '');
-    const excerptSize = Math.max(1, Math.min(240, Math.floor(4000 / context.segments.length)));
-    const chapterExcerpts = context.segments.map(segment => clip(segment.text, excerptSize)).join('\n');
+    const chapterText = context.segments.map(segment => segment.text).join('\n');
+    const windowSize = 1450;
+    const chapterExcerpts = chapterText.length <= 6000 ? chapterText : [0, 1, 2, 3].map(i => {
+      const start = Math.floor((chapterText.length - windowSize) * i / 3);
+      return chapterText.slice(start, start + windowSize);
+    }).join('\n[... original excerpt gap ...]\n');
     let offset = 0;
     for (const batch of batches) {
       const end = offset + batch.segments.length;
@@ -75,6 +79,19 @@ function reviewBatches(context) {
         chapterExcerpts: clip(chapterExcerpts, 6000),
         preceding: context.segments.slice(0, offset).map(s => s.text).join('\n').slice(-1200).replace(/^[\uDC00-\uDFFF]/, ''),
         following: clip(context.segments.slice(end).map(s => s.text).join('\n'), 1200),
+      };
+      offset = end;
+    }
+  }
+  // Only selected/authorized segments are used. Never bridge omitted pages.
+  if (batches.length > 1 && context.task !== 'writing-review-revise') {
+    let offset = 0;
+    for (const batch of batches) {
+      const end = offset + batch.segments.length;
+      batch.readOnlyContext = {
+        description: 'Original neighboring selected prose only. Context IDs are not editable.',
+        preceding: offset > 0 && sameFlowBoundary(context, offset - 1) ? context.segments[offset - 1].text.slice(-1200) : '',
+        following: end < context.segments.length && sameFlowBoundary(context, end - 1) ? context.segments[end].text.slice(0, 1200) : '',
       };
       offset = end;
     }
@@ -145,9 +162,16 @@ function hasCopiedNeighborPhrase(replacement, selfText, foreignTexts) {
     .map(text => wordTokens(text).join(' '))
     .join('\n');
   if (!foreignCombined) return false;
-  return normalizedShingles(replacement, 4).some(
+  const borrowed = normalizedShingles(replacement, 4).filter(
     phrase => !selfWords.includes(phrase) && foreignCombined.includes(phrase),
   );
+  if (!borrowed.length) return false;
+  const words = wordTokens(replacement);
+  const covered = new Set();
+  for (let i = 0; i + 4 <= words.length; i++) {
+    if (borrowed.includes(words.slice(i, i + 4).join(' '))) for (let j = i; j < i + 4; j++) covered.add(j);
+  }
+  return covered.size >= 6 && covered.size / words.length >= 0.5;
 }
 function checkSegmentShift(index, context, editText) {
   const segment = context.segments[index];
@@ -156,22 +180,24 @@ function checkSegmentShift(index, context, editText) {
   const origSet = new Set(origWords);
   const selfShared = repWords.filter(word => origSet.has(word)).length;
   const neighbors = [
-    index > 0 ? context.segments[index - 1].text : '',
-    index + 1 < context.segments.length ? context.segments[index + 1].text : '',
+    index > 0 && sameFlowBoundary(context, index - 1) ? context.segments[index - 1].text : '',
+    index + 1 < context.segments.length && sameFlowBoundary(context, index) ? context.segments[index + 1].text : '',
   ].filter(Boolean);
   if (origSet.size >= 4 && repWords.length >= 3) {
     const ratio = selfShared / Math.max(origSet.size, repWords.length);
     for (const neighbor of neighbors) {
       const nSet = new Set(wordTokens(neighbor));
       const neighborExclusive = repWords.filter(word => nSet.has(word) && !origSet.has(word)).length;
-      if (ratio < 0.25 && neighborExclusive >= Math.max(3, selfShared + 2)) {
+      if (ratio < 0.25 && neighborExclusive >= Math.max(3, selfShared + 2) &&
+          (wordTokens(neighbor).join(' ').includes(repWords.join(' ')) ||
+            (repWords.length >= 6 && neighborExclusive / repWords.length >= 0.8))) {
         throw Error('The AI review shifted content between adjacent passages. Your text is unchanged.');
       }
     }
   }
   const origNeighbors = [
-    index > 0 ? context.segments[index - 1].text : '',
-    index + 1 < context.segments.length ? context.segments[index + 1].text : '',
+    index > 0 && sameFlowBoundary(context, index - 1) ? context.segments[index - 1].text : '',
+    index + 1 < context.segments.length && sameFlowBoundary(context, index) ? context.segments[index + 1].text : '',
     context.readOnlyContext?.preceding || '',
     context.readOnlyContext?.following || '',
   ];
@@ -201,7 +227,29 @@ function checkPairBoundary(origA, origB, outA, outB, editedA, editedB) {
       }
     }
   }
-  const endsMidSentence = text => !/[.!?…:"”’)\]]\s*$/u.test(text.trim());
+  const endsMidSentence = text => /\b(?:Mr|Mrs|Ms|Dr|Prof|St)\.$/iu.test(text.trim()) || !/[.!?…:"”’)\]]\s*$/u.test(text.trim());
+  if (editedB && !editedA && endsMidSentence(origA) &&
+      (/^[\p{Ll}]/u.test(origB.trim()) || /\b(?:Mr|Mrs|Ms|Dr|Prof|St)\.$/iu.test(origA.trim()))) {
+    // A right-hand fragment cannot lose its beginning while the left half is untouched.
+    // Permit small spelling/inflection corrections, but require coordinated edits for rephrasing it.
+    const closeWord = (a, b) => {
+      if (a === b) return true;
+      a = a.replace(/[’']/g, ''); b = b.replace(/[’']/g, '');
+      if (a === b || [a + 's', a + 'es', a + 'ed', a + 'ing'].includes(b)) return true;
+      if (Math.abs(a.length - b.length) > 2 || Math.min(a.length, b.length) < 4) return false;
+      let row = Array.from({ length: b.length + 1 }, (_, i) => i);
+      for (let i = 1; i <= a.length; i++) {
+        const next = [i];
+        for (let j = 1; j <= b.length; j++) next[j] = Math.min(next[j-1]+1, row[j]+1, row[j-1]+(a[i-1] === b[j-1] ? 0 : 1));
+        row = next;
+      }
+      return row[b.length] <= 2;
+    };
+    const head = origBW.slice(0, Math.min(2, origBW.length));
+    if (head.some((word, i) => !outBW[i] || !closeWord(word, outBW[i]))) {
+      throw Error('The AI review changed or omitted the start of a split continuation. Review both sides of this boundary together. Your text is unchanged.');
+    }
+  }
   if (
     editedA &&
     !editedB &&
@@ -226,6 +274,7 @@ function reviewResult(response, context) {
   const seen = new Set();
   const replacements = new Map();
   for (const edit of value.edits) {
+    try {
     const idx = segmentIndex.get(edit?.id);
     const segment = idx === undefined ? undefined : context.segments[idx];
     if (!segment || seen.has(edit.id) || typeof edit.text !== 'string' || !edit.text.trim() ||
@@ -245,16 +294,19 @@ function reviewResult(response, context) {
       throw Error('The AI review omitted dialogue punctuation. Your text is unchanged.');
     seen.add(edit.id);
     replacements.set(edit.id, edit.text);
+    } catch (error) { error.segmentIds = [edit?.id].filter(Boolean); throw error; }
   }
   const afterTexts = context.segments.map(segment => replacements.get(segment.id) ?? segment.text);
   for (const edit of value.edits) {
-    checkSegmentShift(segmentIndex.get(edit.id), context, edit.text);
+    try { checkSegmentShift(segmentIndex.get(edit.id), context, edit.text); }
+    catch (error) { error.segmentIds = [edit.id]; throw error; }
   }
   for (let i = 0; i < context.segments.length - 1; i++) {
     const left = context.segments[i], right = context.segments[i + 1];
     const editedA = replacements.has(left.id), editedB = replacements.has(right.id);
     if ((editedA || editedB) && sameFlowBoundary(context, i)) {
-      checkPairBoundary(left.text, right.text, afterTexts[i], afterTexts[i + 1], editedA, editedB);
+      try { checkPairBoundary(left.text, right.text, afterTexts[i], afterTexts[i + 1], editedA, editedB); }
+      catch (error) { error.segmentIds = [left.id, right.id]; throw error; }
     }
   }
   if (context.task === 'writing-review-revise' && context.pages) {

@@ -8,6 +8,8 @@ const {
 const { BookGenerationError } = require('./book-generation');
 const retentionMs = 24 * 60 * 60 * 1000;
 const maxChunkAttempts = 4;
+const attemptWindowMs = 15 * 60 * 1000;
+const reviewCompatibility = 'book-integrity-v3';
 const maxBatchValidationAttempts = 2;
 const batchConcurrency = 3;
 
@@ -42,72 +44,30 @@ function createBookReview({
         };
         const nonRetryableValidation = (message = '') =>
             /exceeds the chapter size limit|Choose valid/i.test(message);
-        const pruneUnsafeBatchEdits = (rawText, batch) => {
-            if (!Array.isArray(batch?.segments) || batch.segments.length < 4) return null;
-            let parsed;
-            try {
-                parsed = parseReviewJson(rawText);
-            } catch {
-                return null;
-            }
-            if (!parsed || !Array.isArray(parsed.edits) || parsed.edits.length < 2) return null;
-            const maxDrops = Math.max(2, Math.floor(parsed.edits.length * 0.2));
-            const safeEdits = [];
-            let dropped = 0;
-            const itemContext = {
-                ...batch,
-                task: batch.task === 'writing-review-revise' ? 'writing-review-improve' : batch.task,
-                pages: undefined,
+        const repairBatch = async (rawText, batch, error, beforeAttempt) => {
+            const parsed = parseReviewJson(rawText);
+            const affected = new Set(error.segmentIds || []);
+            if (!affected.size || !parsed?.edits?.length) return null;
+            const segments = batch.segments.filter(segment => affected.has(segment.id));
+            if (!segments.length) return null;
+            const first = batch.segments.indexOf(segments[0]);
+            const last = batch.segments.indexOf(segments.at(-1));
+            const repair = { ...batch, segments,
+                ...(batch.pages && { pages: batch.pages.map(page => ({ ...page, ids: page.ids.filter(id => affected.has(id)) })).filter(page => page.ids.length) }),
+                readOnlyContext: {
+                    description: 'Original selected prose only. Correct this affected span; do not rewrite the surrounding context.',
+                    preceding: batch.segments.slice(0, first).map(s => s.text).join('\n').slice(-1200),
+                    following: batch.segments.slice(last + 1).map(s => s.text).join('\n').slice(0,1200),
+                },
             };
-            for (const edit of parsed.edits) {
-                try {
-                    reviewResult(JSON.stringify({ edits: [edit] }), itemContext);
-                    safeEdits.push(edit);
-                } catch {
-                    dropped++;
-                    if (dropped > maxDrops) return null;
-                }
-            }
-            // Strip any boundary-coupled edit pair still failing adjacent cross-segment rules.
-            while (safeEdits.length > 0 && dropped <= maxDrops) {
-                try {
-                    const validated = reviewResult(JSON.stringify({ edits: safeEdits }), batch);
-                    request.droppedUnsafeEdits = (request.droppedUnsafeEdits || 0) + dropped;
-                    return validated.edits;
-                } catch (err) {
-                    const idxMap = new Map(batch.segments.map((s, i) => [s.id, i]));
-                    let removedPair = false;
-                    for (let i = 0; i < safeEdits.length; i++) {
-                        try {
-                            reviewResult(JSON.stringify({ edits: [safeEdits[i]] }), itemContext);
-                        } catch {
-                            safeEdits.splice(i, 1);
-                            dropped++;
-                            removedPair = true;
-                            break;
-                        }
-                        if (i + 1 < safeEdits.length) {
-                            const li = idxMap.get(safeEdits[i].id);
-                            const ri = idxMap.get(safeEdits[i + 1].id);
-                            if (li !== undefined && ri !== undefined && Math.abs(li - ri) <= 1) {
-                                try {
-                                    reviewResult(
-                                        JSON.stringify({ edits: [safeEdits[i], safeEdits[i + 1]] }),
-                                        itemContext,
-                                    );
-                                } catch {
-                                    safeEdits.splice(i, 2);
-                                    dropped += 2;
-                                    removedPair = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (!removedPair) return null;
-                }
-            }
-            return null;
+            request.validationRetries = (request.validationRetries || 0) + 1;
+            const result = await generate(8000, reviewPrompt(repair), { beforeAttempt, json: true });
+            if (result.finishReason === 'length') return null;
+            const repaired = reviewResult(result.text, repair).edits;
+            const combined = [...parsed.edits.filter(edit => !affected.has(edit.id)), ...repaired];
+            const validated = reviewResult(JSON.stringify({ edits: combined }), batch);
+            request.recoveredSegments = (request.recoveredSegments || 0) + segments.length;
+            return validated.edits;
         };
         const maxValidationAttempts = batches.length === 1 ? 2 : maxBatchValidationAttempts;
         const runBatch = async (batch, beforeAttempt) => {
@@ -126,7 +86,9 @@ function createBookReview({
                         json: true,
                     });
                 } catch (error) {
-                    throw wrapReviewError(error, 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.');
+                    const wrapped = wrapReviewError(error, 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.');
+                    if (!(error instanceof BookGenerationError) && wrapped.code !== 'PROVIDER_POLICY_REJECTION') wrapped.code = 'BOOK_REVIEW_PROVIDER_FAILURE';
+                    throw wrapped;
                 }
                 if (result.finishReason === 'length') {
                     lastReason = 'output truncated before finishing JSON';
@@ -155,8 +117,14 @@ function createBookReview({
                     )
                         continue;
                     if (!nonRetryableValidation(lastReason) && !(error instanceof SyntaxError)) {
-                        const rescued = pruneUnsafeBatchEdits(result.text, batch);
-                        if (rescued) return rescued;
+                        try {
+                            const repaired = await repairBatch(result.text, batch, error, beforeAttempt);
+                            if (repaired) return repaired;
+                        } catch (repairError) {
+                            if (repairError instanceof BookGenerationError) throw repairError;
+                            if (repairError.status || /APIConnection/.test(repairError.name || '')) throw wrapReviewError(repairError);
+                            // Never deliver an undisclosed subset: all combined edits must validate.
+                        }
                     }
                     throw wrapReviewError(error);
                 }
@@ -183,6 +151,7 @@ function createBookReview({
         const fingerprint = createHash('sha256')
             .update(
                 JSON.stringify({
+                    compatibility: reviewCompatibility,
                     owner: request.accountScope,
                     model,
                     context,
@@ -203,6 +172,7 @@ function createBookReview({
                 ),
             ),
             expiresAt: new Date(now().getTime() + retentionMs),
+            attemptWindowEndsAt: new Date(now().getTime() + attemptWindowMs),
             chunks: Array(batches.length).fill(null),
             attempts: Array(batches.length).fill(0),
             invalid: false,
@@ -239,10 +209,11 @@ function createBookReview({
                 : {
                       ...fresh(),
                       expiresAt: existing.expiresAt,
-                      chunks: existing.invalid
-                          ? Array(batches.length).fill(null)
-                          : existing.chunks,
-                      attempts: existing.attempts,
+                      chunks: Array.isArray(existing.chunks) ? existing.chunks : Array(batches.length).fill(null),
+                      attempts: existing.attemptWindowEndsAt > now()
+                          ? Array.from({ length: batches.length }, (_, i) => Number.isSafeInteger(existing.attempts?.[i]) && existing.attempts[i] >= 0 ? existing.attempts[i] : 0)
+                          : Array(batches.length).fill(0),
+                      attemptWindowEndsAt: existing.attemptWindowEndsAt > now() ? existing.attemptWindowEndsAt : new Date(now().getTime() + attemptWindowMs),
                   };
             const { _id, ...fields } = next;
             checkpoint = await Checkpoint.findOneAndUpdate(
@@ -273,12 +244,15 @@ function createBookReview({
                 const saved = checkpoint.chunks[index];
                 // Empty edit arrays are complete, validated no-change chunks too.
                 if (Array.isArray(saved)) {
-                    reviewResult(
-                        JSON.stringify({ edits: saved }),
-                        batches[index],
-                    );
-                    results[index] = saved;
-                    reusedChunks += 1;
+                    try {
+                        reviewResult(JSON.stringify({ edits: saved }), batches[index]);
+                        results[index] = saved;
+                        reusedChunks += 1;
+                    } catch {
+                        // Repair only this stale chunk; retain independently valid completed work.
+                        await Checkpoint.updateOne(owned(), { $set: { [`chunks.${index}`]: null } });
+                        pending.push(index);
+                    }
                 } else {
                     pending.push(index);
                 }
@@ -297,11 +271,17 @@ function createBookReview({
                         },
                         { $inc: { [`attempts.${index}`]: 1 } },
                     );
-                    if (attempt.modifiedCount !== 1)
-                        throw new BookGenerationError(
-                            'The retry limit for this unchanged draft was reached. Your credits are returned. Try later or contact support.',
-                            'BOOK_REVIEW_RETRY_LIMIT',
-                        );
+                    if (attempt.modifiedCount !== 1) {
+                        const current = await Checkpoint.findById(fingerprint).lean();
+                        if (!current || current.token !== token || !(current.leaseUntil > now()))
+                            throw new BookGenerationError('The review lease expired or changed. Your credits are returned; retry to resume completed sections.', 'BOOK_REVIEW_LEASE_LOST', 409);
+                        if (!Number.isSafeInteger(current.attempts?.[index]))
+                            throw new BookGenerationError('The saved review needs recovery. Your credits are returned; retry to resume.', 'BOOK_REVIEW_STATE_INVALID', 409);
+                        const seconds = Math.max(1, Math.ceil((current.attemptWindowEndsAt - now()) / 1000));
+                        const error = new BookGenerationError(`The provider retry budget for this passage is temporarily paused. Your credits are returned. Try again in about ${Math.max(1, Math.ceil(seconds / 60))} minutes.`, 'BOOK_REVIEW_RETRY_LIMIT', 429);
+                        error.retryAfterSeconds = seconds;
+                        throw error;
+                    }
                 });
                 request.signal?.throwIfAborted();
                 const stored = await Checkpoint.updateOne(owned(), {
@@ -344,7 +324,12 @@ function createBookReview({
             try {
                 result = reviewResult(JSON.stringify({ edits }), context);
             } catch (error) {
-                invalid = true;
+                const affected = new Set(error.segmentIds || context.segments.map(s => s.id));
+                const changes = {};
+                batches.forEach((batch, index) => {
+                    if (batch.segments.some(segment => affected.has(segment.id))) changes[`chunks.${index}`] = null;
+                });
+                await Checkpoint.updateOne(owned(), { $set: changes });
                 throw wrapReviewError(error);
             }
             return result;
@@ -357,4 +342,4 @@ function createBookReview({
         }
     };
 }
-module.exports = { createBookReview, retentionMs, maxChunkAttempts };
+module.exports = { createBookReview, retentionMs, maxChunkAttempts, attemptWindowMs, reviewCompatibility };

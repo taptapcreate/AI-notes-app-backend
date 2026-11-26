@@ -507,7 +507,7 @@ app.post('/api/notes', async (req, res) => {
     } catch (error) {
         if (error instanceof require('./services/credit-policy').CreditError) return res.status(error.status).json({ error: error.message, ...error.details });
         if (error instanceof require('./services/book-generation').BookGenerationError)
-            return res.status(error.status).json({ error: error.message, code: error.code });
+            return res.status(error.status).json({ error: error.message, code: error.code, ...(error.retryAfterSeconds && { retryAfterSeconds: error.retryAfterSeconds }) });
         if (error instanceof InvalidSource) return res.status(400).json({ error: error.message });
         if (/^(WEB_ACCESS_(RESTRICTED|UNAVAILABLE)|WEB_(UNSUPPORTED_CONTENT|NO_READABLE_CONTENT)|YOUTUBE_BLOCK):/.test(error.message)) {
             return res.status(502).json({ error: error.message });
@@ -745,7 +745,7 @@ Generate the follow-up response now:`;
     } catch (error) {
         console.error('Follow-up generation error:', { status: error.status, code: error.code, name: error.name });
         if (error instanceof require('./services/book-generation').BookGenerationError)
-            return res.status(error.status).json({ error: error.message, code: error.code });
+            return res.status(error.status).json({ error: error.message, code: error.code, ...(error.retryAfterSeconds && { retryAfterSeconds: error.retryAfterSeconds }) });
         if (req.body?.writingReviewVersion === 1 || req.body?.bookPageBillingVersion === 1)
             return res.status(502).json({ error: 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.' });
         res.status(502).json({ error: 'AI Notes could not generate a follow-up right now. Please try again.' });
@@ -1102,7 +1102,7 @@ app.use('/api/admin', createPurchaseAdminRouter({
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'AI App Backend is running', version: '2.0.0', generationModel: MODEL });
+    res.json({ status: 'ok', message: 'AI App Backend is running', version: '2.0.0', generationModel: MODEL, bookReviewCompatibility: require('./services/book-review').reviewCompatibility });
 });
 
 // Recover abandoned reservations after a process restart and on a bounded timer.

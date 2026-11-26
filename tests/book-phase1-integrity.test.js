@@ -22,7 +22,7 @@ test('sentence-aware reviewBatches avoids breaking split sentences mid-line when
   const s44Batch = batches.findIndex((b) => b.segments.some((s) => s.id === 's44'));
   const s45Batch = batches.findIndex((b) => b.segments.some((s) => s.id === 's45'));
   assert.equal(s44Batch, s45Batch, 'split sentence s44/s45 should stay inside the same batch');
-  assert.ok(batches.every((b) => !b.readOnlyContext));
+  assert.ok(batches.every((b) => !b.readOnlyContext?.chapterExcerpts));
 });
 
 test('reviewResult blocks shifted segments, readOnlyContext leaks, boundary duplications and preserves literary prose', () => {

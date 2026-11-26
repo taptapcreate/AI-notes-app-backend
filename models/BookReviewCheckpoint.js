@@ -7,6 +7,7 @@ const schema = new mongoose.Schema({
     token: { type: String, required: true },
     leaseUntil: { type: Date, required: true },
     expiresAt: { type: Date, required: true },
+    attemptWindowEndsAt: Date,
     invalid: { type: Boolean, default: false },
     chunks: { type: [mongoose.Schema.Types.Mixed], default: [] },
     attempts: { type: [Number], default: [] },
