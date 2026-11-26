@@ -3,6 +3,16 @@ const { limits: noteOutputLimits, minimum: minimumNoteOutputTokens } = require('
 const { DEFAULT_WELCOME_CREDITS } = require('../services/credit-policy');
 const { DEFAULT_SUBSCRIBER_DAILY_LIMIT, DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS } = require('../services/subscription-usage');
 const { DEFAULT_ROLLOVER } = require('../services/subscription-credit-policy');
+const { DEFAULT_FEEDBACK_MESSAGE } = require('../services/feature-beta');
+
+const FeatureBetaEntrySchema = new mongoose.Schema(
+    {
+        beta: { type: Boolean, default: false },
+        showFeedbackMessage: { type: Boolean, default: false },
+        feedbackMessage: { type: String, trim: true, maxlength: 500, default: DEFAULT_FEEDBACK_MESSAGE },
+    },
+    { _id: false },
+);
 
 const PlatformReleaseSchema = new mongoose.Schema({
     minVersion: { type: String, match: /^\d+\.\d+\.\d+$/ },
@@ -174,6 +184,11 @@ const AppConfigSchema = new mongoose.Schema({
     ios: { type: PlatformReleaseSchema, default: undefined },
     android: { type: PlatformReleaseSchema, default: undefined },
     macos: { type: PlatformReleaseSchema, default: undefined },
+    featureBeta: {
+        smartNotes: { type: FeatureBetaEntrySchema, default: () => ({}) },
+        smartReply: { type: FeatureBetaEntrySchema, default: () => ({}) },
+        bookStudio: { type: FeatureBetaEntrySchema, default: () => ({}) },
+    },
     // 4. Version Control
     minAppVersion: { type: String, default: '1.0.0' },
     latestAppVersion: { type: String, default: '1.0.0' },
