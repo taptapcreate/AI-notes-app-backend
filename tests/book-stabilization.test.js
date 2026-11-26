@@ -90,7 +90,7 @@ test('wrapped split-line manuscripts allow synonym rewrites, coordinated reflow,
 
  const { createBookReview } = require('../services/book-review');
  const multi = ctx([
-  'The first traveler has a lantern beside the gate of',
+  'The first traveler held a bright brass lantern beside the tall iron gate of',
   'silver iron along the wet cobblestone lane.',
   'The second traveler waited quietly by the pier.',
   'The third report states that Clara and Martin Vale are missing from the harbor.',
@@ -109,8 +109,8 @@ test('wrapped split-line manuscripts allow synonym rewrites, coordinated reflow,
    if (calls <= 2) {
     return {
      text: response([
-      { id: 's0', text: 'The first traveler has a lantern.' },
-      { id: 's1', text: 'silver iron along the wet cobblestone lane.' },
+      { id: 's0', text: 'The traveler.' },
+      { id: 's1', text: 'silver iron down the wet cobblestone lane.' },
       { id: 's3', text: 'Clara missing.' },
      ]),
      finishReason: 'stop',
