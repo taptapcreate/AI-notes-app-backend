@@ -34,13 +34,15 @@ function createBookGenerator({
             } catch (error) {
                 if (signal?.aborted) throw error;
                 const request = getRequest();
-                const status = Number(error.status || error.response?.status);
+                const status = Number(error.status || error.response?.status || error.code);
+                const nonRetryableClient = [400, 401, 403, 404, 422].includes(status) || error?.type === 'invalid_request_error';
                 const retryable =
-                    [408, 429, 500, 502, 503, 504].includes(status) ||
+                    !nonRetryableClient &&
+                    ([408, 429, 500, 502, 503, 504].includes(status) ||
                     [
                         'APIConnectionError',
                         'APIConnectionTimeoutError',
-                    ].includes(error.name);
+                    ].includes(error.name));
                 const usedLogicalRetries =
                     (request?.retryCount || 0) + (request?.validationRetries || 0);
                 if (

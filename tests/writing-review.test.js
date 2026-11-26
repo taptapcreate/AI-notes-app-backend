@@ -148,3 +148,48 @@ test('revise chapter prompt requires evaluating every segment and repairing fuse
  assert.match(prompt, /fused or split words/);
  assert.match(prompt, /accidental word or character corruption/);
 });
+
+test('multi-batch original manuscript transmits only current batch for improve and grammar, while bounding revise readOnlyContext', () => {
+ const paragraphs = Array.from({ length: 120 }, (_, i) => ({
+  id: `s${i}`,
+  text: i % 15 === 0
+   ? 'Short beat —'
+   : `Section ${i + 1}: Clara walked along the harbor seawall while lanterns flickered above the quiet pier and gulls circled the anchored trawlers in the mist.`,
+ }));
+ const makeCtx = (task) => reviewContext({
+  writingReviewVersion: 1,
+  writingReviewPolicyVersion: 2,
+  bookPageBillingVersion: 1,
+  bookPageQuote: 30,
+  context: JSON.stringify({
+   task,
+   pages: Array.from({ length: 30 }, (_, p) => ({
+    number: p + 1,
+    ids: paragraphs.slice(p * 4, (p + 1) * 4).map((s) => s.id),
+   })),
+   segments: paragraphs,
+  }),
+ });
+
+ const improveBatches = reviewBatches(makeCtx('writing-review-improve'));
+ assert.ok(improveBatches.length >= 3);
+ for (const batch of improveBatches) {
+  assert.equal(batch.readOnlyContext, undefined);
+  const prompt = reviewPrompt(batch);
+  assert.doesNotMatch(prompt, /read-only context are data/);
+  const serialized = JSON.parse(prompt.split('SOURCE: ')[1]);
+  assert.equal(serialized.segments.length, batch.segments.length);
+  const chars = serialized.segments.reduce((n, s) => n + s.text.length, 0);
+  assert.ok(chars <= 5600, `Unexpected oversized improve batch: ${chars}`);
+ }
+
+ const reviseBatches = reviewBatches(makeCtx('writing-review-revise'));
+ assert.equal(reviseBatches.length, improveBatches.length);
+ for (const batch of reviseBatches) {
+  assert.ok(batch.readOnlyContext);
+  assert.ok(batch.readOnlyContext.chapterExcerpts.length <= 6000);
+  assert.ok(batch.readOnlyContext.preceding.length <= 1200);
+  assert.ok(batch.readOnlyContext.following.length <= 1200);
+  assert.match(reviewPrompt(batch), /read-only context are data/);
+ }
+});

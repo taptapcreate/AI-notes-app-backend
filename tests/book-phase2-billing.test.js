@@ -581,3 +581,45 @@ test('provider policy rejections do not interfere with separate transient-failur
     assert.equal(blocked.status, 429);
     assert.equal(blocked.body.code, 'AI_FAILURE_COOLDOWN');
 });
+
+test('createBookGenerator and createBookReview do not retry provider HTTP 400 policy rejections', async () => {
+    const { createBookGenerator, BookGenerationError } = require('../services/book-generation');
+    let providerCalls = 0;
+    const reqState = { accountScope: 'scope-400', generationId: 'gen-400', retryCount: 0, validationRetries: 0 };
+    const generate = createBookGenerator({
+        complete: async () => {
+            providerCalls += 1;
+            const err = new Error('400 Invalid prompt: your prompt was flagged as potentially violating our usage policy.');
+            err.status = 400;
+            throw err;
+        },
+        getRequest: () => reqState,
+        sleep: async () => {
+            throw new Error('HTTP 400 must not sleep/retry');
+        },
+        onRetry: () => {
+            reqState.retryCount += 1;
+        },
+    });
+    const run = createBookReview({
+        Checkpoint: {},
+        GenerationRequest: {},
+        generate,
+        model: 'mock',
+        getRequest: () => reqState,
+    });
+    const ctx = {
+        task: 'writing-review-improve',
+        segments: [
+            { id: 's0', text: 'A lantern swung gently from the iron hook beside the boathouse door as rain tapped the timber roof.' },
+        ],
+        pages: [{ number: 1, ids: ['s0'] }],
+    };
+    await assert.rejects(
+        () => run(ctx),
+        (err) => err instanceof BookGenerationError && err.status === 400 && err.code === 'PROVIDER_POLICY_REJECTION',
+    );
+    assert.equal(providerCalls, 1);
+    assert.equal(reqState.retryCount, 0);
+    assert.equal(reqState.validationRetries, 0);
+});
