@@ -166,7 +166,7 @@ async function api(t, handler, service = generation) {
                 server.close(resolve);
             }),
     );
-    return async (code, id, body = source, path = '/api/notes') => {
+    return async (code, id, body = source, path = '/api/notes', headers = {}) => {
         const response = await fetch(
             `http://127.0.0.1:${server.address().port}${path}`,
             {
@@ -175,6 +175,7 @@ async function api(t, handler, service = generation) {
                     'Content-Type': 'application/json',
                     ...(code ? { Authorization: `Bearer ${code}` } : {}),
                     ...(id ? { 'Idempotency-Key': id } : {}),
+                    ...headers,
                 },
                 body: JSON.stringify(body),
             },
@@ -906,19 +907,27 @@ test('five-minute audio verifies its quote and failure returns all three reserve
 });
 
 const reviewBody = { type: 'note', writingReviewVersion: 1, writingReviewPolicyVersion: 2, context: JSON.stringify({ task: 'writing-review-grammar', segments: [{ id: 's0', text: 'This is correct.' }] }), question: 'Review grammar' };
-test('a no-change writing review releases its allowance and replays without another debit', async t => {
+test('a fresh no-change writing review charges once and replays or cached-reopens without another debit', async t => {
     member = { isPro: true };
     const code = await account(), id = randomUUID();
     const request = await api(t);
     const result = await request(code, id, reviewBody, '/api/followup');
     assert.equal(result.status, 200);
-    assert.equal(result.body.billing.charged, false);
+    assert.equal(result.body.billing.charged, true);
+    assert.equal(result.body.billing.noEditsSuggested, true);
     assert.deepEqual(JSON.parse(result.body.response), { edits: [] });
-    assert.equal((await credits.byCode(code)).dailyRequestCount, 0);
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
     const again = await request(code, id, reviewBody, '/api/followup');
     assert.equal(again.status, 200);
     assert.equal(calls, 1);
-    assert.equal((await credits.byCode(code)).dailyRequestCount, 0);
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
+    const cachedReopen = await request(code, randomUUID(), reviewBody, '/api/followup');
+    assert.equal(cachedReopen.status, 200);
+    assert.equal(cachedReopen.body.billing.cached, true);
+    assert.equal(cachedReopen.body.billing.charged, false);
+    assert.equal(cachedReopen.body.billing.noChargeReason, 'cached-review-hit');
+    assert.equal(calls, 1);
+    assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
 });
 test('unusable writing reviews refund the allowance before returning and retrying does not charge again', async t => {
     member = { isPro: true };
@@ -998,7 +1007,7 @@ test('Book Studio failures restore a partial Pro allowance plus wallet fallback 
 });
 
 
-test('unchanged and identical-edit reviews return wallet credits once; useful polish still charges once', async t => {
+test('fresh unchanged and changed writing reviews bill wallet or Pro credits once and cache without extra calls', async t => {
     member = { isPro: true };
     for (const edits of [[], [{ id: 's0', text: 'This is correct.' }]]) {
         const code = await account(), id = randomUUID();
@@ -1007,44 +1016,50 @@ test('unchanged and identical-edit reviews return wallet credits once; useful po
         const request = await api(t, (_, res) => res.json({ response: JSON.stringify({ edits }) }));
         const result = await request(code, id, { ...reviewBody, billingMode: 'purchased' }, '/api/followup');
         assert.equal(result.status, 200);
-        assert.equal(result.body.billing.charged, false);
-        assert.equal(result.body.billing.totalCreditCost, 0);
+        assert.equal(result.body.billing.charged, true);
+        assert.equal(result.body.billing.noEditsSuggested, true);
+        assert.equal(result.body.billing.creditCost, 1);
+        assert.equal(result.body.billing.totalCreditCost, 1);
         assert.equal((await credits.byCode(code)).dailyRequestCount, 2);
-        assert.equal((await credits.byCode(code)).credits, 5);
-        assert.equal((await credits.balance(code)).totalAvailable, before.totalAvailable);
+        assert.equal((await credits.byCode(code)).credits, 4);
+        assert.equal((await credits.balance(code)).totalAvailable, before.totalAvailable - 1);
         await request(code, id, { ...reviewBody, billingMode: 'purchased' }, '/api/followup');
-        assert.equal((await credits.balance(code)).totalAvailable, before.totalAvailable);
+        assert.equal((await credits.balance(code)).totalAvailable, before.totalAvailable - 1);
     }
     member = { isPro: true };
     const code = await account();
     const request = await api(t, (_, res) => res.json({ response: JSON.stringify({ edits: [{ id: 's0', text: 'This wording is clear.' }] }) }));
     const result = await request(code, randomUUID(), reviewBody, '/api/followup');
     assert.equal(result.body.billing.charged, true);
+    assert.equal(result.body.billing.noEditsSuggested, undefined);
     assert.equal((await credits.byCode(code)).dailyRequestCount, 1);
 });
 
 
-test('unchanged reviews do not reappear as usage when counters are reconstructed from request history', async t => {
+test('completed no-edit reviews persist usage when counters are reconstructed from request history', async t => {
     member = { isPro: true };
     const code = await account();
     config.billingControls = { usePrimarySubscriptionTracking: false };
     const request = await api(t);
     const result = await request(code, randomUUID(), reviewBody, '/api/followup');
-    assert.equal(result.body.billing.charged, false);
-    assert.equal((await credits.balance(code)).subscriberDailyUsage, 0);
-    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 2);
+    assert.equal(result.body.billing.charged, true);
+    assert.equal((await credits.balance(code)).subscriberDailyUsage, 1);
+    assert.equal((await credits.balance(code)).subscriberDailyRemaining, 1);
 });
-test('repeated unchanged reviews on identical content allow one recheck then block free provider loops', async t => {
+test('duplicate unchanged reviews reuse cached results with zero credits unless explicit regeneration is requested', async t => {
     member = { isPro: true };
     const code = await account();
     const request = await api(t, (_, res) => res.json({ response: JSON.stringify({ edits: [] }) }));
     const first = await request(code, randomUUID(), reviewBody, '/api/followup');
     const second = await request(code, randomUUID(), reviewBody, '/api/followup');
-    const third = await request(code, randomUUID(), reviewBody, '/api/followup');
+    const third = await request(code, randomUUID(), reviewBody, '/api/followup', { 'X-AI-Regenerate': '1' });
     assert.equal(first.status, 200);
+    assert.equal(first.body.billing.charged, true);
     assert.equal(second.status, 200);
-    assert.equal(third.status, 429);
-    assert.equal(third.body.code, 'UNCHANGED_REVIEW_LIMIT');
+    assert.equal(second.body.billing.cached, true);
+    assert.equal(second.body.billing.charged, false);
+    assert.equal(third.status, 200);
+    assert.equal(third.body.billing.charged, true);
     assert.equal(calls, 2);
 });
 
@@ -1059,16 +1074,25 @@ test('older review clients retain their original receipt contract until upgraded
 });
 
 const chapterPageBody = () => ({...reviewBody,bookPageBillingVersion:1,bookPageQuote:5,context:JSON.stringify({task:'writing-review-revise',segments:Array.from({length:5},(_,i)=>({id:'s'+i,text:'Page prose '+i+'.'})),pages:Array.from({length:5},(_,i)=>({number:i+1,ids:['s'+i]}))})});
-test('five-page chapter bills five units once; unchanged and failed reviews refund all five', async t => {
- config.subscriberDailyLimit=10; member={isPro:true};
+test('five-page chapter bills five units once for both changed and unchanged fresh reviews; failed reviews refund all five', async t => {
+ config.subscriberDailyLimit=20; member={isPro:true};
+ let chargedTotal=0;
+ const code=await account();
+ const request=await api(t,(_req,res)=>{
+  const outcome=currentOutcome;
+  res.json({response:outcome==='failed'?'broken':JSON.stringify({edits:outcome==='changed'?[{id:'s0',text:'Improved first page prose.'}]:[]})});
+ });
+ let currentOutcome='changed';
  for(const outcome of ['changed','unchanged','failed']) {
-  const code=await account(), id=randomUUID(), body=chapterPageBody();
-  const request=await api(t,(_,res)=>res.json({response:outcome==='failed'?'broken':JSON.stringify({edits:outcome==='changed'?[{id:'s0',text:'Improved first page prose.'}]:[]})}));
-  const result=await request(code,id,body,'/api/followup');
+  currentOutcome=outcome;
+  const id=randomUUID(), body=chapterPageBody();
+  const result=await request(code,id,body,'/api/followup',{ 'X-AI-Regenerate': '1' });
   assert.equal(result.status,outcome==='failed'?502:200);
+  if(outcome!=='failed') chargedTotal+=5;
   const record=await GenerationRequest.findOne({requestId:id}).lean();assert.equal(record.reservation.proUnits,5);
-  assert.equal((await credits.byCode(code)).dailyRequestCount,outcome==='changed'?5:0);
-  await request(code,id,body,'/api/followup');assert.equal((await credits.byCode(code)).dailyRequestCount,outcome==='changed'?5:0);
+  assert.equal((await credits.byCode(code)).dailyRequestCount,chargedTotal);
+  await request(code,id,body,'/api/followup',{ 'X-AI-Regenerate': '1' });
+  assert.equal((await credits.byCode(code)).dailyRequestCount,chargedTotal);
  }
 });
 
@@ -1105,7 +1129,7 @@ test('bulk checkpoint recovery integrates with reservations, refunds and explici
  const id=randomUUID(),success=await request(code,id,body,'/api/followup');assert.equal(success.status,200);assert.equal(success.body.billing.charged,true);
  assert.equal((await credits.byCode(code)).dailyRequestCount,5);assert.equal(providerCalls,batches+1);
  await request(code,id,body,'/api/followup');assert.equal(providerCalls,batches+1);assert.equal((await credits.byCode(code)).dailyRequestCount,5);
- await request(code,randomUUID(),body,'/api/followup');assert.equal(providerCalls,batches*2+1);assert.equal((await credits.byCode(code)).dailyRequestCount,10);
+ await request(code,randomUUID(),body,'/api/followup',{ 'X-AI-Regenerate': '1' });assert.equal(providerCalls,batches*2+1);assert.equal((await credits.byCode(code)).dailyRequestCount,10);
 });
 
 test('three failed requests pause fresh attempts without charging; cached failure remains free and cooldown expires', async t => {

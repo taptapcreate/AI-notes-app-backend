@@ -22,6 +22,7 @@ function createBookReview({
         const batches = reviewBatches(context);
         const request = getRequest() || {};
         request.bookOperation = context.task;
+        request.batchCount = batches.length;
         const wrapReviewError = (error, fallback = 'The AI review could not be validated.') => {
             if (error instanceof BookGenerationError) return error;
             if (error?.name === 'AbortError' || request.signal?.aborted) return error;
@@ -34,10 +35,13 @@ function createBookReview({
                       : error?.message || fallback;
             return new BookGenerationError(message, 'BOOK_REVIEW_INVALID', status);
         };
+        const nonRetryableValidation = (message = '') =>
+            /exceeds the chapter size limit|Choose valid/i.test(message);
+        const maxValidationAttempts = batches.length === 1 ? 2 : maxBatchValidationAttempts;
         const runBatch = async (batch, beforeAttempt) => {
             const basePrompt = reviewPrompt(batch);
             let lastReason = '';
-            for (let attempt = 0; attempt < maxBatchValidationAttempts; attempt++) {
+            for (let attempt = 0; attempt < maxValidationAttempts; attempt++) {
                 if (attempt > 0) request.validationRetries = (request.validationRetries || 0) + 1;
                 const prompt =
                     attempt === 0
@@ -54,7 +58,11 @@ function createBookReview({
                 }
                 if (result.finishReason === 'length') {
                     lastReason = 'output truncated before finishing JSON';
-                    if (attempt + 1 < maxBatchValidationAttempts) continue;
+                    if (
+                        attempt + 1 < maxValidationAttempts &&
+                        (batches.length > 1 || (request.providerCalls || 0) < 3)
+                    )
+                        continue;
                     throw new BookGenerationError(
                         'The revision was incomplete. Your credits are returned.',
                         'BOOK_REVIEW_INCOMPLETE',
@@ -68,14 +76,26 @@ function createBookReview({
                         error instanceof SyntaxError
                             ? 'invalid JSON'
                             : error.message;
-                    if (attempt + 1 < maxBatchValidationAttempts) continue;
+                    if (
+                        attempt + 1 < maxValidationAttempts &&
+                        !nonRetryableValidation(lastReason) &&
+                        (batches.length > 1 || (request.providerCalls || 0) < 3)
+                    )
+                        continue;
                     throw wrapReviewError(error);
                 }
             }
         };
         // Small operations retain one request and do not create persistent job records.
         if (batches.length === 1) {
-            const edits = await runBatch(batches[0]);
+            let singleAttempt = 0;
+            const edits = await runBatch(batches[0], async () => {
+                if (++singleAttempt > 4)
+                    throw new BookGenerationError(
+                        'The retry limit for this review was reached. Your credits are returned.',
+                        'BOOK_REVIEW_RETRY_LIMIT',
+                    );
+            });
             return reviewResult(JSON.stringify({ edits }), context);
         }
         if (!request.accountScope || !request.generationId)
@@ -172,6 +192,7 @@ function createBookReview({
         try {
             const results = Array(batches.length);
             const pending = [];
+            let reusedChunks = 0;
             for (let index = 0; index < batches.length; index++) {
                 const saved = checkpoint.chunks[index];
                 // Empty edit arrays are complete, validated no-change chunks too.
@@ -181,10 +202,12 @@ function createBookReview({
                         batches[index],
                     );
                     results[index] = saved;
+                    reusedChunks += 1;
                 } else {
                     pending.push(index);
                 }
             }
+            request.reusedChunks = reusedChunks;
             const processChunk = async (index) => {
                 request.signal?.throwIfAborted();
                 const saved = await runBatch(batches[index], async () => {

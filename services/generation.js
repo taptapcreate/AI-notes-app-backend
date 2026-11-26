@@ -175,16 +175,67 @@ function validResult(endpoint, value, body) {
         ],
     );
 }
-function stable(value) {
-    if (Array.isArray(value)) return value.map(stable);
+function stable(value, skipKeys = ['isPro']) {
+    if (Array.isArray(value)) return value.map(item => stable(item, skipKeys));
     if (value && typeof value === 'object')
         return Object.fromEntries(
             Object.keys(value)
                 .sort()
-                .filter((k) => k !== 'isPro')
-                .map((k) => [k, stable(value[k])]),
+                .filter((k) => !skipKeys.includes(k))
+                .map((k) => [k, stable(value[k], skipKeys)]),
         );
     return value;
+}
+function bookCacheFingerprint(endpoint, body) {
+    const cacheable =
+        (endpoint === '/followup' && body?.writingReviewVersion === 1) ||
+        (endpoint === '/notes' && body?.bookSuggestionsVersion === 1);
+    if (!cacheable) return undefined;
+    return createHash('sha256')
+        .update(JSON.stringify(stable({ endpoint, body }, ['isPro', 'billingMode'])))
+        .digest('hex');
+}
+function summarizeTelemetry(reqState, status, record, noEditsSuggested = false) {
+    if (!reqState) return undefined;
+    const held = record?.reservation || {};
+    const reserved =
+        (held.pro ? held.proUnits ?? 1 : 0) + (held.free ?? 0) + (held.ad ?? 0) + (held.paid ?? 0);
+    const charged = record?.state === 'succeeded' ? reserved : 0;
+    const refunded = record?.state === 'failed' ? reserved : 0;
+    const outcome =
+        record?.state === 'succeeded'
+            ? noEditsSuggested
+                ? 'succeeded_no_edits'
+                : 'succeeded'
+            : status === 504
+              ? 'expired'
+              : 'failed';
+    return {
+        requestId: reqState.requestId,
+        endpoint: reqState.endpoint,
+        operation: reqState.bookOperation || (reqState.endpoint === '/notes' ? 'note' : 'followup'),
+        outcome,
+        noEditsSuggested,
+        cacheHit: false,
+        eligiblePages: reqState.eligiblePages ?? null,
+        batchCount: reqState.batchCount ?? 1,
+        reusedChunks: reqState.reusedChunks ?? 0,
+        providerCalls: reqState.providerCalls ?? 0,
+        retryCount: reqState.retryCount ?? 0,
+        validationRetries: reqState.validationRetries ?? 0,
+        models: [...(reqState.models || [])],
+        finishReasons: [...(reqState.finishReasons || [])],
+        inputTokens: reqState.inputTokens ?? 0,
+        outputTokens: reqState.outputTokens ?? 0,
+        cachedTokens: reqState.cachedTokens ?? 0,
+        reasoningTokens: reqState.reasoningTokens ?? 0,
+        providerCostUSD: Number((reqState.providerCostUSD ?? 0).toFixed(6)),
+        costSource: reqState.hasProviderCost ? 'provider' : 'unavailable',
+        creditsReserved: reserved,
+        creditsCharged: charged,
+        creditsRefunded: refunded,
+        durationMs: Math.max(0, Math.round(performance.now() - (reqState.startedAt ?? performance.now()))),
+    };
 }
 
 function createGeneration({
@@ -235,7 +286,7 @@ function createGeneration({
         }
         return code;
     }
-    async function finish(id, status, result, unchangedReview = false) {
+    async function finish(id, status, result, unchangedReview = false, observability = undefined) {
         return transaction(async (session) => {
             const record = await GenerationRequest.findById(id)
                 .session(session)
@@ -248,7 +299,7 @@ function createGeneration({
                     error: 'The AI request expired. Your credit was returned; please try again.',
                 };
             }
-            // A validated review with no useful edits is retained for replay, but its reservation is released.
+            // Only failed/invalid operations release credits; completed AI reviews stay billable.
             const billable = status < 400 && !unchangedReview;
             const held = record.reservation;
             let subscription;
@@ -303,6 +354,7 @@ function createGeneration({
                         state: status >= 400 ? 'failed' : unchangedReview ? 'unchanged' : 'succeeded',
                         result,
                         httpStatus: status,
+                        ...(observability && { observability }),
                         expiresAt: new Date(now().getTime() + 86400000),
                     },
                 },
@@ -334,7 +386,7 @@ function createGeneration({
                 error: 'The AI request expired. Your credit was returned; please try again.',
             });
     }
-    async function begin(code, requestId, endpoint, body, storeKitProofs, requestConfig) {
+    async function begin(code, requestId, endpoint, body, storeKitProofs, requestConfig, { regenerate = false } = {}) {
         if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId))
             throw new CreditError(400, 'A unique AI request ID is required');
         validateInput(endpoint, body);
@@ -342,6 +394,7 @@ function createGeneration({
         const bodyHash = createHash('sha256')
             .update(JSON.stringify(stable({ endpoint, body })))
             .digest('hex');
+        const contentHash = bookCacheFingerprint(endpoint, body);
         await recoverExpired(code);
         const check = (record) => {
             if (record.bodyHash !== bodyHash || record.endpoint !== endpoint)
@@ -359,6 +412,25 @@ function createGeneration({
         };
         const existing = await GenerationRequest.findById(id).lean();
         if (existing) return check(existing);
+        if (!regenerate && contentHash) {
+            const cachedHit = await GenerationRequest.findOne({
+                recoveryCode: code,
+                endpoint,
+                contentHash,
+                state: 'succeeded',
+                result: { $exists: true },
+                expiresAt: { $gt: now() },
+            })
+                .sort({ createdAt: -1 })
+                .lean();
+            if (cachedHit && validResult(endpoint, cachedHit.result, body)) {
+                return {
+                    record: { ...cachedHit, requestId, httpStatus: cachedHit.httpStatus || 200 },
+                    cached: true,
+                    contentCacheHit: true,
+                };
+            }
+        }
         await require('./generation-safety').checkFailureCooldown(GenerationRequest, code, now());
         if (endpoint === '/followup' && body.writingReviewPolicyVersion === 2)
             await require('./generation-safety').checkUnchangedReviewLimit(GenerationRequest, code, bodyHash, now());
@@ -497,6 +569,7 @@ function createGeneration({
                             requestId,
                             endpoint,
                             bodyHash,
+                            ...(contentHash && { contentHash }),
                             state: 'pending',
                             createdAt: timestamp,
                             reservation: {
@@ -520,7 +593,7 @@ function createGeneration({
             throw error;
         }
     }
-    async function response(record) {
+    async function response(record, { contentCacheHit = false } = {}) {
         if (!record.result || (record.expiresAt && record.expiresAt <= now()))
             throw new CreditError(
                 410,
@@ -530,9 +603,10 @@ function createGeneration({
             ? await credits.receiptBalance(record.recoveryCode, record.reservation.sandboxIds)
             : await credits.balance(record.recoveryCode, record.reservation.sandboxIds);
         const held = record.reservation;
-        const succeeded = record.state === 'succeeded';
+        const succeeded = !contentCacheHit && record.state === 'succeeded';
         const walletCost = succeeded ? (held.free ?? 0) + (held.ad ?? 0) + (held.paid ?? 0) : 0;
         const subscriptionCost = succeeded && held.pro ? held.proUnits ?? 1 : 0;
+        const noEditsSuggested = Boolean(record.observability?.noEditsSuggested);
         return {
             ...record.result,
             billing: {
@@ -540,7 +614,9 @@ function createGeneration({
                 ...(record.reservation.sandboxIds === undefined ? {} : { storeKitScopeVersion: 1 }),
                 requestId: record.requestId,
                 charged: succeeded,
-                ...(record.state === 'unchanged' && { noChargeReason: 'unchanged-writing-review' }),
+                ...(contentCacheHit && { cached: true, noChargeReason: 'cached-review-hit' }),
+                ...(!contentCacheHit && record.state === 'unchanged' && { noChargeReason: 'unchanged-writing-review' }),
+                ...(noEditsSuggested && { noEditsSuggested: true }),
                 creditCost: walletCost,
                 subscriptionCreditCost: subscriptionCost,
                 totalCreditCost: walletCost + subscriptionCost,
@@ -562,7 +638,8 @@ function createGeneration({
         let timer, stream;
         const abort = new AbortController();
         let finishing = false;
-        const complete = async (status, value, id, unchangedReview = false) => {
+        let reqState;
+        const complete = async (status, value, id, unchangedReview = false, noEditsSuggested = false) => {
             if (finishing) return;
             finishing = true;
             if (status >= 400) abort.abort();
@@ -577,7 +654,15 @@ function createGeneration({
                     }), finalizationMs: Math.round(elapsed) }); } catch { /* Diagnostics cannot lose a paid result. */ }
             };
             try {
-                const record = await finish(id, status, value, unchangedReview);
+                const preliminary = summarizeTelemetry(
+                    reqState,
+                    status,
+                    { state: status >= 400 ? 'failed' : 'succeeded', reservation: reqState?.reservation },
+                    noEditsSuggested,
+                );
+                const record = await finish(id, status, value, unchangedReview, preliminary);
+                const telemetry = summarizeTelemetry(reqState, status, record, noEditsSuggested);
+                if (telemetry) console.info('AI financial telemetry', telemetry);
                 status = record.httpStatus;
                 settlementMs = performance.now() - finalizationStarted;
                 const body = await response(record);
@@ -605,20 +690,34 @@ function createGeneration({
             const code = await authenticate(req.headers.authorization);
             validateInput(endpoint, req.body);
             const { storeKitProofs, ...body } = req.body;
-            const { record, cached } = await begin(
+            const regenerate = req.get('X-AI-Regenerate') === '1';
+            const { record, cached, contentCacheHit = false } = await begin(
                 code,
                 req.headers['idempotency-key'],
                 endpoint,
                 body,
                 storeKitProofs,
                 config,
+                { regenerate },
             );
             if (endpoint === '/notes' && req.get('Accept')?.includes('text/event-stream')) {
                 stream = createNoteStream(res, record.requestId);
                 req.noteStream = stream;
             }
             if (cached) {
-                const body = await response(record);
+                const body = await response(record, { contentCacheHit });
+                console.info('AI financial telemetry', {
+                    requestId: record.requestId,
+                    endpoint,
+                    operation: record.observability?.operation || endpoint,
+                    outcome: contentCacheHit ? 'cached_hit' : 'idempotent_replay',
+                    cacheHit: true,
+                    providerCalls: 0,
+                    creditsReserved: 0,
+                    creditsCharged: 0,
+                    creditsRefunded: 0,
+                    durationMs: Math.round(performance.now() - startedAt),
+                });
                 if (stream) return stream.finish(record.httpStatus, body);
                 res.status(record.httpStatus);
                 return send(body);
@@ -626,6 +725,10 @@ function createGeneration({
             req.body.isPro = record.reservation.membershipPro ?? record.reservation.pro;
             if (endpoint === '/sentiment')
                 req.body.message = req.body.message ?? req.body.text;
+            let reviewPagesCount = null;
+            if (endpoint === '/followup' && req.body.bookPageBillingVersion === 1) {
+                try { reviewPagesCount = reviewContext(req.body)?.pages?.length ?? null; } catch {}
+            }
             res.json = (value) => {
                 let status = res.statusCode;
                 if (status < 400 && !validResult(endpoint, value, req.body)) {
@@ -634,13 +737,13 @@ function createGeneration({
                         error: 'The AI server returned an empty or invalid result. Your credit was returned.',
                     };
                 }
-                let unchangedReview = false;
+                let noEditsSuggested = false;
                 if (status < 400 && endpoint === '/followup' && req.body.writingReviewPolicyVersion === 2) {
                     const review = reviewContext(req.body);
-                    if (review) unchangedReview = reviewResult(value.response, review).edits.every(edit =>
+                    if (review) noEditsSuggested = reviewResult(value.response, review).edits.every(edit =>
                         edit.text.trim() === review.segments.find(segment => segment.id === edit.id).text.trim());
                 }
-                void complete(status, value, record._id, unchangedReview);
+                void complete(status, value, record._id, false, noEditsSuggested);
                 return res;
             };
             timer = setTimeout(
@@ -655,8 +758,29 @@ function createGeneration({
                 leaseMs,
             );
             timer.unref?.();
-            context.run({ signal: abort.signal, endpoint, startedAt, generationId: record._id, leaseUntil: record.leaseUntil,
-                accountScope: createHash('sha256').update(code).digest('hex') }, () => next());
+            reqState = {
+                signal: abort.signal,
+                endpoint,
+                startedAt,
+                generationId: record._id,
+                requestId: record.requestId,
+                leaseUntil: record.leaseUntil,
+                reservation: record.reservation,
+                eligiblePages: reviewPagesCount,
+                accountScope: createHash('sha256').update(code).digest('hex'),
+                providerCalls: 0,
+                retryCount: 0,
+                validationRetries: 0,
+                inputTokens: 0,
+                outputTokens: 0,
+                cachedTokens: 0,
+                reasoningTokens: 0,
+                providerCostUSD: 0,
+                hasProviderCost: false,
+                models: new Set(),
+                finishReasons: new Set(),
+            };
+            context.run(reqState, () => next());
         })().catch((error) => {
             const status = error.status || 503;
             const body = { error: error.status ? error.message : 'AI charging is temporarily unavailable. Please try again.', ...(error.details || {}) };

@@ -10,6 +10,9 @@ class BookGenerationError extends Error {
 function createBookGenerator({
     complete,
     getSignal = () => undefined,
+    getRequest = () => undefined,
+    maxRetriesPerRequest = 2,
+    maxLogicalRetries = 4,
     sleep = delay,
     random = Math.random,
     onRetry = () => {},
@@ -30,6 +33,7 @@ function createBookGenerator({
                     : await complete(prompt, maxTokens, signal);
             } catch (error) {
                 if (signal?.aborted) throw error;
+                const request = getRequest();
                 const status = Number(error.status || error.response?.status);
                 const retryable =
                     [408, 429, 500, 502, 503, 504].includes(status) ||
@@ -37,7 +41,14 @@ function createBookGenerator({
                         'APIConnectionError',
                         'APIConnectionTimeoutError',
                     ].includes(error.name);
-                if (!retryable || attempt >= 2) throw error;
+                const usedLogicalRetries =
+                    (request?.retryCount || 0) + (request?.validationRetries || 0);
+                if (
+                    !retryable ||
+                    attempt >= maxRetriesPerRequest ||
+                    (request && usedLogicalRetries >= maxLogicalRetries)
+                )
+                    throw error;
                 const header =
                     error.headers?.get?.('retry-after') ??
                     error.headers?.['retry-after'];

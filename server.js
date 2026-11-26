@@ -147,7 +147,21 @@ const { complete, transcribe } = createOpenRouter(new OpenAI({
     isSmartNote: () => { const request = generationContext.getStore(); return request?.endpoint === '/notes' && !request.bookOperation; },
     onTiming: timing => {
     const request = generationContext.getStore();
-    console.info('AI provider timing', { ...timing, endpoint: request?.endpoint, ...(request?.bookOperation && {operation: request.bookOperation}),
+    if (request) {
+        request.providerCalls = (request.providerCalls || 0) + 1;
+        if (timing.model) request.models?.add?.(timing.model);
+        if (timing.usage) {
+            request.inputTokens = (request.inputTokens || 0) + (timing.usage.inputTokens || 0);
+            request.outputTokens = (request.outputTokens || 0) + (timing.usage.outputTokens || 0);
+            request.cachedTokens = (request.cachedTokens || 0) + (timing.usage.cachedTokens || 0);
+            request.reasoningTokens = (request.reasoningTokens || 0) + (timing.usage.reasoningTokens || 0);
+            if (typeof timing.usage.costUSD === 'number') {
+                request.hasProviderCost = true;
+                request.providerCostUSD = (request.providerCostUSD || 0) + timing.usage.costUSD;
+            }
+        }
+    }
+    console.info('AI provider timing', { ...timing, requestId: request?.requestId, endpoint: request?.endpoint, ...(request?.bookOperation && {operation: request.bookOperation}),
         ...(request?.retryCount && { retryCount: request.retryCount }),
         ...(request?.validationRetries && { validationRetries: request.validationRetries }),
         ...(request?.startedAt === undefined ? {} : {
@@ -160,7 +174,7 @@ const bookGenerate = require('./services/book-generation').createBookGenerator({
     const request = generationContext.getStore();
     if (request && !request.bookOperation) request.bookOperation = 'book-suggestion';
     return complete(...args);
-}, getSignal: generationSignal, onRetry: () => {
+}, getSignal: generationSignal, getRequest: () => generationContext.getStore(), onRetry: () => {
     const request = generationContext.getStore();
     if (request) request.retryCount = (request.retryCount || 0) + 1;
 } });
@@ -454,6 +468,9 @@ app.post('/api/notes', async (req, res) => {
         const finishReason = result.finishReason;
 
         if (bookSuggestions) {
+            const reqCtx = generationContext.getStore();
+            if (finishReason && reqCtx?.finishReasons) reqCtx.finishReasons.add(finishReason);
+            if (reqCtx) reqCtx.bookOperation = `book-suggestions-${bookSuggestions.mode}`;
             let valid = finishReason !== 'length';
             if (valid) {
                 try {
@@ -462,12 +479,12 @@ app.post('/api/notes', async (req, res) => {
                     valid = false;
                 }
             }
-            if (!valid) {
-                const reqCtx = generationContext.getStore();
+            if (!valid && (reqCtx?.providerCalls || 0) < 3) {
                 if (reqCtx) reqCtx.validationRetries = (reqCtx.validationRetries || 0) + 1;
                 const retryPrompt = `${promptFor()}\n\nIMPORTANT: Your previous response was truncated or did not match valid JSON. Return ONLY complete, valid JSON matching {"options":[{"title":"Short descriptive label","text":"Complete manuscript prose in Markdown"}]} with ${bookSuggestions.count} distinct usable options.`;
                 const retryResult = await bookGenerate(Math.max(maxTokens, 8000), retryPrompt, { json: true });
                 notes = retryResult.text;
+                if (retryResult.finishReason && reqCtx?.finishReasons) reqCtx.finishReasons.add(retryResult.finishReason);
             }
         }
 

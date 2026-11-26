@@ -6,6 +6,7 @@ const schema = new mongoose.Schema({
     requestId: { type: String, required: true },
     endpoint: { type: String, required: true },
     bodyHash: { type: String, required: true },
+    contentHash: { type: String },
     state: {
         type: String,
         enum: ['pending', 'succeeded', 'unchanged', 'failed'],
@@ -15,11 +16,13 @@ const schema = new mongoose.Schema({
     leaseUntil: { type: Date, required: true },
     result: mongoose.Schema.Types.Mixed,
     httpStatus: Number,
+    observability: { type: mongoose.Schema.Types.Mixed },
     createdAt: { type: Date, default: Date.now },
     expiresAt: Date,
 });
 schema.index({ state: 1, leaseUntil: 1 });
 schema.index({ recoveryCode: 1, state: 1, createdAt: 1 });
+schema.index({ recoveryCode: 1, endpoint: 1, contentHash: 1, state: 1, createdAt: -1 }, { sparse: true });
 schema.index({ state: 1, createdAt: 1 });
 schema.index({ 'reservation.subscriptionId': 1, 'reservation.quotaEpoch': 1, 'reservation.day': 1, state: 1 });
 schema.index({ recoveryCode: 1, 'reservation.day': 1, state: 1 });
