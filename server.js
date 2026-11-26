@@ -743,7 +743,7 @@ Generate the follow-up response now:`;
         res.json({ response });
 
     } catch (error) {
-        console.error('Follow-up generation error:', { status: error.status, code: error.code, name: error.name });
+        console.error('Follow-up generation error:', { requestId: generationContext.getStore()?.requestId, status: error.status, code: error.code, name: error.name, ...(error.reviewValidation && { reviewValidation: error.reviewValidation }) });
         if (error instanceof require('./services/book-generation').BookGenerationError)
             return res.status(error.status).json({ error: error.message, code: error.code, ...(error.retryAfterSeconds && { retryAfterSeconds: error.retryAfterSeconds }) });
         if (req.body?.writingReviewVersion === 1 || req.body?.bookPageBillingVersion === 1)

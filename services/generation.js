@@ -241,6 +241,8 @@ function summarizeTelemetry(reqState, status, record, noEditsSuggested = false) 
         providerCalls: reqState.providerCalls ?? 0,
         retryCount: reqState.retryCount ?? 0,
         validationRetries: reqState.validationRetries ?? 0,
+        validationFailureCount: reqState.validationFailureCount ?? 0,
+        reviewValidationFailures: reqState.reviewValidationFailures ?? [],
         models: [...(reqState.models || [])],
         finishReasons: [...(reqState.finishReasons || [])],
         inputTokens: reqState.inputTokens ?? 0,

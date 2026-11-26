@@ -478,12 +478,18 @@ test('cross-batch conflict preserves independently valid chunks and retries only
   {id:'s1',text:'The traveler crossed quiet streets. '.repeat(110)+'We walked toward the aged'},
   {id:'s2',text:'old bridge beside the river. '+'The lamps shone across the water. '.repeat(120)}
  ],pages:[{number:1,ids:['s0']},{number:2,ids:['s1']},{number:3,ids:['s2']}]};
- let repair=false;let providerCalls=0;
- const run=createBookReview({Checkpoint,GenerationRequest,model:'boundary-recovery',getRequest:()=>request,now:()=>new Date(time),generate:async(_,prompt,{beforeAttempt})=>{
+ let repair=false;let providerCalls=0;const diagnostics=[];
+ const run=createBookReview({Checkpoint,GenerationRequest,onValidation:event=>diagnostics.push(event),model:'boundary-recovery',getRequest:()=>request,now:()=>new Date(time),generate:async(_,prompt,{beforeAttempt})=>{
   await beforeAttempt();providerCalls++;const b=JSON.parse(prompt.split('SOURCE: ')[1]);return {text:JSON.stringify({edits:b.segments.flatMap(s=>s.id==='s0'?[{id:s.id,text:s.text.replaceAll('traveler','writer')}]:s.id==='s1'&&!repair?[{id:s.id,text:s.text.replace(/aged$/,'old')}]:[])}),finishReason:'stop'};
  }});
  assert.equal(reviewBatches(ctx).length,3);
- await assert.rejects(run(ctx),/duplicated words/);
+ await assert.rejects(run(ctx),error=>{
+  assert.match(error.message,/duplicated words/);
+  assert.equal(error.reviewValidation.stage,'final');
+  assert.equal(error.reviewValidation.reason,'boundary_duplicate_words');
+  return true;
+ });
+ assert.equal(diagnostics.at(-1).stage,'final');
  const saved=await Checkpoint.findOne().lean();assert.ok(Array.isArray(saved.chunks[0]));assert.equal(saved.chunks[1],null);assert.equal(saved.chunks[2],null);
  await GenerationRequest.updateOne({_id:request.generationId},{$set:{state:'failed'}});request=await attempt();repair=true;
  assert.equal((await run(ctx)).edits.length,1);assert.equal(providerCalls,5);assert.equal(request.reusedChunks,1);

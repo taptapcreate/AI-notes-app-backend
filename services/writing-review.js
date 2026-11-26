@@ -191,7 +191,7 @@ function checkSegmentShift(index, context, editText) {
       if (ratio < 0.25 && neighborExclusive >= Math.max(3, selfShared + 2) &&
           (wordTokens(neighbor).join(' ').includes(repWords.join(' ')) ||
             (repWords.length >= 6 && neighborExclusive / repWords.length >= 0.8))) {
-        throw Error('The AI review shifted content between adjacent passages. Your text is unchanged.');
+        throw reviewValidationError('segment_shift', 'The AI review shifted content between adjacent passages. Your text is unchanged.');
       }
     }
   }
@@ -202,7 +202,7 @@ function checkSegmentShift(index, context, editText) {
     context.readOnlyContext?.following || '',
   ];
   if (hasCopiedNeighborPhrase(editText, segment.text, origNeighbors)) {
-    throw Error('The AI review duplicated text from an adjacent passage. Your text is unchanged.');
+    throw reviewValidationError('neighbor_text_copy', 'The AI review duplicated text from an adjacent passage. Your text is unchanged.');
   }
 }
 function checkPairBoundary(origA, origB, outA, outB, editedA, editedB) {
@@ -222,7 +222,7 @@ function checkPairBoundary(origA, origB, outA, outB, editedA, editedB) {
           origAW.slice(-k).join(' ') === tail &&
           origBW.slice(0, k).join(' ') === head;
         if (!baseAlreadyRepeated) {
-          throw Error('The AI review duplicated words across an adjacent boundary. Your text is unchanged.');
+          throw reviewValidationError('boundary_duplicate_words', 'The AI review duplicated words across an adjacent boundary. Your text is unchanged.');
         }
       }
     }
@@ -247,7 +247,7 @@ function checkPairBoundary(origA, origB, outA, outB, editedA, editedB) {
     };
     const head = origBW.slice(0, Math.min(2, origBW.length));
     if (head.some((word, i) => !outBW[i] || !closeWord(word, outBW[i]))) {
-      throw Error('The AI review changed or omitted the start of a split continuation. Review both sides of this boundary together. Your text is unchanged.');
+      throw reviewValidationError('split_continuation_changed', 'The AI review changed or omitted the start of a split continuation. Review both sides of this boundary together. Your text is unchanged.');
     }
   }
   if (
@@ -257,19 +257,28 @@ function checkPairBoundary(origA, origB, outA, outB, editedA, editedB) {
     /^[\p{Ll}]/u.test(origB.trim())
   ) {
     if (closesSentence(outA)) {
-      throw Error('The AI review left a dangling sentence fragment in the next passage. Your text is unchanged.');
+      throw reviewValidationError('dangling_fragment', 'The AI review left a dangling sentence fragment in the next passage. Your text is unchanged.');
     }
     const lastOrig = origAW[origAW.length - 1];
     const lastOut = outAW[outAW.length - 1];
     if (lastOrig && danglingDeterminers.has(lastOrig) && lastOut !== lastOrig && !danglingDeterminers.has(lastOut)) {
-      throw Error('The AI review dropped a connecting word before the next passage. Your text is unchanged.');
+      throw reviewValidationError('connecting_word_dropped', 'The AI review dropped a connecting word before the next passage. Your text is unchanged.');
     }
   }
 }
+// Only fixed reason codes and numeric measurements belong in diagnostics; never prose.
+function reviewValidationError(reason, message, details = {}) {
+  return Object.assign(Error(message), { reviewValidation: { reason, ...details } });
+}
 function reviewResult(response, context) {
-  if (typeof response !== 'string') throw Error('The AI returned an unreadable review.');
-  const value = parseReviewJson(response);
-  if (!value || !Array.isArray(value.edits) || value.edits.length > context.segments.length) throw Error('The AI returned an incomplete review.');
+  if (typeof response !== 'string') throw reviewValidationError('response_not_text', 'The AI returned an unreadable review.');
+  let value;
+  try { value = parseReviewJson(response); }
+  catch (error) { error.reviewValidation = { reason: 'invalid_json' }; throw error; }
+  if (!value || !Array.isArray(value.edits))
+    throw reviewValidationError('edits_not_array', 'The AI returned an incomplete review.');
+  if (value.edits.length > context.segments.length)
+    throw reviewValidationError('too_many_edits', 'The AI returned an incomplete review.', { editCount: value.edits.length, segmentCount: context.segments.length });
   const segmentIndex = new Map(context.segments.map((item, idx) => [item.id, idx]));
   const seen = new Set();
   const replacements = new Map();
@@ -277,21 +286,28 @@ function reviewResult(response, context) {
     try {
     const idx = segmentIndex.get(edit?.id);
     const segment = idx === undefined ? undefined : context.segments[idx];
-    if (!segment || seen.has(edit.id) || typeof edit.text !== 'string' || !edit.text.trim() ||
-        edit.text.length > Math.max(1000, segment.text.length * 3) ||
-        (edit.text.match(/\r?\n/g) || []).join('') !== (segment.text.match(/\r?\n/g) || []).join(''))
-      throw Error('The AI review could not be matched safely to your text.');
+    const mismatch = 'The AI review could not be matched safely to your text.';
+    if (!segment) throw reviewValidationError('unknown_segment_id', mismatch);
+    if (seen.has(edit.id)) throw reviewValidationError('duplicate_segment_id', mismatch);
+    if (typeof edit.text !== 'string') throw reviewValidationError('edit_not_text', mismatch);
+    if (!edit.text.trim()) throw reviewValidationError('empty_edit', mismatch);
+    if (edit.text.length > Math.max(1000, segment.text.length * 3))
+      throw reviewValidationError('edit_too_long', mismatch, { sourceChars: segment.text.length, replacementChars: edit.text.length });
+    const sourceBreaks = segment.text.match(/\r?\n/g) || [];
+    const replacementBreaks = edit.text.match(/\r?\n/g) || [];
+    if (replacementBreaks.join('') !== sourceBreaks.join(''))
+      throw reviewValidationError('line_break_mismatch', mismatch, { sourceLineBreaks: sourceBreaks.length, replacementLineBreaks: replacementBreaks.length });
     // Aggregate chapter length can hide a destroyed sentence inside otherwise intact prose.
     // Reject severe local omissions too, including short dialogue lines.
     const sourceWords = segment.text.trim().split(/\s+/u).length;
     const afterWords = edit.text.trim().split(/\s+/u).length;
     const minLongRatio = context.task === 'writing-review-grammar' ? 0.6 : 0.5;
     if (sourceWords >= 12 && afterWords < Math.max(6, Math.floor(sourceWords * minLongRatio)))
-      throw Error('The AI review omitted too much of a passage. Your text is unchanged.');
+      throw reviewValidationError('passage_omission', 'The AI review omitted too much of a passage. Your text is unchanged.');
     if (sourceWords >= 5 && sourceWords < 12 && afterWords < Math.max(2, Math.floor(sourceWords * 0.4)))
-      throw Error('The AI review omitted too much of a passage. Your text is unchanged.');
+      throw reviewValidationError('passage_omission', 'The AI review omitted too much of a passage. Your text is unchanged.');
     if (sourceWords >= 3 && /[“”"]/.test(segment.text) && !/[“”"]/.test(edit.text))
-      throw Error('The AI review omitted dialogue punctuation. Your text is unchanged.');
+      throw reviewValidationError('dialogue_punctuation_removed', 'The AI review omitted dialogue punctuation. Your text is unchanged.');
     seen.add(edit.id);
     replacements.set(edit.id, edit.text);
     } catch (error) { error.segmentIds = [edit?.id].filter(Boolean); throw error; }
@@ -314,7 +330,7 @@ function reviewResult(response, context) {
     const after = afterTexts.join(' ');
     const words = text => text.trim().split(/\s+/u).filter(Boolean).length;
     if (words(before) >= 120 && words(after) < Math.floor(words(before) * 0.7))
-      throw Error('The revision omitted too much prose. Your draft is unchanged.');
+      throw reviewValidationError('chapter_omission', 'The revision omitted too much prose. Your draft is unchanged.');
     const escapedSize = text => text.replace(/\u200B/g, '').replace(/([\\`*_[\]<>])/g, '\\$1').length;
     const growth = context.segments.reduce((sum, segment) => {
       const replacement = replacements.get(segment.id);
@@ -323,7 +339,7 @@ function reviewResult(response, context) {
       return sum + escapedSize(normalized) - escapedSize(segment.text);
     }, 0);
     if (context.segments.reduce((sum, segment) => sum + (replacements.get(segment.id) ?? segment.text).length, 0) > 80000 || (context.revisionMaxGrowth !== undefined && growth > context.revisionMaxGrowth))
-      throw Error('The revision exceeds the chapter size limit. Your draft is unchanged.');
+      throw reviewValidationError('chapter_size_limit', 'The revision exceeds the chapter size limit. Your draft is unchanged.');
   }
   return value;
 }

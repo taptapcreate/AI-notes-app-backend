@@ -6,6 +6,7 @@ const {
     parseReviewJson,
 } = require('./writing-review');
 const { BookGenerationError } = require('./book-generation');
+const { reviewDiagnostic } = require('./book-review-diagnostics');
 const retentionMs = 24 * 60 * 60 * 1000;
 const maxChunkAttempts = 4;
 const attemptWindowMs = 15 * 60 * 1000;
@@ -20,12 +21,22 @@ function createBookReview({
     model,
     getRequest = () => ({}),
     now = () => new Date(),
+    onValidation = diagnostic => console.warn('Book review validation', diagnostic),
 }) {
     return async function run(context) {
         const batches = reviewBatches(context);
         const request = getRequest() || {};
         request.bookOperation = context.task;
         request.batchCount = batches.length;
+        const diagnose = (error, stage, batchIndex, attempt) => {
+            const diagnostic = reviewDiagnostic(error, stage, batchIndex, attempt);
+            error.reviewDiagnostic = diagnostic;
+            request.validationFailureCount = (request.validationFailureCount || 0) + 1;
+            request.reviewValidationFailures = [...(request.reviewValidationFailures || []), diagnostic].slice(-12);
+            // Logging must never alter retry, validation, billing or manuscript behavior.
+            try { onValidation({ requestId: request.requestId, operation: context.task, ...diagnostic }); } catch {}
+            return diagnostic;
+        };
         const wrapReviewError = (error, fallback = 'The AI review could not be validated.') => {
             if (error instanceof BookGenerationError) return error;
             if (error?.name === 'AbortError' || request.signal?.aborted) return error;
@@ -40,7 +51,9 @@ function createBookReview({
                     : /Empty AI completion|Incomplete AI stream|APIConnection|timeout/i.test(error?.message || error?.name || '')
                       ? 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.'
                       : error?.message || fallback;
-            return new BookGenerationError(message, code, status);
+            const wrapped = new BookGenerationError(message, code, status);
+            if (error.reviewValidation) wrapped.reviewValidation = error.reviewDiagnostic || reviewDiagnostic(error, 'batch');
+            return wrapped;
         };
         const nonRetryableValidation = (message = '') =>
             /exceeds the chapter size limit|Choose valid/i.test(message);
@@ -70,7 +83,7 @@ function createBookReview({
             return validated.edits;
         };
         const maxValidationAttempts = batches.length === 1 ? 2 : maxBatchValidationAttempts;
-        const runBatch = async (batch, beforeAttempt) => {
+        const runBatch = async (batch, beforeAttempt, batchIndex = 0) => {
             const basePrompt = reviewPrompt(batch);
             let lastReason = '';
             for (let attempt = 0; attempt < maxValidationAttempts; attempt++) {
@@ -106,6 +119,7 @@ function createBookReview({
                 try {
                     return reviewResult(result.text, batch).edits;
                 } catch (error) {
+                    diagnose(error, 'batch', batchIndex, attempt + 1);
                     lastReason =
                         error instanceof SyntaxError
                             ? 'invalid JSON'
@@ -121,6 +135,7 @@ function createBookReview({
                             const repaired = await repairBatch(result.text, batch, error, beforeAttempt);
                             if (repaired) return repaired;
                         } catch (repairError) {
+                            if (repairError.reviewValidation) diagnose(repairError, 'repair', batchIndex);
                             if (repairError instanceof BookGenerationError) throw repairError;
                             if (repairError.status || /APIConnection/.test(repairError.name || '')) throw wrapReviewError(repairError);
                             // Never deliver an undisclosed subset: all combined edits must validate.
@@ -248,7 +263,8 @@ function createBookReview({
                         reviewResult(JSON.stringify({ edits: saved }), batches[index]);
                         results[index] = saved;
                         reusedChunks += 1;
-                    } catch {
+                    } catch (error) {
+                        diagnose(error, 'checkpoint', index);
                         // Repair only this stale chunk; retain independently valid completed work.
                         await Checkpoint.updateOne(owned(), { $set: { [`chunks.${index}`]: null } });
                         pending.push(index);
@@ -282,7 +298,7 @@ function createBookReview({
                         error.retryAfterSeconds = seconds;
                         throw error;
                     }
-                });
+                }, index);
                 request.signal?.throwIfAborted();
                 const stored = await Checkpoint.updateOne(owned(), {
                     $set: { [`chunks.${index}`]: saved },
@@ -324,6 +340,7 @@ function createBookReview({
             try {
                 result = reviewResult(JSON.stringify({ edits }), context);
             } catch (error) {
+                diagnose(error, 'final');
                 const affected = new Set(error.segmentIds || context.segments.map(s => s.id));
                 const changes = {};
                 batches.forEach((batch, index) => {

@@ -1190,3 +1190,28 @@ test('local passage deletion in a page review refunds before billing finalizes a
     assert.equal((await request(code,id,body,'/api/followup')).status,502);
     assert.equal(calls,1);
 });
+
+
+test('invalid review diagnostics accompany settled full-refund telemetry without manuscript text', async t => {
+ member={isPro:true};config.subscriberDailyLimit=10;
+ const code=await account(),body=chapterPageBody(),id=randomUUID(),logs=[];
+ const original=console.info;console.info=(label,...args)=>{if(label==='AI financial telemetry')logs.push(args[0]);else original(label,...args);};
+ t.after(()=>{console.info=original;});
+ const {createBookReview}=require('../services/book-review');
+ const {reviewContext}=require('../services/writing-review');
+ const {context}=require('../services/generation-context');
+ const run=createBookReview({getRequest:()=>context.getStore(),onValidation:()=>{},generate:async(_,__,{beforeAttempt})=>{
+  await beforeAttempt();const state=context.getStore();state.providerCalls=(state.providerCalls||0)+1;
+  return {text:'{"edits":[{"id":"private model ID","text":"private replacement prose"}]}',finishReason:'stop'};
+ }});
+ const request=await api(t,async(req,res)=>{try{const result=await run(reviewContext(req.body));res.json({response:JSON.stringify(result)});}catch(error){res.status(error.status).json({error:error.message,code:error.code});}});
+ const result=await request(code,id,body,'/api/followup');
+ assert.equal(result.status,502);assert.equal(result.body.billing.charged,false);
+ const telemetry=logs.find(log=>log.requestId===id);
+ assert.ok(telemetry);assert.equal(telemetry.providerCalls,2);
+ assert.equal(telemetry.creditsCharged,0);assert.equal(telemetry.creditsRefunded,5);
+ assert.equal(telemetry.validationFailureCount,2);
+ assert.deepEqual(telemetry.reviewValidationFailures.map(item=>item.reason),['unknown_segment_id','unknown_segment_id']);
+ assert.doesNotMatch(JSON.stringify(telemetry),/private|Page prose/);
+ assert.equal((await credits.byCode(code)).dailyRequestCount,0);
+});
