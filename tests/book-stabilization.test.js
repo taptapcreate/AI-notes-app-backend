@@ -39,3 +39,102 @@ test('bounded affected-span repair preserves safe edits and revalidates the comp
  const reconstructed=c.segments.map(s=>result.edits.find(e=>e.id===s.id)?.text||s.text).join(' ');
  assert.match(reconstructed,/Mira and Daniel Vale are missing from the station/);
 });
+
+test('wrapped split-line manuscripts allow synonym rewrites, coordinated reflow, all-caps headings, and multi-line rebalancing without relaxing real omission/shift checks', async () => {
+ const story = ctx([
+  'When the family woke on the gray morning our story',
+  'starts, nothing in the quiet street suggested trouble.',
+ ]);
+ assert.equal(
+  reviewResult(response([{ id: 's1', text: 'begins, nothing in the quiet street hinted at trouble.' }]), story).edits.length,
+  1,
+ );
+ assert.throws(
+  () => reviewResult(response([{ id: 's1', text: 'Trouble arrived before breakfast ended.' }]), story),
+  /split continuation/,
+ );
+
+ const heading = ctx(['CHAPTER TWO', 'THE VANISHING HALL', 'early ten years had passed since the letter arrived on the doorstep.']);
+ heading.task = 'writing-review-grammar';
+ assert.equal(
+  reviewResult(response([{ id: 's2', text: 'Nearly ten years had passed since the letter arrived on the doorstep.' }]), heading).edits.length,
+  1,
+ );
+
+ const wrapped = ctx([
+  'She was proud to insist that her quiet street held',
+  'no odd neighbors, no strange birds, and very little foolish',
+  'rumor worth repeating before morning tea.',
+ ]);
+ wrapped.task = 'writing-review-revise';
+ const balanced = reviewResult(response([
+  { id: 's0', text: 'She proudly insisted that her quiet' },
+  { id: 's1', text: 'street held no odd neighbors, strange birds, or' },
+  { id: 's2', text: 'foolish rumors before morning tea.' },
+ ]), wrapped);
+ assert.equal(balanced.edits.length, 3);
+ wrapped.task = 'writing-review-grammar';
+ const condensed = reviewResult(response([
+  { id: 's0', text: 'She insisted that her street held' },
+  { id: 's1', text: 'no odd neighbors, strange birds, or foolish' },
+  { id: 's2', text: 'rumors before tea.' },
+ ]), wrapped);
+ assert.equal(condensed.edits.length, 3);
+ assert.throws(
+  () => reviewResult(response([
+   { id: 's0', text: 'She insisted.' },
+   { id: 's1', text: 'rumors.' },
+  ]), wrapped),
+  /omitted too much/,
+ );
+
+ const { createBookReview } = require('../services/book-review');
+ const multi = ctx([
+  'The first traveler has a lantern beside the gate of',
+  'silver iron along the wet cobblestone lane.',
+  'The second traveler waited quietly by the pier.',
+  'The third report states that Clara and Martin Vale are missing from the harbor.',
+ ], [{ number: 1, ids: ['s0', 's1', 's2', 's3'] }]);
+ multi.task = 'writing-review-revise';
+ let calls = 0;
+ const repairCalls = [];
+ const run = createBookReview({
+  getRequest: () => ({}),
+  model: 'mock',
+  generate: async (_cap, prompt, { beforeAttempt }) => {
+   await beforeAttempt();
+   calls++;
+   const input = JSON.parse(prompt.split('SOURCE: ')[1]);
+   const ids = input.segments.map(s => s.id);
+   if (calls <= 2) {
+    return {
+     text: response([
+      { id: 's0', text: 'The first traveler has a lantern.' },
+      { id: 's1', text: 'silver iron along the wet cobblestone lane.' },
+      { id: 's3', text: 'Clara missing.' },
+     ]),
+     finishReason: 'stop',
+    };
+   }
+   repairCalls.push(ids);
+   if (ids.includes('s0')) {
+    return {
+     text: response([
+      { id: 's0', text: 'The first traveler carried a bright lantern by' },
+      { id: 's1', text: 'the wrought-iron gate beside the wet cobblestones.' },
+     ]),
+     finishReason: 'stop',
+    };
+   }
+   return {
+    text: response([
+     { id: 's3', text: 'The third report notes that Clara and Martin Vale are missing from the harbor.' },
+    ]),
+    finishReason: 'stop',
+   };
+  },
+ });
+ const recovered = await run(multi);
+ assert.equal(recovered.edits.length, 3);
+ assert.deepEqual(repairCalls, [['s0', 's1'], ['s3']]);
+});

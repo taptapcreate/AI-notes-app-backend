@@ -173,31 +173,72 @@ function hasCopiedNeighborPhrase(replacement, selfText, foreignTexts) {
   }
   return covered.size >= 6 && covered.size / words.length >= 0.5;
 }
-function checkSegmentShift(index, context, editText) {
+const honorificEnding = text => /\b(?:Mr|Mrs|Ms|Dr|Prof|St)\.$/iu.test(text.trim());
+const isSplitContinuation = (leftText, rightText) => {
+  const trimmedA = leftText.trim();
+  const trimmedB = rightText.trim();
+  const honorific = honorificEnding(trimmedA);
+  // All-caps headings (like CHAPTER TWO) are not unfinished mid-sentence prose.
+  const endsMid = honorific || (!/[.!?…:"”’)\]]\s*$/u.test(trimmedA) && /\p{Ll}/u.test(trimmedA));
+  return endsMid && (/^[\p{Ll}]/u.test(trimmedB) || honorific);
+};
+function checkSegmentShift(index, context, editText, afterTexts = null, replacements = null) {
   const segment = context.segments[index];
   const origWords = wordTokens(segment.text);
   const repWords = wordTokens(editText);
   const origSet = new Set(origWords);
   const selfShared = repWords.filter(word => origSet.has(word)).length;
-  const neighbors = [
-    index > 0 && sameFlowBoundary(context, index - 1) ? context.segments[index - 1].text : '',
-    index + 1 < context.segments.length && sameFlowBoundary(context, index) ? context.segments[index + 1].text : '',
-  ].filter(Boolean);
+  const neighborIndexes = [
+    index > 0 && sameFlowBoundary(context, index - 1) ? index - 1 : -1,
+    index + 1 < context.segments.length && sameFlowBoundary(context, index) ? index + 1 : -1,
+  ].filter(idx => idx >= 0);
   if (origSet.size >= 4 && repWords.length >= 3) {
     const ratio = selfShared / Math.max(origSet.size, repWords.length);
-    for (const neighbor of neighbors) {
+    for (const neighborIdx of neighborIndexes) {
+      const neighbor = context.segments[neighborIdx].text;
       const nSet = new Set(wordTokens(neighbor));
       const neighborExclusive = repWords.filter(word => nSet.has(word) && !origSet.has(word)).length;
       if (ratio < 0.25 && neighborExclusive >= Math.max(3, selfShared + 2) &&
           (wordTokens(neighbor).join(' ').includes(repWords.join(' ')) ||
             (repWords.length >= 6 && neighborExclusive / repWords.length >= 0.8))) {
+        const minIdx = Math.min(index, neighborIdx), maxIdx = Math.max(index, neighborIdx);
+        const coEditedSplit =
+          replacements?.has(context.segments[neighborIdx].id) &&
+          afterTexts &&
+          isSplitContinuation(context.segments[minIdx].text, context.segments[maxIdx].text);
+        if (coEditedSplit) {
+          const afterNeighborSet = new Set(wordTokens(afterTexts[neighborIdx]));
+          const duplicatedMoved = repWords.filter(word => !origSet.has(word) && afterNeighborSet.has(word)).length;
+          let spanLeft = index, spanRight = index;
+          while (spanLeft > 0 && sameFlowBoundary(context, spanLeft - 1) &&
+              replacements.has(context.segments[spanLeft - 1].id) &&
+              isSplitContinuation(context.segments[spanLeft - 1].text, context.segments[spanLeft].text)) spanLeft--;
+          while (spanRight + 1 < context.segments.length && sameFlowBoundary(context, spanRight) &&
+              replacements.has(context.segments[spanRight + 1].id) &&
+              isSplitContinuation(context.segments[spanRight].text, context.segments[spanRight + 1].text)) spanRight++;
+          const spanAfterSet = new Set();
+          for (let k = spanLeft; k <= spanRight; k++) {
+            for (const word of wordTokens(afterTexts[k])) spanAfterSet.add(word);
+          }
+          const preservedOrig = origWords.filter(word => spanAfterSet.has(word)).length;
+          if (duplicatedMoved < Math.max(2, Math.floor(repWords.length * 0.4)) &&
+              preservedOrig >= Math.max(2, Math.floor(origWords.length * 0.4))) {
+            continue;
+          }
+        }
         throw reviewValidationError('segment_shift', 'The AI review shifted content between adjacent passages. Your text is unchanged.');
       }
     }
   }
   const origNeighbors = [
-    index > 0 && sameFlowBoundary(context, index - 1) ? context.segments[index - 1].text : '',
-    index + 1 < context.segments.length && sameFlowBoundary(context, index) ? context.segments[index + 1].text : '',
+    ...neighborIndexes.map(neighborIdx => {
+      const minIdx = Math.min(index, neighborIdx), maxIdx = Math.max(index, neighborIdx);
+      const coEditedSplit =
+        replacements?.has(context.segments[neighborIdx].id) &&
+        afterTexts &&
+        isSplitContinuation(context.segments[minIdx].text, context.segments[maxIdx].text);
+      return coEditedSplit ? afterTexts[neighborIdx] : context.segments[neighborIdx].text;
+    }),
     context.readOnlyContext?.preceding || '',
     context.readOnlyContext?.following || '',
   ];
@@ -227,33 +268,42 @@ function checkPairBoundary(origA, origB, outA, outB, editedA, editedB) {
       }
     }
   }
-  const endsMidSentence = text => /\b(?:Mr|Mrs|Ms|Dr|Prof|St)\.$/iu.test(text.trim()) || !/[.!?…:"”’)\]]\s*$/u.test(text.trim());
-  if (editedB && !editedA && endsMidSentence(origA) &&
-      (/^[\p{Ll}]/u.test(origB.trim()) || /\b(?:Mr|Mrs|Ms|Dr|Prof|St)\.$/iu.test(origA.trim()))) {
-    // A right-hand fragment cannot lose its beginning while the left half is untouched.
-    // Permit small spelling/inflection corrections, but require coordinated edits for rephrasing it.
-    const closeWord = (a, b) => {
-      if (a === b) return true;
-      a = a.replace(/[’']/g, ''); b = b.replace(/[’']/g, '');
-      if (a === b || [a + 's', a + 'es', a + 'ed', a + 'ing'].includes(b)) return true;
-      if (Math.abs(a.length - b.length) > 2 || Math.min(a.length, b.length) < 4) return false;
-      let row = Array.from({ length: b.length + 1 }, (_, i) => i);
-      for (let i = 1; i <= a.length; i++) {
-        const next = [i];
-        for (let j = 1; j <= b.length; j++) next[j] = Math.min(next[j-1]+1, row[j]+1, row[j-1]+(a[i-1] === b[j-1] ? 0 : 1));
-        row = next;
+  const closeWord = (a, b) => {
+    if (a === b) return true;
+    a = a.replace(/[’']/g, ''); b = b.replace(/[’']/g, '');
+    if (a === b || [a + 's', a + 'es', a + 'ed', a + 'ing'].includes(b)) return true;
+    if (Math.abs(a.length - b.length) > 2 || Math.min(a.length, b.length) < 4) return false;
+    let row = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i++) {
+      const next = [i];
+      for (let j = 1; j <= b.length; j++) next[j] = Math.min(next[j - 1] + 1, row[j] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      row = next;
+    }
+    return row[b.length] <= 2;
+  };
+  if (editedB && !editedA && isSplitContinuation(origA, origB)) {
+    if (honorificEnding(origA)) {
+      if (!outBW[0] || !closeWord(origBW[0], outBW[0])) {
+        throw reviewValidationError('split_continuation_changed', 'The AI review changed or omitted the start of a split continuation. Review both sides of this boundary together. Your text is unchanged.');
       }
-      return row[b.length] <= 2;
-    };
-    const head = origBW.slice(0, Math.min(2, origBW.length));
-    if (head.some((word, i) => !outBW[i] || !closeWord(word, outBW[i]))) {
-      throw reviewValidationError('split_continuation_changed', 'The AI review changed or omitted the start of a split continuation. Review both sides of this boundary together. Your text is unchanged.');
+    } else if (/^[\p{Ll}]/u.test(origB.trim())) {
+      // Prevent truncating the leading continuation clause or jumping into a new capitalized sentence,
+      // while allowing clean synonym/tense rewrites that remain lowercase in-flow continuations.
+      const switchedUpper = !/^[\p{Ll}]/u.test(outB.trim()) && (!outBW[0] || !closeWord(origBW[0], outBW[0]));
+      const firstStop = origB.trim().match(/^(.+?[.!?…]["”’)\]]*)\s+(\S[\s\S]*)$/u);
+      const preStopWords = firstStop ? wordTokens(firstStop[1]) : [];
+      const droppedLeadingClause = preStopWords.length >= 2 &&
+        outBW.length <= origBW.length - Math.max(2, preStopWords.length - 1) &&
+        !outBW.slice(0, preStopWords.length + 2).some(word => preStopWords.includes(word));
+      if (switchedUpper || droppedLeadingClause) {
+        throw reviewValidationError('split_continuation_changed', 'The AI review changed or omitted the start of a split continuation. Review both sides of this boundary together. Your text is unchanged.');
+      }
     }
   }
   if (
     editedA &&
     !editedB &&
-    endsMidSentence(origA) &&
+    isSplitContinuation(origA, origB) &&
     /^[\p{Ll}]/u.test(origB.trim())
   ) {
     if (closesSentence(outA)) {
@@ -297,24 +347,65 @@ function reviewResult(response, context) {
     const replacementBreaks = edit.text.match(/\r?\n/g) || [];
     if (replacementBreaks.join('') !== sourceBreaks.join(''))
       throw reviewValidationError('line_break_mismatch', mismatch, { sourceLineBreaks: sourceBreaks.length, replacementLineBreaks: replacementBreaks.length });
-    // Aggregate chapter length can hide a destroyed sentence inside otherwise intact prose.
-    // Reject severe local omissions too, including short dialogue lines.
     const sourceWords = segment.text.trim().split(/\s+/u).length;
-    const afterWords = edit.text.trim().split(/\s+/u).length;
-    const minLongRatio = context.task === 'writing-review-grammar' ? 0.6 : 0.5;
-    if (sourceWords >= 12 && afterWords < Math.max(6, Math.floor(sourceWords * minLongRatio)))
-      throw reviewValidationError('passage_omission', 'The AI review omitted too much of a passage. Your text is unchanged.');
-    if (sourceWords >= 5 && sourceWords < 12 && afterWords < Math.max(2, Math.floor(sourceWords * 0.4)))
-      throw reviewValidationError('passage_omission', 'The AI review omitted too much of a passage. Your text is unchanged.');
     if (sourceWords >= 3 && /[“”"]/.test(segment.text) && !/[“”"]/.test(edit.text))
       throw reviewValidationError('dialogue_punctuation_removed', 'The AI review omitted dialogue punctuation. Your text is unchanged.');
     seen.add(edit.id);
     replacements.set(edit.id, edit.text);
     } catch (error) { error.segmentIds = [edit?.id].filter(Boolean); throw error; }
   }
+  const minLongRatio = context.task === 'writing-review-grammar' ? 0.6 : 0.5;
+  const wordCount = text => text.trim().split(/\s+/u).filter(Boolean).length;
+  for (let i = 0; i < context.segments.length; i++) {
+    const seg = context.segments[i];
+    if (!replacements.has(seg.id)) continue;
+    let runEnd = i;
+    while (
+      runEnd + 1 < context.segments.length &&
+      replacements.has(context.segments[runEnd + 1].id) &&
+      sameFlowBoundary(context, runEnd) &&
+      isSplitContinuation(context.segments[runEnd].text, context.segments[runEnd + 1].text)
+    ) {
+      runEnd++;
+    }
+    if (runEnd === i) {
+      const sourceWords = wordCount(seg.text);
+      const afterWords = wordCount(replacements.get(seg.id));
+      const fail = (reason = 'passage_omission') => {
+        const err = reviewValidationError(reason, 'The AI review omitted too much of a passage. Your text is unchanged.');
+        err.segmentIds = [seg.id];
+        throw err;
+      };
+      if (sourceWords >= 12 && afterWords < Math.max(6, Math.floor(sourceWords * minLongRatio))) fail();
+      if (sourceWords >= 5 && sourceWords < 12 && afterWords < Math.max(2, Math.floor(sourceWords * 0.4))) fail();
+    } else {
+      const runIds = [];
+      let totalSource = 0, totalAfter = 0;
+      for (let k = i; k <= runEnd; k++) {
+        const piece = context.segments[k];
+        const sourceWords = wordCount(piece.text);
+        const afterWords = wordCount(replacements.get(piece.id));
+        runIds.push(piece.id);
+        totalSource += sourceWords;
+        totalAfter += afterWords;
+        if (sourceWords >= 5 && afterWords < Math.max(2, Math.floor(sourceWords * 0.25))) {
+          const err = reviewValidationError('passage_omission', 'The AI review omitted too much of a passage. Your text is unchanged.');
+          err.segmentIds = [piece.id];
+          throw err;
+        }
+      }
+      if ((totalSource >= 12 && totalAfter < Math.max(6, Math.floor(totalSource * minLongRatio))) ||
+          (totalSource >= 5 && totalSource < 12 && totalAfter < Math.max(2, Math.floor(totalSource * 0.4)))) {
+        const err = reviewValidationError('passage_omission', 'The AI review omitted too much of a passage. Your text is unchanged.');
+        err.segmentIds = runIds;
+        throw err;
+      }
+      i = runEnd;
+    }
+  }
   const afterTexts = context.segments.map(segment => replacements.get(segment.id) ?? segment.text);
   for (const edit of value.edits) {
-    try { checkSegmentShift(segmentIndex.get(edit.id), context, edit.text); }
+    try { checkSegmentShift(segmentIndex.get(edit.id), context, edit.text, afterTexts, replacements); }
     catch (error) { error.segmentIds = [edit.id]; throw error; }
   }
   for (let i = 0; i < context.segments.length - 1; i++) {
@@ -375,4 +466,4 @@ function writingReviewPrompt(context) {
   catch (error) { throw new Error('Invalid writing review source: ' + error.message); }
   return value ? reviewPrompt(value) : null;
 }
-module.exports = { reviewContext, reviewResult, reviewPrompt, writingStyle, writingReviewPrompt, validateReviewPages, reviewBatches, parseReviewJson };
+module.exports = { reviewContext, reviewResult, reviewPrompt, writingStyle, writingReviewPrompt, validateReviewPages, reviewBatches, parseReviewJson, isSplitContinuation };

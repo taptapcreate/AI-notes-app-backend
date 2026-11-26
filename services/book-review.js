@@ -4,6 +4,7 @@ const {
     reviewPrompt,
     reviewResult,
     parseReviewJson,
+    isSplitContinuation,
 } = require('./writing-review');
 const { BookGenerationError } = require('./book-generation');
 const { reviewDiagnostic } = require('./book-review-diagnostics');
@@ -57,20 +58,35 @@ function createBookReview({
         };
         const nonRetryableValidation = (message = '') =>
             /exceeds the chapter size limit|Choose valid/i.test(message);
-        const repairBatch = async (rawText, batch, error, beforeAttempt) => {
+        const repairBatch = async (rawText, batch, error, beforeAttempt, repairs = 0) => {
             const parsed = parseReviewJson(rawText);
             const affected = new Set(error.segmentIds || []);
             if (!affected.size || !parsed?.edits?.length) return null;
+            const editedIds = new Set(parsed.edits.map(edit => edit.id));
+            // Expand affected IDs across immediately connected edited split-line neighbors
+            // so shifted wrapped boundaries are repaired together instead of fighting kept edits.
+            for (const id of [...affected]) {
+                const idx = batch.segments.findIndex(segment => segment.id === id);
+                if (idx > 0 && editedIds.has(batch.segments[idx - 1].id) &&
+                    isSplitContinuation(batch.segments[idx - 1].text, batch.segments[idx].text)) {
+                    affected.add(batch.segments[idx - 1].id);
+                }
+                if (idx >= 0 && idx + 1 < batch.segments.length && editedIds.has(batch.segments[idx + 1].id) &&
+                    isSplitContinuation(batch.segments[idx].text, batch.segments[idx + 1].text)) {
+                    affected.add(batch.segments[idx + 1].id);
+                }
+            }
             const segments = batch.segments.filter(segment => affected.has(segment.id));
             if (!segments.length) return null;
             const first = batch.segments.indexOf(segments[0]);
             const last = batch.segments.indexOf(segments.at(-1));
+            const keptText = new Map(parsed.edits.filter(edit => !affected.has(edit.id) && typeof edit.text === 'string').map(edit => [edit.id, edit.text]));
             const repair = { ...batch, segments,
                 ...(batch.pages && { pages: batch.pages.map(page => ({ ...page, ids: page.ids.filter(id => affected.has(id)) })).filter(page => page.ids.length) }),
                 readOnlyContext: {
                     description: 'Original selected prose only. Correct this affected span; do not rewrite the surrounding context.',
-                    preceding: batch.segments.slice(0, first).map(s => s.text).join('\n').slice(-1200),
-                    following: batch.segments.slice(last + 1).map(s => s.text).join('\n').slice(0,1200),
+                    preceding: batch.segments.slice(0, first).map(s => keptText.get(s.id) ?? s.text).join('\n').slice(-1200),
+                    following: batch.segments.slice(last + 1).map(s => keptText.get(s.id) ?? s.text).join('\n').slice(0, 1200),
                 },
             };
             request.validationRetries = (request.validationRetries || 0) + 1;
@@ -78,9 +94,17 @@ function createBookReview({
             if (result.finishReason === 'length') return null;
             const repaired = reviewResult(result.text, repair).edits;
             const combined = [...parsed.edits.filter(edit => !affected.has(edit.id)), ...repaired];
-            const validated = reviewResult(JSON.stringify({ edits: combined }), batch);
-            request.recoveredSegments = (request.recoveredSegments || 0) + segments.length;
-            return validated.edits;
+            try {
+                const validated = reviewResult(JSON.stringify({ edits: combined }), batch);
+                request.recoveredSegments = (request.recoveredSegments || 0) + segments.length;
+                return validated.edits;
+            } catch (combinedError) {
+                if (repairs === 0 && !(combinedError instanceof SyntaxError) &&
+                    (combinedError.segmentIds || []).some(id => !affected.has(id))) {
+                    return repairBatch(JSON.stringify({ edits: combined }), batch, combinedError, beforeAttempt, 1);
+                }
+                throw combinedError;
+            }
         };
         const maxValidationAttempts = batches.length === 1 ? 2 : maxBatchValidationAttempts;
         const runBatch = async (batch, beforeAttempt, batchIndex = 0) => {

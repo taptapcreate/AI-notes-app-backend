@@ -237,8 +237,13 @@ function createAppleSubscriptions({
         return records.find((record) => active(record)) || records[0] || null;
     }
     function membershipFor(record, sandboxIds) {
+        const isPro = !!active(record);
+        const expiryMs = Math.max(
+            new Date(record?.expiresAt || 0).getTime(),
+            isPro ? new Date(record?.graceExpiresAt || 0).getTime() : 0,
+        );
         return {
-            isPro: !!active(record),
+            isPro,
             appleSubscriptionBound: true,
             sandboxExcluded: !record && sandboxIds !== undefined,
             subscriptionIdentityVersion: 1,
@@ -248,7 +253,7 @@ function createAppleSubscriptions({
                     ? 'monthly'
                     : 'weekly'
                 : null,
-            expiresAt: record?.expiresAt?.toISOString() || null,
+            expiresAt: expiryMs > 0 ? new Date(expiryMs).toISOString() : null,
             ...(record?.environment === 'Sandbox' ? { sandbox: true } : {}),
         };
     }
