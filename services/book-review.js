@@ -204,6 +204,13 @@ function createBookReview({
                     if (!(error instanceof BookGenerationError) && wrapped.code !== 'PROVIDER_POLICY_REJECTION') wrapped.code = 'BOOK_REVIEW_PROVIDER_FAILURE';
                     throw wrapped;
                 }
+                if (result.finishReason === 'content_filter') {
+                    throw new BookGenerationError(
+                        'The AI provider filtered this passage before completing the review. Your credits are returned.',
+                        'PROVIDER_POLICY_REJECTION',
+                        400,
+                    );
+                }
                 if (result.finishReason === 'length') {
                     lastReason = 'output truncated before finishing JSON';
                     if (

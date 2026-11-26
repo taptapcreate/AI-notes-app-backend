@@ -623,6 +623,37 @@ test('createBookGenerator and createBookReview do not retry provider HTTP 400 po
     assert.equal(reqState.validationRetries, 0);
 });
 
+test('createBookReview surfaces content_filter truncation as PROVIDER_POLICY_REJECTION without splitting or retrying', async () => {
+    const { BookGenerationError } = require('../services/book-generation');
+    const { createBookReview } = require('../services/book-review');
+    let calls = 0;
+    const reqState = { accountScope: 'scope-filter', generationId: 'gen-filter', retryCount: 0, validationRetries: 0 };
+    const run = createBookReview({
+        Checkpoint: {},
+        GenerationRequest: {},
+        generate: async () => {
+            calls += 1;
+            return { text: '{"edits":[{"id":"s0","text":"partial filtered', finishReason: 'content_filter' };
+        },
+        model: 'mock',
+        getRequest: () => reqState,
+    });
+    const ctx = {
+        task: 'writing-review-revise',
+        segments: [
+            { id: 's0', text: 'A lantern swung gently from the iron hook beside the boathouse door as rain tapped the timber roof.' },
+            { id: 's1', text: 'Second paragraph for split eligibility checks if content filtering wrongly retries.' },
+        ],
+        pages: [{ number: 1, ids: ['s0', 's1'] }],
+    };
+    await assert.rejects(
+        () => run(ctx),
+        (err) => err instanceof BookGenerationError && err.status === 400 && err.code === 'PROVIDER_POLICY_REJECTION',
+    );
+    assert.equal(calls, 1);
+    assert.equal(reqState.validationRetries, 0);
+});
+
 test('successful-result cache invalidates on server model changes without mixing editing modes', async t => {
     const code = await account(); const body = makeReviewBody();
     const request = await api(t, (_req, res) => res.json({ response: '{"edits":[]}' }));
