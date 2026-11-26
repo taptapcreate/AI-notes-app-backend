@@ -22,13 +22,17 @@ function createBookReview({
         const batches = reviewBatches(context);
         const request = getRequest() || {};
         request.bookOperation = context.task;
-        const wrapReviewError = (error) => {
+        const wrapReviewError = (error, fallback = 'The AI review could not be validated.') => {
             if (error instanceof BookGenerationError) return error;
+            if (error?.name === 'AbortError' || request.signal?.aborted) return error;
+            const status = Number.isInteger(error?.status) && error.status >= 400 ? error.status : 502;
             const message =
                 error instanceof SyntaxError
                     ? 'The AI returned an unreadable review. Your credits are returned.'
-                    : error?.message || 'The AI review could not be validated.';
-            return new BookGenerationError(message, 'BOOK_REVIEW_INVALID', 502);
+                    : /Empty AI completion|Incomplete AI stream|APIConnection|timeout/i.test(error?.message || error?.name || '')
+                      ? 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.'
+                      : error?.message || fallback;
+            return new BookGenerationError(message, 'BOOK_REVIEW_INVALID', status);
         };
         const runBatch = async (batch, beforeAttempt) => {
             const basePrompt = reviewPrompt(batch);
@@ -38,11 +42,16 @@ function createBookReview({
                 const prompt =
                     attempt === 0
                         ? basePrompt
-                        : `IMPORTANT: Your previous response could not be validated (${lastReason}). Return ONLY valid JSON using the exact segment IDs, keep every line break unchanged, and do not shorten any passage below 70% of its original word count.\n\n${basePrompt}`;
-                const result = await generate(8000, prompt, {
-                    beforeAttempt,
-                    json: true,
-                });
+                        : `IMPORTANT: Your previous response could not be validated (${lastReason}). Return ONLY valid JSON using the exact segment IDs in SOURCE.segments, keep each segment aligned strictly to its own original ID without shifting text or duplicating adjacent words, keep every line break unchanged, and do not shorten any passage below the omission guard.\n\n${basePrompt}`;
+                let result;
+                try {
+                    result = await generate(8000, prompt, {
+                        beforeAttempt,
+                        json: true,
+                    });
+                } catch (error) {
+                    throw wrapReviewError(error, 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.');
+                }
                 if (result.finishReason === 'length') {
                     lastReason = 'output truncated before finishing JSON';
                     if (attempt + 1 < maxBatchValidationAttempts) continue;

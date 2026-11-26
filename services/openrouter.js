@@ -135,7 +135,11 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                             }
                             if (choice?.finish_reason) finishReason = choice.finish_reason;
                         }
-                        if (!text.trim() || !finishReason || !['stop', 'length'].includes(finishReason)) throw new Error('Incomplete AI stream');
+                        if (!text.trim() || !finishReason || !['stop', 'length'].includes(finishReason)) {
+                            const err = new Error('Incomplete AI stream');
+                            err.status = 502;
+                            throw err;
+                        }
                         signal?.throwIfAborted();
                         if (parsed && !conflicting) attachmentCache.set(pdfKey, parsed);
                         success = true;
@@ -144,7 +148,11 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                     usage = measuredUsage(response.usage);
                     const choice = response.choices?.[0];
                     const text = choice?.message?.content;
-                    if (typeof text !== 'string' || !text.trim()) throw new Error('Empty AI completion');
+                    if (typeof text !== 'string' || !text.trim()) {
+                        const err = new Error('Empty AI completion');
+                        err.status = 502;
+                        throw err;
+                    }
                     collect(choice?.message?.annotations);
                     signal?.throwIfAborted();
                     if (parsed && !conflicting && ['stop', 'length'].includes(choice.finish_reason)) attachmentCache.set(pdfKey, parsed);

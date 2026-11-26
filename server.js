@@ -1,4 +1,4 @@
-const { suggestionContext, suggestionPrompt } = require('./services/book-suggestions');
+const { suggestionContext, suggestionPrompt, suggestionResult } = require('./services/book-suggestions');
 const { reviewContext, reviewPrompt } = require('./services/writing-review');
 const express = require('express');
 const cors = require('cors');
@@ -423,7 +423,7 @@ app.post('/api/notes', async (req, res) => {
             lengthInstruction, formatInstruction, toneInstruction, languageInstruction, isPro, pdfEvidence,
             url: ['website', 'youtube'].includes(type) ? content : undefined,
         });
-        const generate = value => bookSuggestions ? bookGenerate(maxTokens, value) : generateSmartNote(maxTokens, value, req.noteStream?.delta);
+        const generate = value => bookSuggestions ? bookGenerate(maxTokens, value, { json: true }) : generateSmartNote(maxTokens, value, req.noteStream?.delta);
         let result;
         switch (type) {
             case 'text':
@@ -453,6 +453,24 @@ app.post('/api/notes', async (req, res) => {
         // Check if response was truncated (cut off mid-sentence)
         const finishReason = result.finishReason;
 
+        if (bookSuggestions) {
+            let valid = finishReason !== 'length';
+            if (valid) {
+                try {
+                    suggestionResult(notes, bookSuggestions);
+                } catch {
+                    valid = false;
+                }
+            }
+            if (!valid) {
+                const reqCtx = generationContext.getStore();
+                if (reqCtx) reqCtx.validationRetries = (reqCtx.validationRetries || 0) + 1;
+                const retryPrompt = `${promptFor()}\n\nIMPORTANT: Your previous response was truncated or did not match valid JSON. Return ONLY complete, valid JSON matching {"options":[{"title":"Short descriptive label","text":"Complete manuscript prose in Markdown"}]} with ${bookSuggestions.count} distinct usable options.`;
+                const retryResult = await bookGenerate(Math.max(maxTokens, 8000), retryPrompt, { json: true });
+                notes = retryResult.text;
+            }
+        }
+
         // Truncation cleanup instead of continuation (Saves tokens/cost)
         if (finishReason === 'length' && !bookSuggestions) {
             console.log('Notes truncated. Trimming last incomplete sentence to save cost.');
@@ -471,15 +489,19 @@ app.post('/api/notes', async (req, res) => {
 
     } catch (error) {
         if (error instanceof require('./services/credit-policy').CreditError) return res.status(error.status).json({ error: error.message, ...error.details });
+        if (error instanceof require('./services/book-generation').BookGenerationError)
+            return res.status(error.status).json({ error: error.message, code: error.code });
         if (error instanceof InvalidSource) return res.status(400).json({ error: error.message });
         if (/^(WEB_ACCESS_(RESTRICTED|UNAVAILABLE)|WEB_(UNSUPPORTED_CONTENT|NO_READABLE_CONTENT)|YOUTUBE_BLOCK):/.test(error.message)) {
             return res.status(502).json({ error: error.message });
         }
         console.error('Notes generation error:', { type: req.body?.type, status: error.status, code: error.code, name: error.name });
         res.status(502).json({
-            error: req.body?.type === 'pdf'
-                ? 'AI Notes could not process this PDF. Try again, or choose an unlocked PDF with fewer pages.'
-                : req.body?.type === 'voice'
+            error: req.body?.bookSuggestionsVersion === 1
+                ? 'AI Notes could not generate book suggestions right now. Your credits are returned. Please try again.'
+                : req.body?.type === 'pdf'
+                  ? 'AI Notes could not process this PDF. Try again, or choose an unlocked PDF with fewer pages.'
+                  : req.body?.type === 'voice'
                     ? 'AI Notes could not process this recording. Try again, or choose a shorter recording.'
                     : 'AI Notes could not generate notes right now. Please try again.',
         });
@@ -707,6 +729,8 @@ Generate the follow-up response now:`;
         console.error('Follow-up generation error:', { status: error.status, code: error.code, name: error.name });
         if (error instanceof require('./services/book-generation').BookGenerationError)
             return res.status(error.status).json({ error: error.message, code: error.code });
+        if (req.body?.writingReviewVersion === 1 || req.body?.bookPageBillingVersion === 1)
+            return res.status(502).json({ error: 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.' });
         res.status(502).json({ error: 'AI Notes could not generate a follow-up right now. Please try again.' });
     }
 });
