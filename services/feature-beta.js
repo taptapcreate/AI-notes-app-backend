@@ -3,6 +3,9 @@ const FEATURE_KEYS = ['smartNotes', 'smartReply', 'bookStudio'];
 const DEFAULT_FEEDBACK_MESSAGE =
   'We are actively improving this feature. If you encounter any issue or have feedback, email us at taptapcreate43@gmail.com and we will help you.';
 
+const DEFAULT_GLOBAL_FEEDBACK_MESSAGE =
+  'You can send any feedback or query to TapTap Create at taptapcreate43@gmail.com if you encounter any problem.';
+
 const MAX_FEEDBACK_LENGTH = 500;
 
 function normalizeFeatureBetaEntry(entry) {
@@ -23,6 +26,16 @@ function featureBetaState(config) {
   );
 }
 
+function globalFeedbackState(config) {
+  const entry = config?.globalFeedback || {};
+  const enabled = entry.enabled === true;
+  const rawMessage = typeof entry.message === 'string' ? entry.message.trim() : '';
+  return {
+    enabled,
+    message: rawMessage.slice(0, MAX_FEEDBACK_LENGTH),
+  };
+}
+
 async function initializeFeatureBeta(Config) {
   const ops = [];
   for (const key of FEATURE_KEYS) {
@@ -40,13 +53,27 @@ async function initializeFeatureBeta(Config) {
       });
     }
   }
+  for (const [field, value] of [
+    ['enabled', true],
+    ['message', DEFAULT_GLOBAL_FEEDBACK_MESSAGE],
+  ]) {
+    const path = `globalFeedback.${field}`;
+    ops.push({
+      updateOne: {
+        filter: { key: 'master_config', [path]: { $exists: false } },
+        update: { $set: { [path]: value } },
+      },
+    });
+  }
   await Config.collection.bulkWrite(ops);
 }
 
 module.exports = {
   FEATURE_KEYS,
   DEFAULT_FEEDBACK_MESSAGE,
+  DEFAULT_GLOBAL_FEEDBACK_MESSAGE,
   MAX_FEEDBACK_LENGTH,
   featureBetaState,
+  globalFeedbackState,
   initializeFeatureBeta,
 };

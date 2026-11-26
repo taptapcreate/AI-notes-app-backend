@@ -5,16 +5,19 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
 const AppConfig = require('../models/AppConfig');
 const {
   DEFAULT_FEEDBACK_MESSAGE,
+  DEFAULT_GLOBAL_FEEDBACK_MESSAGE,
   featureBetaState,
+  globalFeedbackState,
   initializeFeatureBeta,
 } = require('../services/feature-beta');
 
-test('featureBeta defaults to false flags and initializes missing fields without overwriting operator edits', async () => {
+test('featureBeta and globalFeedback initialize missing fields without overwriting operator edits', async () => {
   assert.deepEqual(featureBetaState(null), {
     smartNotes: { beta: false, showFeedbackMessage: false, feedbackMessage: '' },
     smartReply: { beta: false, showFeedbackMessage: false, feedbackMessage: '' },
     bookStudio: { beta: false, showFeedbackMessage: false, feedbackMessage: '' },
   });
+  assert.deepEqual(globalFeedbackState(null), { enabled: false, message: '' });
 
   const mongod = await MongoMemoryServer.create();
   await mongoose.connect(mongod.getUri());
@@ -28,8 +31,12 @@ test('featureBeta defaults to false flags and initializes missing fields without
     assert.equal(first.bookStudio.beta, false);
     assert.equal(first.bookStudio.showFeedbackMessage, false);
     assert.equal(first.bookStudio.feedbackMessage, DEFAULT_FEEDBACK_MESSAGE);
+    assert.deepEqual(globalFeedbackState(created), {
+      enabled: true,
+      message: DEFAULT_GLOBAL_FEEDBACK_MESSAGE,
+    });
 
-    // Simulate operator toggling bookStudio beta and editing message in DB.
+    // Simulate operator toggling flags and editing messages in DB.
     await AppConfig.updateOne(
       { key: 'master_config' },
       {
@@ -37,6 +44,8 @@ test('featureBeta defaults to false flags and initializes missing fields without
           'featureBeta.bookStudio.beta': true,
           'featureBeta.bookStudio.showFeedbackMessage': true,
           'featureBeta.bookStudio.feedbackMessage': 'Custom beta note for taptapcreate43@gmail.com',
+          'globalFeedback.enabled': false,
+          'globalFeedback.message': 'Paused temporarily',
         },
       },
     );
@@ -47,6 +56,10 @@ test('featureBeta defaults to false flags and initializes missing fields without
     assert.equal(state.bookStudio.showFeedbackMessage, true);
     assert.equal(state.bookStudio.feedbackMessage, 'Custom beta note for taptapcreate43@gmail.com');
     assert.equal(state.smartNotes.beta, false);
+    assert.deepEqual(globalFeedbackState(updated), {
+      enabled: false,
+      message: 'Paused temporarily',
+    });
   } finally {
     await mongoose.disconnect();
     await mongod.stop();

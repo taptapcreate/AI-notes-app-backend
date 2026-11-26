@@ -37,7 +37,7 @@ const { noteOutputLimit, initializeNoteOutputLimits } = require('./services/note
 const { releaseConfig } = require('./services/release-config');
 const { processingDisclosure } = require('./services/processing-disclosure');
 const { helpSupport, initializeHelpSupport } = require('./services/help-support');
-const { featureBetaState, initializeFeatureBeta } = require('./services/feature-beta');
+const { featureBetaState, globalFeedbackState, initializeFeatureBeta } = require('./services/feature-beta');
 const { publicMaintenance, createMaintenanceGate } = require('./services/maintenance');
 
 const CreditRegistration = require('./models/CreditRegistration');
@@ -909,9 +909,23 @@ app.get('/api/config', async (req, res) => {
         const config = await getAppConfig();
         res.set('Cache-Control', 'no-store');
         // Explicitly normalized below so raw database copy cannot expand the consent UI.
-        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), helpSupport: helpSupport(config), featureBeta: featureBetaState(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, generationBillingRequired: true, smartNoteSafetyVersion: 1, smartNoteLimits: { sourceBytes: 24000, instructionBytes: 4000, promptBytes: 32000 }, bookSuggestionsVersion: 1, writingReviewVersion: 1, writingReviewPolicyVersion: 2, bookPageBillingVersion: 1, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
+        res.json({ ...config.toObject(), processingDisclosure: processingDisclosure(config), helpSupport: helpSupport(config), featureBeta: featureBetaState(config), globalFeedback: globalFeedbackState(config), creditPackCatalog: await creditPackCatalog.publicCatalog(config), billingControls: billingControls(config), platformBillingControls: platformBillingControls(config), ...publicMaintenance(config), ...releaseConfig(config), welcomePackCredits: getWelcomeCredits(config), subscriberDailyLimit: getSubscriberDailyLimit(config), welcomeCreditsConfigurable: true, creditPolicyVersion: 'one-time-v1', generationBillingVersion: 2, generationBillingRequired: true, generationLookupVersion: 1, smartNoteSafetyVersion: 1, smartNoteLimits: { sourceBytes: 24000, instructionBytes: 4000, promptBytes: 32000 }, bookSuggestionsVersion: 1, writingReviewVersion: 1, writingReviewPolicyVersion: 2, bookPageBillingVersion: 1, desktopProFormatVersion: 1, generationMediaPricing: generationMediaPricing(config), subscriptionUsageVersion: 1, accountRecoveryVersion: accountRecoveryReady ? 1 : 0, purchasedCreditFallback: true, desktopWalkthroughNarration: true, desktopMediaBilling: 1, desktopExtendedMediaVersion: 1, pdfPageBillingVersion: 1, desktopHybridPdfVersion: 1, mobileHybridPdfVersion: 1, weeklySubscriptionCredits: getWeeklySubscriptionCredits(config), subscriptionAllowances: subscriptionAllowances(config), subscriptionPlanMessages: subscriptionPlanMessages(config) });
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to fetch config' });
+    }
+});
+
+app.get('/api/generation/:requestId', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const code = await generationService.authenticate(req.headers.authorization);
+        const { httpStatus, body } = await generationService.lookup(code, req.params.requestId);
+        res.status(httpStatus).json(body);
+    } catch (error) {
+        res.status(error.status || 503).json({
+            error: error.status ? error.message : 'Unable to check AI request status right now.',
+            ...(error.details || {}),
+        });
     }
 });
 

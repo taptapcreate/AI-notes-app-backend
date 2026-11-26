@@ -620,7 +620,10 @@ function createGeneration({
         if (!record.result || (record.expiresAt && record.expiresAt <= now()))
             throw new CreditError(
                 410,
-                'This request completed earlier, but its saved result expired. No additional credit was charged. Start a new generation if you need another result.',
+                record.state === 'failed'
+                    ? 'This AI request failed earlier and its credit was returned, and its saved status expired.'
+                    : 'This request completed earlier, but its saved result expired. No additional credit was charged. Start a new generation if you need another result.',
+                { originalState: record.state },
             );
         const current = credits.receiptBalance
             ? await credits.receiptBalance(record.recoveryCode, record.reservation.sandboxIds)
@@ -815,10 +818,35 @@ function createGeneration({
             else { res.status(status); send(body); }
         });
     }
+    async function lookup(code, requestId) {
+        if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId))
+            throw new CreditError(400, 'A unique AI request ID is required');
+        await recoverExpired(code);
+        const record = await GenerationRequest.findById(key(code, requestId)).lean();
+        if (!record)
+            throw new CreditError(404, 'This AI request was not found on the server.', {
+                code: 'GENERATION_NOT_FOUND',
+            });
+        if (record.state === 'pending')
+            return {
+                httpStatus: 202,
+                body: {
+                    status: 'pending',
+                    requestId: record.requestId,
+                    endpoint: record.endpoint,
+                    leaseUntil: record.leaseUntil,
+                },
+            };
+        return {
+            httpStatus: record.httpStatus || (record.state === 'failed' ? 500 : 200),
+            body: await response(record),
+        };
+    }
     return {
         authenticate,
         begin,
         finish,
+        lookup,
         response,
         recoverExpired,
         middleware,
