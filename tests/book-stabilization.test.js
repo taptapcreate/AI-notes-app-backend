@@ -145,7 +145,7 @@ test('parseReviewJson recovers minor JSON syntax defects while still rejecting t
  assert.deepEqual(parseReviewJson(defectJson), {
   edits: [{ id: 's0', text: "Don't forget —\tthe train\nleaves soon." }],
  });
- const dialogueJson = 'Here is {meta} and an odd "quote before JSON:\n{"edits":[{"id":"s0","text":""Little tyke," chortled Mr. Dursley, "no\\-one knows."}]}';
+ const dialogueJson = 'Here is {meta} and an odd "quote before JSON:\n{"edits":[{"id":"s0","text":""Little tyke," chortled Mr. Dursley, "no\\-one knows.""}]}';
  assert.deepEqual(parseReviewJson(dialogueJson), {
   edits: [{ id: 's0', text: '"Little tyke," chortled Mr. Dursley, "no-one knows."' }],
  });
