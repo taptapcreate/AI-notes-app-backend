@@ -41,6 +41,8 @@ function createBookReview({
             try { onValidation({ requestId: request.requestId, operation: context.task, ...diagnostic }); } catch {}
             return diagnostic;
         };
+        const policyRejectionMessage =
+            'The AI provider could not review this passage because its content filter flagged the text (this commonly happens with published copyrighted books or restricted content). Try original writing instead. Your credits are returned.';
         const wrapReviewError = (error, fallback = 'The AI review could not be validated.') => {
             if (error instanceof BookGenerationError) return error;
             if (error?.name === 'AbortError' || request.signal?.aborted) return error;
@@ -50,11 +52,13 @@ function createBookReview({
             // failure-cooldown that would block unrelated operations.
             const code = status === 400 ? 'PROVIDER_POLICY_REJECTION' : 'BOOK_REVIEW_INVALID';
             const message =
-                error instanceof SyntaxError
-                    ? 'The AI returned an unreadable review. Your credits are returned.'
-                    : /Empty AI completion|Incomplete AI stream|APIConnection|timeout/i.test(error?.message || error?.name || '')
-                      ? 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.'
-                      : error?.message || fallback;
+                status === 400
+                    ? policyRejectionMessage
+                    : error instanceof SyntaxError
+                      ? 'The AI returned an unreadable review. Your credits are returned.'
+                      : /Empty AI completion|Incomplete AI stream|APIConnection|timeout/i.test(error?.message || error?.name || '')
+                        ? 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.'
+                        : error?.message || fallback;
             const wrapped = new BookGenerationError(message, code, status);
             if (error.reviewValidation) wrapped.reviewValidation = error.reviewDiagnostic || reviewDiagnostic(error, 'batch');
             return wrapped;
@@ -206,7 +210,7 @@ function createBookReview({
                 }
                 if (result.finishReason === 'content_filter') {
                     throw new BookGenerationError(
-                        'The AI provider filtered this passage before completing the review. Your credits are returned.',
+                        policyRejectionMessage,
                         'PROVIDER_POLICY_REJECTION',
                         400,
                     );

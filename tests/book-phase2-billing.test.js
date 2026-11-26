@@ -616,7 +616,7 @@ test('createBookGenerator and createBookReview do not retry provider HTTP 400 po
     };
     await assert.rejects(
         () => run(ctx),
-        (err) => err instanceof BookGenerationError && err.status === 400 && err.code === 'PROVIDER_POLICY_REJECTION',
+        (err) => err instanceof BookGenerationError && err.status === 400 && err.code === 'PROVIDER_POLICY_REJECTION' && /published copyrighted books/i.test(err.message),
     );
     assert.equal(providerCalls, 1);
     assert.equal(reqState.retryCount, 0);
@@ -648,7 +648,7 @@ test('createBookReview surfaces content_filter truncation as PROVIDER_POLICY_REJ
     };
     await assert.rejects(
         () => run(ctx),
-        (err) => err instanceof BookGenerationError && err.status === 400 && err.code === 'PROVIDER_POLICY_REJECTION',
+        (err) => err instanceof BookGenerationError && err.status === 400 && err.code === 'PROVIDER_POLICY_REJECTION' && /published copyrighted books/i.test(err.message),
     );
     assert.equal(calls, 1);
     assert.equal(reqState.validationRetries, 0);
