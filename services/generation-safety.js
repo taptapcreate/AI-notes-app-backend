@@ -22,7 +22,8 @@ async function checkFailureCooldown(Request, code, now, { failureScope, endpoint
           }
         : {};
     const scopedFailures = await Request.find(
-        { state: 'failed', recoveryCode: code, createdAt: { $gte: windowStart }, ...scopedFilter },
+        { state: 'failed', recoveryCode: code, createdAt: { $gte: windowStart },
+          failureCode: { $ne: 'PROVIDER_POLICY_REJECTION' }, ...scopedFilter },
         { createdAt: 1 },
     )
         .sort({ createdAt: -1 })
@@ -46,7 +47,7 @@ async function checkFailureCooldown(Request, code, now, { failureScope, endpoint
         {
             state: 'failed',
             recoveryCode: code,
-            failureCode: { $ne: 'BOOK_REVIEW_INVALID' },
+            failureCode: { $nin: ['BOOK_REVIEW_INVALID', 'PROVIDER_POLICY_REJECTION'] },
             createdAt: { $gte: windowStart },
         },
         { createdAt: 1 },

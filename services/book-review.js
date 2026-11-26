@@ -28,13 +28,17 @@ function createBookReview({
             if (error instanceof BookGenerationError) return error;
             if (error?.name === 'AbortError' || request.signal?.aborted) return error;
             const status = Number.isInteger(error?.status) && error.status >= 400 ? error.status : 502;
+            // HTTP 400 from the provider indicates a deterministic prompt rejection (e.g. policy),
+            // not a transient failure. Use a distinct code so it is not counted toward the
+            // failure-cooldown that would block unrelated operations.
+            const code = status === 400 ? 'PROVIDER_POLICY_REJECTION' : 'BOOK_REVIEW_INVALID';
             const message =
                 error instanceof SyntaxError
                     ? 'The AI returned an unreadable review. Your credits are returned.'
                     : /Empty AI completion|Incomplete AI stream|APIConnection|timeout/i.test(error?.message || error?.name || '')
                       ? 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.'
                       : error?.message || fallback;
-            return new BookGenerationError(message, 'BOOK_REVIEW_INVALID', status);
+            return new BookGenerationError(message, code, status);
         };
         const nonRetryableValidation = (message = '') =>
             /exceeds the chapter size limit|Choose valid/i.test(message);

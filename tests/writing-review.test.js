@@ -50,10 +50,22 @@ test('improve writing uses stylistic editing instructions distinct from fix gram
  for (const pages of [[{number:1,ids:['s0','s1']}],[{number:1,ids:['s0']},{number:2,ids:['s1']}]]) {
   const ctx = reviewContext({writingReviewVersion:1,writingReviewPolicyVersion:2,bookPageBillingVersion:1,bookPageQuote:pages.length,context:JSON.stringify({task:'writing-review-improve',pages,segments:[{id:'s0',text:p1},{id:'s1',text:p2}]})});
   const prompt = reviewPrompt(reviewBatches(ctx)[0]);
-  assert.match(prompt, /line and stylistic editor/);
-  assert.match(prompt, /even when grammar is already correct/);
+  // Task framing: line editor distinct from proofreader and structural editor.
+  assert.match(prompt, /line editor/);
+  assert.match(prompt, /even when.*grammar is already correct/);
+  // Should not contain the percentage numbers (enforcement is in reviewResult, not the prompt).
+  assert.doesNotMatch(prompt, /90%.*125%/);
+  // Should not expose percentage thresholds that could trigger content filters.
+  assert.doesNotMatch(prompt, /never shorten below 80%/);
+  // Core stylistic scope preserved.
+  assert.match(prompt, /sentence construction.*word choice.*readability/);
+  assert.match(prompt, /descriptive and expressive quality/);
+  // Short-segment safety note included.
+  assert.match(prompt, /Short segments or fragments may require no change/);
+  // Must differ from grammar-only task.
   assert.doesNotMatch(prompt, /First proofread every editable segment/);
   assert.doesNotMatch(prompt, /When proofreading, preserve deliberate punctuation/);
+  // Meaningful prose improvement is accepted by reviewResult.
   const improved = {
    edits: [
     { id: 's0', text: 'Julian stood beside the frosted window, seething with anger and frustration at being trapped inside the hotel. Outside, a fierce gale howled down the street, driving heavy snow against the cold glass.' },
@@ -61,8 +73,51 @@ test('improve writing uses stylistic editing instructions distinct from fix gram
    ],
   };
   assert.equal(reviewResult(JSON.stringify(improved), ctx).edits.length, 2);
+  // Severe omission (from 44 words down to 3) is still rejected.
   assert.throws(() => reviewResult(JSON.stringify({edits:[{id:'s0',text:'Julian was mad.'}]}), ctx), /omitted too much/);
  }
+});
+test('improve writing accepts unchanged short segments and fragments without throwing', () => {
+ // A leading fragment "And then —" and a short complete sentence are both short segments.
+ // The model should be allowed to leave them unchanged even when adjacent prose is improved.
+ const fragment = 'And then —';
+ const shortSentence = 'He waited.';
+ const longProse = 'The street outside was completely empty and there was not a single person or vehicle visible anywhere along its entire length from one end to the other.';
+ const pages = [{number:1,ids:['s0']},{number:2,ids:['s1']},{number:3,ids:['s2']}];
+ const ctx = reviewContext({writingReviewVersion:1,writingReviewPolicyVersion:2,bookPageBillingVersion:1,bookPageQuote:3,
+  context:JSON.stringify({task:'writing-review-improve',pages,segments:[{id:'s0',text:fragment},{id:'s1',text:shortSentence},{id:'s2',text:longProse}]})});
+ // Only the long prose is edited — short segments left unchanged — this must not throw.
+ const partialEdit = { edits: [{ id: 's2', text: 'The street outside was utterly empty; not a single person or vehicle moved along its entire length.' }] };
+ assert.equal(reviewResult(JSON.stringify(partialEdit), ctx).edits.length, 1);
+ // Editing the long prose to something much shorter still fails the word-retention check.
+ assert.throws(() => reviewResult(JSON.stringify({edits:[{id:'s2',text:'The street was empty.'}]}), ctx), /omitted too much/);
+});
+test('improve, revise, and grammar prompts are meaningfully distinct from each other', () => {
+ const makeCtx = (task) => {
+  const seg = { id: 's0', text: 'She walk to the store every morning and buy things.' };
+  return reviewContext({writingReviewVersion:1,writingReviewPolicyVersion:2,bookPageBillingVersion:1,bookPageQuote:1,
+   context:JSON.stringify({task,pages:[{number:1,ids:['s0']}],segments:[seg]})});
+ };
+ const grammarPrompt = reviewPrompt(reviewBatches(makeCtx('writing-review-grammar'))[0]);
+ const improvePrompt = reviewPrompt(reviewBatches(makeCtx('writing-review-improve'))[0]);
+ const revisePrompt  = reviewPrompt(reviewBatches(makeCtx('writing-review-revise'))[0]);
+ // Grammar: targeted proofreading with minimal change.
+ assert.match(grammarPrompt, /light, targeted polish/);
+ assert.match(grammarPrompt, /smallest useful change/);
+ assert.doesNotMatch(grammarPrompt, /line editor/);
+ // Improve: meaningful prose enhancement beyond grammar, with short-segment awareness.
+ assert.match(improvePrompt, /line editor/);
+ assert.match(improvePrompt, /descriptive and expressive quality/);
+ assert.doesNotMatch(improvePrompt, /light, targeted polish/);
+ assert.doesNotMatch(improvePrompt, /smallest useful change/);
+ // Revise: chapter-level structural focus.
+ assert.match(revisePrompt, /developmental and narrative chapter editor/);
+ assert.match(revisePrompt, /coherence.*pacing.*scene transitions/);
+ assert.doesNotMatch(revisePrompt, /line editor/);
+ // All three differ from each other in their primary instruction.
+ assert.notEqual(grammarPrompt, improvePrompt);
+ assert.notEqual(improvePrompt, revisePrompt);
+ assert.notEqual(grammarPrompt, revisePrompt);
 });
 test('grammar reviews parse wrapped or fenced JSON across 30-page chapters while rejecting truncated JSON', () => {
  const segments = Array.from({ length: 30 }, (_, i) => ({

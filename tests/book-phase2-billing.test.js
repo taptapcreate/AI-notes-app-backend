@@ -518,3 +518,66 @@ test('three bulk review validation failures pause further bulk reviews with dyna
     const smartNote = await request(code, randomUUID(), { type: 'text', content: 'Ordinary note text.' }, '/api/notes');
     assert.equal(smartNote.status, 200);
 });
+
+test('provider policy rejection (HTTP 400) does not trigger failure cooldown or block subsequent operations', async (t) => {
+    // A provider-side HTTP 400 (policy rejection) is deterministic — retrying with the same
+    // prompt will never succeed. It must NOT count toward the scoped failure cooldown that
+    // blocks unrelated operations, since doing so would prevent the user from using other
+    // tools after any single policy-flagged request.
+    const code = await account();
+    const request = await api(t, (_req, res) => {
+        if (_req.body.writingReviewVersion === 1 && (_req.body.bookPageQuote || 1) === 1) {
+            // Single-page requests succeed.
+            return res.json({ response: JSON.stringify({ edits: [{ id: 's0', text: 'Fixed cleanly.' }] }) });
+        }
+        // Simulate provider HTTP 400 policy rejection on bulk improve reviews.
+        return res.status(400).json({ error: '400 Invalid prompt: your prompt was flagged as potentially violating our usage policy.', code: 'PROVIDER_POLICY_REJECTION' });
+    });
+
+    const bulkImproveBody = makeReviewBody({ task: 'writing-review-improve', pages: 5 });
+
+    // Three repeated provider 400s — these must NOT trigger the failure cooldown.
+    for (let i = 0; i < 3; i++) {
+        const failed = await request(code, randomUUID(), bulkImproveBody, '/api/followup');
+        assert.equal(failed.status, 400);
+        assert.equal(failed.body.code, 'PROVIDER_POLICY_REJECTION');
+    }
+
+    // A fourth bulk request must NOT be blocked by cooldown (policy rejections are excluded).
+    const fourthBulk = await request(code, randomUUID(), bulkImproveBody, '/api/followup');
+    assert.equal(fourthBulk.status, 400); // Still rejected by provider, but not 429 cooldown.
+    assert.notEqual(fourthBulk.body.code, 'AI_FAILURE_COOLDOWN');
+
+    // Single-page and other operations must remain fully available.
+    const singlePage = await request(code, randomUUID(), makeReviewBody({ task: 'writing-review-grammar', pages: 1 }), '/api/followup');
+    assert.equal(singlePage.status, 200);
+});
+
+test('provider policy rejections do not interfere with separate transient-failure cooldown that uses BOOK_REVIEW_INVALID', async (t) => {
+    // Three real transient failures (502 BOOK_REVIEW_INVALID) must still trigger the cooldown.
+    // Interleaved provider 400s (PROVIDER_POLICY_REJECTION) must not reset or extend it.
+    const code = await account();
+    let callCount = 0;
+    const request = await api(t, (_req, res) => {
+        if (_req.body.writingReviewVersion === 1 && (_req.body.bookPageQuote || 1) === 1) {
+            return res.json({ response: JSON.stringify({ edits: [{ id: 's0', text: 'Fixed cleanly.' }] }) });
+        }
+        callCount++;
+        if (callCount % 2 === 0) {
+            // Even calls: provider 400 (must not count toward cooldown).
+            return res.status(400).json({ error: 'Policy rejection.', code: 'PROVIDER_POLICY_REJECTION' });
+        }
+        // Odd calls: transient 502 (counts toward cooldown).
+        return res.status(502).json({ error: 'The AI review omitted too much of a passage. Your text is unchanged.', code: 'BOOK_REVIEW_INVALID' });
+    });
+
+    const bulkBody = makeReviewBody({ task: 'writing-review-revise', pages: 5 });
+    // 3 transient failures interleaved with 3 policy rejections (6 calls total).
+    for (let i = 0; i < 6; i++) {
+        await request(code, randomUUID(), bulkBody, '/api/followup');
+    }
+    // After 3 transient failures the cooldown should be active.
+    const blocked = await request(code, randomUUID(), bulkBody, '/api/followup');
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.code, 'AI_FAILURE_COOLDOWN');
+});
