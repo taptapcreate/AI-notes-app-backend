@@ -3,6 +3,7 @@ function billingControls(config) {
         showSubscriptions: config?.billingControls?.showSubscriptions !== false,
         showTopUpPacks: config?.billingControls?.showTopUpPacks !== false,
         usePrimarySubscriptionTracking: config?.billingControls?.usePrimarySubscriptionTracking !== false,
+        showLifetimeFreeCredits: config?.billingControls?.showLifetimeFreeCredits !== false,
     };
 }
 function platformBillingControls(config) {

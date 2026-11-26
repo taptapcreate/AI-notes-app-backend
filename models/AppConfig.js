@@ -74,6 +74,7 @@ const AppConfigSchema = new mongoose.Schema({
             showSubscriptions: { type: Boolean, default: true },
             showTopUpPacks: { type: Boolean, default: true },
             usePrimarySubscriptionTracking: { type: Boolean, default: true },
+            showLifetimeFreeCredits: { type: Boolean, default: true },
         }, { _id: false }),
         default: () => ({}),
     },

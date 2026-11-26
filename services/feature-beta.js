@@ -65,6 +65,12 @@ async function initializeFeatureBeta(Config) {
       },
     });
   }
+  ops.push({
+    updateOne: {
+      filter: { key: 'master_config', 'billingControls.showLifetimeFreeCredits': { $exists: false } },
+      update: { $set: { 'billingControls.showLifetimeFreeCredits': true } },
+    },
+  });
   await Config.collection.bulkWrite(ops);
 }
 
