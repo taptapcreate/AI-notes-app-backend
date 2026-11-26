@@ -30,7 +30,7 @@ const APP_FEATURES = new Set(['text', 'image', 'screenshot', 'voice', 'pdf', 'we
 const MOBILE_PRO_FORMATS = new Set(['meeting', 'study', 'quiz', 'blog', 'social', 'code']);
 const PRO_SOURCES = new Set(['location', 'calendar', 'sketch']);
 const requiresPro = (body) => body.bookSuggestionsVersion === 1 || body.writingReviewVersion === 1 || body.desktopProFormatVersion === 1 || PRO_SOURCES.has(body.appFeature) || Boolean(body.replyTool) ||
-    (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || MOBILE_PRO_FORMATS.has(body.format)));
+    (body.featurePolicyVersion === 1 && (body.noteLength === 'in-depth' || body.format === 'book' || MOBILE_PRO_FORMATS.has(body.format)));
 
 function validateInput(endpoint, body) {
     if (!body || typeof body !== 'object' || Array.isArray(body))

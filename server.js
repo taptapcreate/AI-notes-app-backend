@@ -386,6 +386,7 @@ const formatGuides = {
     code: 'Format as a code explanation: break down logic into simple steps, explain technical terms, and highlight efficiency.',
     social: 'Format as a catchy social media post: use hooks, emojis, and relevant hashtags. Engaging and shareable.',
     grammar: 'Focus on fixing spelling, grammar, and punctuation while maintaining the original meaning. Only improve clarity.',
+    book: 'Write readable Book Studio manuscript prose in Markdown matching the requested scope. Use flowing paragraphs rather than a bulleted summary, and respect any supplied opening length target.',
 };
 
 // Style instructions (Reply specific)
@@ -420,7 +421,11 @@ app.post('/api/notes', async (req, res) => {
         }
 
         const lengthConfig = Object.hasOwn(lengthGuides, noteLength) ? lengthGuides[noteLength] : lengthGuides.standard;
-        const lengthInstruction = lengthConfig.instruction;
+        const lengthInstruction = format === 'book' && ['brief', 'standard'].includes(noteLength)
+            ? (noteLength === 'brief'
+                ? 'Keep the opening concise (~150–260 words), sized for a compact opening page without summarizing later outline points.'
+                : 'Write a grounded opening section (~260–460 words), sized for a standard opening page without summarizing later outline points.')
+            : lengthConfig.instruction;
         const maxTokens = noteOutputLimit(res.locals.appConfig, noteLength);
 
         const formatInstruction = formatGuides[format] || formatGuides.bullet;
