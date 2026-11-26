@@ -3,7 +3,7 @@ const { limits: noteOutputLimits, minimum: minimumNoteOutputTokens } = require('
 const { DEFAULT_WELCOME_CREDITS } = require('../services/credit-policy');
 const { DEFAULT_SUBSCRIBER_DAILY_LIMIT, DEFAULT_MONTHLY_SUBSCRIPTION_CREDITS, DEFAULT_FREE_TRIAL_CREDITS } = require('../services/subscription-usage');
 const { DEFAULT_ROLLOVER } = require('../services/subscription-credit-policy');
-const { DEFAULT_FEEDBACK_MESSAGE, DEFAULT_GLOBAL_FEEDBACK_MESSAGE } = require('../services/feature-beta');
+const { DEFAULT_FEEDBACK_MESSAGE, DEFAULT_GLOBAL_FEEDBACK_MESSAGE, DEFAULT_CROSS_DEVICE_COPY } = require('../services/feature-beta');
 
 const FeatureBetaEntrySchema = new mongoose.Schema(
     {
@@ -193,6 +193,12 @@ const AppConfigSchema = new mongoose.Schema({
     globalFeedback: {
         enabled: { type: Boolean, default: true },
         message: { type: String, trim: true, maxlength: 500, default: DEFAULT_GLOBAL_FEEDBACK_MESSAGE },
+    },
+    crossDeviceCreditCopy: {
+        enabled: { type: Boolean, default: false },
+        plansMessage: { type: String, trim: true, maxlength: 500, default: DEFAULT_CROSS_DEVICE_COPY.plansMessage },
+        onboardingDescription: { type: String, trim: true, maxlength: 500, default: DEFAULT_CROSS_DEVICE_COPY.onboardingDescription },
+        settingsMessage: { type: String, trim: true, maxlength: 500, default: DEFAULT_CROSS_DEVICE_COPY.settingsMessage },
     },
     // 4. Version Control
     minAppVersion: { type: String, default: '1.0.0' },

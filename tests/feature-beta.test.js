@@ -6,8 +6,10 @@ const AppConfig = require('../models/AppConfig');
 const {
   DEFAULT_FEEDBACK_MESSAGE,
   DEFAULT_GLOBAL_FEEDBACK_MESSAGE,
+  DEFAULT_CROSS_DEVICE_COPY,
   featureBetaState,
   globalFeedbackState,
+  crossDeviceCreditCopyState,
   initializeFeatureBeta,
 } = require('../services/feature-beta');
 
@@ -35,6 +37,7 @@ test('featureBeta and globalFeedback initialize missing fields without overwriti
       enabled: true,
       message: DEFAULT_GLOBAL_FEEDBACK_MESSAGE,
     });
+    assert.deepEqual(crossDeviceCreditCopyState(created), { ...DEFAULT_CROSS_DEVICE_COPY });
 
     // Simulate operator toggling flags and editing messages in DB.
     await AppConfig.updateOne(
@@ -46,6 +49,8 @@ test('featureBeta and globalFeedback initialize missing fields without overwriti
           'featureBeta.bookStudio.feedbackMessage': 'Custom beta note for taptapcreate43@gmail.com',
           'globalFeedback.enabled': false,
           'globalFeedback.message': 'Paused temporarily',
+          'crossDeviceCreditCopy.enabled': true,
+          'crossDeviceCreditCopy.plansMessage': 'Updated cross-device transfer message.',
         },
       },
     );
@@ -60,6 +65,8 @@ test('featureBeta and globalFeedback initialize missing fields without overwriti
       enabled: false,
       message: 'Paused temporarily',
     });
+    assert.equal(crossDeviceCreditCopyState(updated).enabled, true);
+    assert.equal(crossDeviceCreditCopyState(updated).plansMessage, 'Updated cross-device transfer message.');
   } finally {
     await mongoose.disconnect();
     await mongod.stop();
