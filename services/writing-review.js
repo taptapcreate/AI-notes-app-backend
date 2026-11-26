@@ -236,9 +236,10 @@ function reviewResult(response, context) {
     // Reject severe local omissions too, including short dialogue lines.
     const sourceWords = segment.text.trim().split(/\s+/u).length;
     const afterWords = edit.text.trim().split(/\s+/u).length;
-    if (sourceWords >= 12 && afterWords < Math.ceil(sourceWords * 0.7))
+    const minLongRatio = context.task === 'writing-review-grammar' ? 0.6 : 0.5;
+    if (sourceWords >= 12 && afterWords < Math.max(6, Math.floor(sourceWords * minLongRatio)))
       throw Error('The AI review omitted too much of a passage. Your text is unchanged.');
-    if (sourceWords >= 3 && sourceWords < 12 && afterWords < Math.max(2, Math.floor(sourceWords * 0.45)))
+    if (sourceWords >= 5 && sourceWords < 12 && afterWords < Math.max(2, Math.floor(sourceWords * 0.4)))
       throw Error('The AI review omitted too much of a passage. Your text is unchanged.');
     if (sourceWords >= 3 && /[“”"]/.test(segment.text) && !/[“”"]/.test(edit.text))
       throw Error('The AI review omitted dialogue punctuation. Your text is unchanged.');

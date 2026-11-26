@@ -1,17 +1,73 @@
 const { CreditError } = require('./credit-policy');
 // Failures retain their records after refund, so changing request IDs or restarting
 // the service cannot reset these cooldowns. Cached receipts bypass these checks.
-async function checkFailureCooldown(Request, code, now) {
-    const recent = {
-        state: 'failed',
-        createdAt: { $gte: new Date(now.getTime() - 15 * 60000) },
-    };
-    if ((await Request.countDocuments({ ...recent, recoveryCode: code })) >= 3)
+async function checkFailureCooldown(Request, code, now, { failureScope, endpoint } = {}) {
+    const windowMs = 15 * 60000;
+    const windowStart = new Date(now.getTime() - windowMs);
+    const scope = failureScope || endpoint;
+    const scopedFilter = scope
+        ? {
+              $or: [
+                  { failureScope: scope },
+                  {
+                      failureScope: { $exists: false },
+                      endpoint:
+                          scope === 'book-suggestions'
+                              ? '/notes'
+                              : scope.startsWith('book-')
+                                ? '/followup'
+                                : scope,
+                  },
+              ],
+          }
+        : {};
+    const scopedFailures = await Request.find(
+        { state: 'failed', recoveryCode: code, createdAt: { $gte: windowStart }, ...scopedFilter },
+        { createdAt: 1 },
+    )
+        .sort({ createdAt: -1 })
+        .limit(3)
+        .lean();
+    if (scopedFailures.length >= 3) {
+        const oldest = scopedFailures[scopedFailures.length - 1];
+        const retryAfterSeconds = Math.max(
+            1,
+            Math.ceil((new Date(oldest.createdAt).getTime() + windowMs - now.getTime()) / 1000),
+        );
+        const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+        const waitText = minutes === 1 ? 'about 1 minute' : `about ${minutes} minutes`;
         throw new CreditError(
             429,
-            'AI requests are paused after repeated failures. Please try again in 15 minutes. Your credits have not been charged.',
-            { code: 'AI_FAILURE_COOLDOWN', retryAfterSeconds: 900 },
+            `AI requests are paused after repeated failures. Please try again in ${waitText}. Your credits have not been charged.`,
+            { code: 'AI_FAILURE_COOLDOWN', retryAfterSeconds },
         );
+    }
+    const accountProviderFailures = await Request.find(
+        {
+            state: 'failed',
+            recoveryCode: code,
+            failureCode: { $ne: 'BOOK_REVIEW_INVALID' },
+            createdAt: { $gte: windowStart },
+        },
+        { createdAt: 1 },
+    )
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .lean();
+    if (accountProviderFailures.length >= 5) {
+        const oldest = accountProviderFailures[accountProviderFailures.length - 1];
+        const retryAfterSeconds = Math.max(
+            1,
+            Math.ceil((new Date(oldest.createdAt).getTime() + windowMs - now.getTime()) / 1000),
+        );
+        const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+        const waitText = minutes === 1 ? 'about 1 minute' : `about ${minutes} minutes`;
+        throw new CreditError(
+            429,
+            `AI requests are paused after repeated failures. Please try again in ${waitText}. Your credits have not been charged.`,
+            { code: 'AI_FAILURE_COOLDOWN', retryAfterSeconds },
+        );
+    }
     if (
         (await Request.countDocuments({
             state: 'failed',

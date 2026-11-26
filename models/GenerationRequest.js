@@ -16,12 +16,15 @@ const schema = new mongoose.Schema({
     leaseUntil: { type: Date, required: true },
     result: mongoose.Schema.Types.Mixed,
     httpStatus: Number,
+    failureCode: String,
+    failureScope: String,
     observability: { type: mongoose.Schema.Types.Mixed },
     createdAt: { type: Date, default: Date.now },
     expiresAt: Date,
 });
 schema.index({ state: 1, leaseUntil: 1 });
 schema.index({ recoveryCode: 1, state: 1, createdAt: 1 });
+schema.index({ recoveryCode: 1, state: 1, failureScope: 1, createdAt: -1 }, { sparse: true });
 schema.index({ recoveryCode: 1, endpoint: 1, contentHash: 1, state: 1, createdAt: -1 }, { sparse: true });
 schema.index({ state: 1, createdAt: 1 });
 schema.index({ 'reservation.subscriptionId': 1, 'reservation.quotaEpoch': 1, 'reservation.day': 1, state: 1 });

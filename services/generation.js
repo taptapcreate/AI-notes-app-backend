@@ -195,6 +195,19 @@ function bookCacheFingerprint(endpoint, body) {
         .update(JSON.stringify(stable({ endpoint, body }, ['isPro', 'billingMode'])))
         .digest('hex');
 }
+function failureScopeFor(endpoint, body) {
+    if (
+        endpoint === '/followup' &&
+        body?.bookPageBillingVersion === 1 &&
+        Number(body?.bookPageQuote) > 3
+    )
+        return 'book-bulk-review';
+    if (endpoint === '/followup' && body?.writingReviewVersion === 1)
+        return 'book-small-review';
+    if (endpoint === '/notes' && body?.bookSuggestionsVersion === 1)
+        return 'book-suggestions';
+    return endpoint;
+}
 function summarizeTelemetry(reqState, status, record, noEditsSuggested = false) {
     if (!reqState) return undefined;
     const held = record?.reservation || {};
@@ -286,7 +299,7 @@ function createGeneration({
         }
         return code;
     }
-    async function finish(id, status, result, unchangedReview = false, observability = undefined) {
+    async function finish(id, status, result, unchangedReview = false, observability = undefined, failureCode = undefined) {
         return transaction(async (session) => {
             const record = await GenerationRequest.findById(id)
                 .session(session)
@@ -354,6 +367,7 @@ function createGeneration({
                         state: status >= 400 ? 'failed' : unchangedReview ? 'unchanged' : 'succeeded',
                         result,
                         httpStatus: status,
+                        ...(status >= 400 && failureCode && { failureCode }),
                         ...(observability && { observability }),
                         expiresAt: new Date(now().getTime() + 86400000),
                     },
@@ -431,7 +445,8 @@ function createGeneration({
                 };
             }
         }
-        await require('./generation-safety').checkFailureCooldown(GenerationRequest, code, now());
+        const failureScope = failureScopeFor(endpoint, body);
+        await require('./generation-safety').checkFailureCooldown(GenerationRequest, code, now(), { failureScope, endpoint });
         if (endpoint === '/followup' && body.writingReviewPolicyVersion === 2)
             await require('./generation-safety').checkUnchangedReviewLimit(GenerationRequest, code, bodyHash, now());
         const config = requestConfig ?? await getAppConfig();
@@ -570,6 +585,7 @@ function createGeneration({
                             endpoint,
                             bodyHash,
                             ...(contentHash && { contentHash }),
+                            failureScope,
                             state: 'pending',
                             createdAt: timestamp,
                             reservation: {
@@ -639,7 +655,7 @@ function createGeneration({
         const abort = new AbortController();
         let finishing = false;
         let reqState;
-        const complete = async (status, value, id, unchangedReview = false, noEditsSuggested = false) => {
+        const complete = async (status, value, id, unchangedReview = false, noEditsSuggested = false, failureCode = undefined) => {
             if (finishing) return;
             finishing = true;
             if (status >= 400) abort.abort();
@@ -660,7 +676,7 @@ function createGeneration({
                     { state: status >= 400 ? 'failed' : 'succeeded', reservation: reqState?.reservation },
                     noEditsSuggested,
                 );
-                const record = await finish(id, status, value, unchangedReview, preliminary);
+                const record = await finish(id, status, value, unchangedReview, preliminary, failureCode);
                 const telemetry = summarizeTelemetry(reqState, status, record, noEditsSuggested);
                 if (telemetry) console.info('AI financial telemetry', telemetry);
                 status = record.httpStatus;
@@ -743,7 +759,7 @@ function createGeneration({
                     if (review) noEditsSuggested = reviewResult(value.response, review).edits.every(edit =>
                         edit.text.trim() === review.segments.find(segment => segment.id === edit.id).text.trim());
                 }
-                void complete(status, value, record._id, false, noEditsSuggested);
+                void complete(status, value, record._id, false, noEditsSuggested, status >= 400 ? value?.code : undefined);
                 return res;
             };
             timer = setTimeout(

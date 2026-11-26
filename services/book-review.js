@@ -3,6 +3,7 @@ const {
     reviewBatches,
     reviewPrompt,
     reviewResult,
+    parseReviewJson,
 } = require('./writing-review');
 const { BookGenerationError } = require('./book-generation');
 const retentionMs = 24 * 60 * 60 * 1000;
@@ -37,6 +38,73 @@ function createBookReview({
         };
         const nonRetryableValidation = (message = '') =>
             /exceeds the chapter size limit|Choose valid/i.test(message);
+        const pruneUnsafeBatchEdits = (rawText, batch) => {
+            if (!Array.isArray(batch?.segments) || batch.segments.length < 4) return null;
+            let parsed;
+            try {
+                parsed = parseReviewJson(rawText);
+            } catch {
+                return null;
+            }
+            if (!parsed || !Array.isArray(parsed.edits) || parsed.edits.length < 2) return null;
+            const maxDrops = Math.max(2, Math.floor(parsed.edits.length * 0.2));
+            const safeEdits = [];
+            let dropped = 0;
+            const itemContext = {
+                ...batch,
+                task: batch.task === 'writing-review-revise' ? 'writing-review-improve' : batch.task,
+                pages: undefined,
+            };
+            for (const edit of parsed.edits) {
+                try {
+                    reviewResult(JSON.stringify({ edits: [edit] }), itemContext);
+                    safeEdits.push(edit);
+                } catch {
+                    dropped++;
+                    if (dropped > maxDrops) return null;
+                }
+            }
+            // Strip any boundary-coupled edit pair still failing adjacent cross-segment rules.
+            while (safeEdits.length > 0 && dropped <= maxDrops) {
+                try {
+                    const validated = reviewResult(JSON.stringify({ edits: safeEdits }), batch);
+                    request.droppedUnsafeEdits = (request.droppedUnsafeEdits || 0) + dropped;
+                    return validated.edits;
+                } catch (err) {
+                    const idxMap = new Map(batch.segments.map((s, i) => [s.id, i]));
+                    let removedPair = false;
+                    for (let i = 0; i < safeEdits.length; i++) {
+                        try {
+                            reviewResult(JSON.stringify({ edits: [safeEdits[i]] }), itemContext);
+                        } catch {
+                            safeEdits.splice(i, 1);
+                            dropped++;
+                            removedPair = true;
+                            break;
+                        }
+                        if (i + 1 < safeEdits.length) {
+                            const li = idxMap.get(safeEdits[i].id);
+                            const ri = idxMap.get(safeEdits[i + 1].id);
+                            if (li !== undefined && ri !== undefined && Math.abs(li - ri) <= 1) {
+                                try {
+                                    reviewResult(
+                                        JSON.stringify({ edits: [safeEdits[i], safeEdits[i + 1]] }),
+                                        itemContext,
+                                    );
+                                } catch {
+                                    safeEdits.splice(i, 2);
+                                    dropped += 2;
+                                    removedPair = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!removedPair) return null;
+                }
+            }
+            return null;
+        };
         const maxValidationAttempts = batches.length === 1 ? 2 : maxBatchValidationAttempts;
         const runBatch = async (batch, beforeAttempt) => {
             const basePrompt = reviewPrompt(batch);
@@ -46,7 +114,7 @@ function createBookReview({
                 const prompt =
                     attempt === 0
                         ? basePrompt
-                        : `IMPORTANT: Your previous response could not be validated (${lastReason}). Return ONLY valid JSON using the exact segment IDs in SOURCE.segments, keep each segment aligned strictly to its own original ID without shifting text or duplicating adjacent words, keep every line break unchanged, and do not shorten any passage below the omission guard.\n\n${basePrompt}`;
+                        : `IMPORTANT: Your previous response could not be validated (${lastReason}). Return ONLY valid JSON using the exact segment IDs in SOURCE.segments, keep each segment aligned strictly to its own original ID without shifting text or duplicating adjacent words, keep every line break unchanged, and keep comparable passage length.\n\n${basePrompt}`;
                 let result;
                 try {
                     result = await generate(8000, prompt, {
@@ -82,6 +150,10 @@ function createBookReview({
                         (batches.length > 1 || (request.providerCalls || 0) < 3)
                     )
                         continue;
+                    if (!nonRetryableValidation(lastReason) && !(error instanceof SyntaxError)) {
+                        const rescued = pruneUnsafeBatchEdits(result.text, batch);
+                        if (rescued) return rescued;
+                    }
                     throw wrapReviewError(error);
                 }
             }

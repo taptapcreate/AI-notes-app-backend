@@ -417,3 +417,104 @@ test('multi-batch checkpoint recovery reuses completed chunks without charging o
     const doc = await GenerationRequest.findOne({ requestId: resumedId }).lean();
     assert.equal(doc.observability.reusedChunks, batches - 1);
 });
+
+
+test('concise legitimate edits pass reviewResult while real omissions remain blocked, and isolated bad edits drop cleanly without aborting valid batches', async () => {
+    const { reviewResult } = require('../services/writing-review');
+    const ctx = {
+        task: 'writing-review-improve',
+        segments: [
+            { id: 's0', text: 'He was in a very good mood until lunchtime.' },
+            { id: 's1', text: 'She walked very slowly down the long and winding cobbled street toward home.' },
+            { id: 's2', text: 'Very, very bright.' },
+        ],
+    };
+    const validConcise = {
+        edits: [
+            { id: 's0', text: 'He remained cheerful until lunch.' },
+            { id: 's1', text: 'She strolled down the winding cobbled street toward home.' },
+            { id: 's2', text: 'Radiant.' },
+        ],
+    };
+    assert.equal(reviewResult(JSON.stringify(validConcise), ctx).edits.length, 3);
+
+    assert.throws(
+        () =>
+            reviewResult(
+                JSON.stringify({
+                    edits: [{ id: 's1', text: 'She went home.' }],
+                }),
+                ctx,
+            ),
+        /omitted too much/,
+    );
+
+    const batchCtx = reviewContext({
+        writingReviewVersion: 1,
+        writingReviewPolicyVersion: 2,
+        bookPageBillingVersion: 1,
+        bookPageQuote: 4,
+        context: JSON.stringify({
+            task: 'writing-review-revise',
+            pages: Array.from({ length: 4 }, (_, i) => ({ number: i + 1, ids: [`s${i}`] })),
+            segments: [
+                { id: 's0', text: 'First page has a very simple grammatical mistake here.' },
+                { id: 's1', text: 'Second page also have a clear verb agreement error.' },
+                { id: 's2', text: 'Third page contain another obvious grammatical mistake right here.' },
+                { id: 's3', text: 'The report says that Mira and Daniel Vale are — are — that they are — missing from the station.' },
+            ],
+        }),
+    });
+    const reqState = {};
+    const isolatedRun = createBookReview({
+        Checkpoint: BookReviewCheckpoint,
+        GenerationRequest,
+        model: 'mock',
+        getRequest: () => reqState,
+        generate: async () => ({
+            text: JSON.stringify({
+                edits: [
+                    { id: 's0', text: 'First page has a simple grammatical mistake here.' },
+                    { id: 's1', text: 'Second page also has a clear verb agreement error.' },
+                    { id: 's2', text: 'Third page contains another obvious grammatical mistake right here.' },
+                    { id: 's3', text: 'The report says Mira missing.' },
+                ],
+            }),
+            finishReason: 'stop',
+        }),
+    });
+    const rescued = await isolatedRun(batchCtx);
+    assert.equal(rescued.edits.length, 3);
+    assert.equal(reqState.droppedUnsafeEdits, 1);
+});
+
+test('three bulk review validation failures pause further bulk reviews with dynamic retryAfterSeconds without blocking small reviews, suggestions, or Smart Notes', async (t) => {
+    const code = await account();
+    const request = await api(t, (_req, res) => {
+        if (_req.path.endsWith('/notes')) return res.json({ notes: 'Smart Note ok' });
+        if (_req.body.writingReviewVersion === 1 && (_req.body.bookPageQuote || 1) === 1) {
+            return res.json({ response: JSON.stringify({ edits: [{ id: 's0', text: 'Fixed cleanly.' }] }) });
+        }
+        return res.status(502).json({ error: 'The AI review omitted too much of a passage. Your text is unchanged.', code: 'BOOK_REVIEW_INVALID' });
+    });
+
+    const bulkBody = makeReviewBody({ task: 'writing-review-revise', pages: 5 });
+    for (let i = 0; i < 3; i++) {
+        const failed = await request(code, randomUUID(), bulkBody, '/api/followup');
+        assert.equal(failed.status, 502);
+    }
+
+    // Advance 5 minutes so dynamic retryAfterSeconds reflects remaining ~10 minutes.
+    time = new Date(time.getTime() + 5 * 60000);
+    const bulkBlocked = await request(code, randomUUID(), bulkBody, '/api/followup');
+    assert.equal(bulkBlocked.status, 429);
+    assert.equal(bulkBlocked.body.code, 'AI_FAILURE_COOLDOWN');
+    assert.ok(bulkBlocked.body.retryAfterSeconds > 500 && bulkBlocked.body.retryAfterSeconds <= 600);
+    assert.match(bulkBlocked.body.error, /10 minutes/);
+
+    // Unrelated features must stay available:
+    const singlePage = await request(code, randomUUID(), makeReviewBody({ task: 'writing-review-grammar', pages: 1 }), '/api/followup');
+    assert.equal(singlePage.status, 200);
+    const smartNote = await request(code, randomUUID(), { type: 'text', content: 'Ordinary note text.' }, '/api/notes');
+    assert.equal(smartNote.status, 200);
+});
