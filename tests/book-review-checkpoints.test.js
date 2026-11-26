@@ -546,3 +546,40 @@ test('17-page bulk revise, grammar, and improve reviews recover when a batch ret
   assert.equal(seenSplits.flat().length, failingBatchIds.size);
  }
 });
+
+test('recursive depth-2 split recovery succeeds when even a half-batch triggers invalid_json without hitting retry cap', async () => {
+ await Checkpoint.deleteMany({});
+ await GenerationRequest.deleteMany({});
+ request = await attempt();
+ const segments = Array.from({ length: 12 }, (_, i) => ({
+  id: `s${i}`,
+  text: `Sentence ${i + 1}: "Dialogue quote," she said as rain tapped softly against the tall window.`,
+ }));
+ const ctx = { task: 'writing-review-revise', pages: [{ number: 1, ids: segments.map((s) => s.id) }], segments };
+ const seenCalls = [];
+ const run = createBookReview({
+  Checkpoint,
+  GenerationRequest,
+  model: 'depth2-json-recovery',
+  now: () => new Date(time),
+  getRequest: () => request,
+  generate: async (_cap, prompt, { beforeAttempt, schema }) => {
+   assert.equal(schema?.name, 'writing_review');
+   await beforeAttempt();
+   const input = JSON.parse(prompt.split('SOURCE: ')[1]);
+   seenCalls.push(input.segments.length);
+   if (input.segments.length > 4) {
+    return { text: '{"edits":[{"id":"s0","text":"broken', finishReason: 'stop' };
+   }
+   return {
+    text: JSON.stringify({
+     edits: input.segments.map((s) => ({ id: s.id, text: s.text.replace('softly', 'quietly') })),
+    }),
+    finishReason: 'stop',
+   };
+  },
+ });
+ const res = await run(ctx);
+ assert.equal(res.edits.length, 12);
+ assert.ok(seenCalls.some((len) => len <= 4));
+});

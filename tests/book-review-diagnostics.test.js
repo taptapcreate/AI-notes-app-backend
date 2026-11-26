@@ -30,7 +30,13 @@ for (const [reason, result] of invalid) test(`review diagnostics distinguish ${r
 test('diagnostics distinguish invalid JSON and strip arbitrary details', () => {
     assert.throws(() => reviewResult('private malformed JSON', context), error => {
         assert.ok(error instanceof SyntaxError);
-        assert.equal(reviewDiagnostic(error, 'batch').reason, 'invalid_json');
+        const diag = reviewDiagnostic(error, 'batch');
+        assert.equal(diag.reason, 'invalid_json');
+        assert.equal(diag.responseChars, 22);
+        assert.equal(diag.startsWith, 'other');
+        assert.equal(diag.endsWithBrace, 0);
+        assert.ok(['unexpected_token', 'other'].includes(diag.syntaxErrorKind));
+        assert.doesNotMatch(JSON.stringify(diag), /private/i);
         return true;
     });
     const diagnostic = reviewDiagnostic({ message: 'private text', segmentIds: ['s0', 'private-id', 's99999'], reviewValidation: {

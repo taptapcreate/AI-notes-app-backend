@@ -8,7 +8,16 @@ const reasons = new Set([
     'dialogue_punctuation_removed', 'chapter_omission', 'chapter_size_limit',
 ]);
 const stages = new Set(['batch', 'repair', 'checkpoint', 'final']);
-const measurements = ['editCount', 'segmentCount', 'sourceChars', 'replacementChars', 'sourceLineBreaks', 'replacementLineBreaks'];
+const measurements = [
+    'editCount', 'segmentCount', 'sourceChars', 'replacementChars',
+    'sourceLineBreaks', 'replacementLineBreaks',
+    'responseChars', 'parseOffset', 'endsWithBrace',
+];
+const safeEnums = {
+    startsWith: new Set(['empty', 'brace', 'bracket', 'fence', 'other']),
+    syntaxErrorKind: new Set(['unexpected_end', 'unterminated_string', 'bad_escape', 'unexpected_token', 'other']),
+    finishReason: new Set(['stop', 'length', 'content_filter', 'error', 'other']),
+};
 function reviewDiagnostic(error, stage, batchIndex, attempt) {
     const details = error?.reviewValidation || {};
     const diagnostic = {
@@ -23,6 +32,8 @@ function reviewDiagnostic(error, stage, batchIndex, attempt) {
         : [];
     for (const key of measurements)
         if (Number.isSafeInteger(details[key]) && details[key] >= 0) diagnostic[key] = details[key];
+    for (const [key, allowed] of Object.entries(safeEnums))
+        if (typeof details[key] === 'string' && allowed.has(details[key])) diagnostic[key] = details[key];
     return diagnostic;
 }
 module.exports = { reviewDiagnostic };

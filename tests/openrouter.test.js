@@ -126,3 +126,29 @@ test('json option requests OpenRouter json_object response_format without affect
  assert.deepEqual(bodies[0].response_format, { type: 'json_object' });
  assert.equal(bodies[1].response_format, undefined);
 });
+test('schema option sends strict json_schema and falls back once to json_object on provider schema rejection', async () => {
+ const bodies = [];
+ const metrics = [];
+ const schema = {
+  name: 'writing_review',
+  strict: true,
+  schema: { type: 'object', properties: { edits: { type: 'array' } }, required: ['edits'], additionalProperties: false },
+ };
+ const router = createOpenRouter({ chat: { completions: { create: async (body) => {
+  bodies.push(body);
+  if (bodies.length === 1) {
+   const err = new Error('Provider does not support json_schema response_format');
+   err.status = 400;
+   throw err;
+  }
+  return { choices: [{ message: { content: '{"edits":[]}' }, finish_reason: 'stop' }] };
+ } } } }, { onTiming: value => metrics.push(value) });
+ const res = await router.complete('SECRET DRAFT', 8000, undefined, undefined, { json: true, schema });
+ assert.equal(res.text, '{"edits":[]}');
+ assert.equal(bodies.length, 2);
+ assert.deepEqual(bodies[0].response_format, { type: 'json_schema', json_schema: schema });
+ assert.deepEqual(bodies[1].response_format, { type: 'json_object' });
+ assert.equal(metrics.at(-1).finishReason, 'stop');
+ assert.equal(metrics.at(-1).outputChars, 12);
+ assert.ok(!JSON.stringify(metrics).includes('SECRET'));
+});

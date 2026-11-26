@@ -4,6 +4,7 @@ const {
     reviewPrompt,
     reviewResult,
     parseReviewJson,
+    reviewJsonSchema,
     isSplitContinuation,
     sameFlowBoundary,
 } = require('./writing-review');
@@ -12,8 +13,9 @@ const { reviewDiagnostic } = require('./book-review-diagnostics');
 const retentionMs = 24 * 60 * 60 * 1000;
 const maxChunkAttempts = 4;
 const attemptWindowMs = 15 * 60 * 1000;
-const reviewCompatibility = 'book-integrity-v3';
+const reviewCompatibility = 'book-integrity-v4';
 const maxBatchValidationAttempts = 2;
+const maxSplitDepth = 3;
 const batchConcurrency = 3;
 
 function createBookReview({
@@ -91,7 +93,7 @@ function createBookReview({
                 },
             };
             request.validationRetries = (request.validationRetries || 0) + 1;
-            const result = await generate(8000, reviewPrompt(repair), { beforeAttempt, json: true });
+            const result = await generate(8000, reviewPrompt(repair), { beforeAttempt, json: true, schema: reviewJsonSchema });
             if (result.finishReason === 'length') return null;
             const repaired = reviewResult(result.text, repair).edits;
             const combined = [...parsed.edits.filter(edit => !affected.has(edit.id)), ...repaired];
@@ -159,20 +161,25 @@ function createBookReview({
             error?.code === 'BOOK_REVIEW_INCOMPLETE' ||
             ['response_not_text', 'edits_not_array', 'too_many_edits'].includes(error?.reviewValidation?.reason);
         const maxValidationAttempts = batches.length === 1 ? 2 : maxBatchValidationAttempts;
-        const runBatch = async (batch, beforeAttempt, batchIndex = 0, { maxAttempts = maxValidationAttempts, splitDepth = 0 } = {}) => {
+        const normalizeFinishReason = value =>
+            ['stop', 'length', 'content_filter', 'error'].includes(value) ? value : value ? 'other' : undefined;
+        const runBatch = async (batch, beforeAttempt, batchIndex = 0, { maxAttempts = maxValidationAttempts, splitDepth = 0, splitGuard = beforeAttempt } = {}) => {
             const basePrompt = reviewPrompt(batch);
             let lastReason = '';
             const trySplitRecovery = async (failureError) => {
-                if (splitDepth > 0 || batch.segments.length < 2 || !isSplittableBatchFailure(failureError)) return null;
+                if (splitDepth >= maxSplitDepth || batch.segments.length < 2 || !isSplittableBatchFailure(failureError)) return null;
                 const halves = splitReviewBatch(batch);
                 if (!halves) return null;
                 request.validationRetries = (request.validationRetries || 0) + 1;
-                const leftEdits = await runBatch(halves[0], beforeAttempt, batchIndex, { maxAttempts: 1, splitDepth: splitDepth + 1 });
-                const rightEdits = await runBatch(halves[1], beforeAttempt, batchIndex, { maxAttempts: 1, splitDepth: splitDepth + 1 });
+                const nextAttempt = splitDepth === 0 ? beforeAttempt : splitGuard;
+                const leftEdits = await runBatch(halves[0], nextAttempt, batchIndex, { maxAttempts: 1, splitDepth: splitDepth + 1, splitGuard });
+                const rightEdits = await runBatch(halves[1], nextAttempt, batchIndex, { maxAttempts: 1, splitDepth: splitDepth + 1, splitGuard });
                 const combined = [...leftEdits, ...rightEdits];
                 try {
                     const validated = reviewResult(JSON.stringify({ edits: combined }), batch);
-                    request.recoveredSegments = (request.recoveredSegments || 0) + batch.segments.length;
+                    if (splitDepth === 0) {
+                        request.recoveredSegments = (request.recoveredSegments || 0) + batch.segments.length;
+                    }
                     return validated.edits;
                 } catch (combinedError) {
                     if (combinedError.reviewValidation) diagnose(combinedError, 'repair', batchIndex);
@@ -190,6 +197,7 @@ function createBookReview({
                     result = await generate(8000, prompt, {
                         beforeAttempt,
                         json: true,
+                        schema: reviewJsonSchema,
                     });
                 } catch (error) {
                     const wrapped = wrapReviewError(error, 'AI Notes could not complete this writing review right now. Your credits are returned. Please try again.');
@@ -215,6 +223,10 @@ function createBookReview({
                 try {
                     return reviewResult(result.text, batch).edits;
                 } catch (error) {
+                    const finishReason = normalizeFinishReason(result.finishReason);
+                    if (finishReason && error?.reviewValidation?.reason === 'invalid_json') {
+                        error.reviewValidation.finishReason = finishReason;
+                    }
                     diagnose(error, 'batch', batchIndex, attempt + 1);
                     lastReason =
                         error instanceof SyntaxError
@@ -246,13 +258,23 @@ function createBookReview({
         // Small operations retain one request and do not create persistent job records.
         if (batches.length === 1) {
             let singleAttempt = 0;
-            const edits = await runBatch(batches[0], async () => {
+            let singleSplitCalls = 0;
+            const consumeSingle = async () => {
                 if (++singleAttempt > 4)
                     throw new BookGenerationError(
                         'The retry limit for this review was reached. Your credits are returned.',
                         'BOOK_REVIEW_RETRY_LIMIT',
                     );
-            });
+            };
+            const singleSplitGuard = async () => {
+                request.signal?.throwIfAborted();
+                if (++singleSplitCalls > 8)
+                    throw new BookGenerationError(
+                        'The retry limit for this review was reached. Your credits are returned.',
+                        'BOOK_REVIEW_RETRY_LIMIT',
+                    );
+            };
+            const edits = await runBatch(batches[0], consumeSingle, 0, { splitGuard: singleSplitGuard });
             return reviewResult(JSON.stringify({ edits }), context);
         }
         if (!request.accountScope || !request.generationId)
@@ -374,7 +396,8 @@ function createBookReview({
             request.reusedChunks = reusedChunks;
             const processChunk = async (index) => {
                 request.signal?.throwIfAborted();
-                const saved = await runBatch(batches[index], async () => {
+                let splitCalls = 0;
+                const consumeAttempt = async () => {
                     request.signal?.throwIfAborted();
                     const attempt = await Checkpoint.updateOne(
                         {
@@ -396,7 +419,19 @@ function createBookReview({
                         error.retryAfterSeconds = seconds;
                         throw error;
                     }
-                }, index);
+                };
+                const splitGuard = async () => {
+                    request.signal?.throwIfAborted();
+                    if (++splitCalls > 8)
+                        throw new BookGenerationError(
+                            'The retry limit for this review was reached. Your credits are returned.',
+                            'BOOK_REVIEW_RETRY_LIMIT',
+                        );
+                    const active = await Checkpoint.findOne(owned(), { _id: 1 }).lean();
+                    if (!active)
+                        throw new BookGenerationError('The review lease expired or changed. Your credits are returned; retry to resume completed sections.', 'BOOK_REVIEW_LEASE_LOST', 409);
+                };
+                const saved = await runBatch(batches[index], consumeAttempt, index, { splitGuard });
                 request.signal?.throwIfAborted();
                 const stored = await Checkpoint.updateOne(owned(), {
                     $set: { [`chunks.${index}`]: saved },

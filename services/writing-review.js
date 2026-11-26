@@ -98,7 +98,31 @@ function reviewBatches(context) {
   }
   return batches;
 }
-function extractJsonObject(text) {
+const reviewJsonSchema = {
+  name: 'writing_review',
+  strict: true,
+  schema: {
+    type: 'object',
+    properties: {
+      edits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            text: { type: 'string' },
+          },
+          required: ['id', 'text'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['edits'],
+    additionalProperties: false,
+  },
+};
+function extractJsonObjects(text) {
+  const results = [];
   let depth = 0, start = -1, inString = false, escaped = false;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
@@ -113,10 +137,16 @@ function extractJsonObject(text) {
       if (depth === 0) start = i;
       depth++;
     } else if (ch === '}') {
-      if (depth > 0 && --depth === 0 && start >= 0) return text.slice(start, i + 1);
+      if (depth > 0 && --depth === 0 && start >= 0) {
+        results.push(text.slice(start, i + 1));
+        start = -1;
+      }
     }
   }
-  return null;
+  return results;
+}
+function extractJsonObject(text) {
+  return extractJsonObjects(text)[0] || null;
 }
 function sanitizeJsonCandidate(text) {
   let out = '';
@@ -127,8 +157,12 @@ function sanitizeJsonCandidate(text) {
     if (inString) {
       if (escaped) {
         escaped = false;
-        // Models sometimes emit JS-style \' escapes inside JSON prose.
-        out += ch === "'" ? "'" : '\\' + ch;
+        // Preserve valid JSON escapes; drop stray backslashes before other characters (e.g. \', \-, \.).
+        if ('"\\/bfnrt'.includes(ch) || (ch === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(i + 1, i + 5)))) {
+          out += '\\' + ch;
+        } else {
+          out += ch;
+        }
         continue;
       }
       if (ch === '\\') {
@@ -163,35 +197,127 @@ function sanitizeJsonCandidate(text) {
   if (escaped) out += '\\';
   return out;
 }
+function isStructuralClosingQuote(text, quoteIndex) {
+  const skipWs = idx => {
+    while (idx < text.length && /\s/.test(text[idx])) idx++;
+    return idx;
+  };
+  const j = skipWs(quoteIndex + 1);
+  if (j >= text.length) return false;
+  const next = text[j];
+  if (next === ':') return true;
+  if (next === '}' || next === ']') {
+    const afterClose = skipWs(j + 1);
+    return afterClose >= text.length || ',}]'.includes(text[afterClose]);
+  }
+  if (next !== ',') return false;
+  const k = skipWs(j + 1);
+  if (k >= text.length) return false;
+  if ('}]{'.includes(text[k])) return true;
+  if (text[k] !== '"') return false;
+  let endKey = k + 1;
+  while (endKey < text.length) {
+    if (text[endKey] === '\\') { endKey += 2; continue; }
+    if (text[endKey] === '"') break;
+    endKey++;
+  }
+  if (endKey >= text.length) return false;
+  const afterKey = skipWs(endKey + 1);
+  return afterKey < text.length && text[afterKey] === ':';
+}
+function escapeInteriorQuotes(text) {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        out += '\\' + ch;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        if (isStructuralClosingQuote(text, i)) {
+          inString = false;
+          out += ch;
+        } else {
+          out += '\\"';
+        }
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  if (escaped) out += '\\';
+  return out;
+}
+function normalizeReviewPayload(value) {
+  if (
+    Array.isArray(value) &&
+    value.every(item => item && typeof item === 'object' && !Array.isArray(item) && 'id' in item && 'text' in item)
+  ) {
+    return { edits: value };
+  }
+  return value;
+}
 function tryParseJson(candidate) {
   if (!candidate) return null;
   try {
-    return { value: JSON.parse(candidate) };
+    return { value: normalizeReviewPayload(JSON.parse(candidate)) };
   } catch (error) {
     const sanitized = sanitizeJsonCandidate(candidate);
     if (sanitized !== candidate) {
       try {
-        return { value: JSON.parse(sanitized) };
+        return { value: normalizeReviewPayload(JSON.parse(sanitized)) };
+      } catch {}
+    }
+    const quoted = sanitizeJsonCandidate(escapeInteriorQuotes(candidate));
+    if (quoted !== candidate && quoted !== sanitized) {
+      try {
+        return { value: normalizeReviewPayload(JSON.parse(quoted)) };
       } catch {}
     }
     return { error };
   }
+}
+function extractEditsSlices(text) {
+  const slices = [];
+  const end = text.lastIndexOf('}');
+  if (end < 0) return slices;
+  for (const match of text.matchAll(/\{\s*"edits"\s*:/g)) {
+    if (match.index <= end) slices.push(text.slice(match.index, end + 1));
+  }
+  return slices;
 }
 function parseReviewJson(response) {
   const trimmed = response.trim();
   const unfenced = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   const initial = tryParseJson(unfenced);
   if (initial && 'value' in initial) return initial.value;
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const fencedBlocks = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/gi)].map(match => match[1]?.trim());
   const candidates = [
-    fenced?.[1]?.trim(),
-    extractJsonObject(unfenced),
-    extractJsonObject(trimmed),
+    ...fencedBlocks,
+    ...extractJsonObjects(unfenced),
+    ...extractJsonObjects(trimmed),
+    ...extractEditsSlices(unfenced),
   ];
+  let fallback = null;
   for (const candidate of candidates) {
     const parsed = tryParseJson(candidate);
-    if (parsed && 'value' in parsed) return parsed.value;
+    if (parsed && 'value' in parsed) {
+      if (parsed.value && Array.isArray(parsed.value.edits)) return parsed.value;
+      fallback ??= parsed.value;
+    }
   }
+  if (fallback !== null) return fallback;
   throw initial.error;
 }
 const wordTokens = text => (text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu) || []);
@@ -381,11 +507,43 @@ function checkPairBoundary(origA, origB, outA, outB, editedA, editedB) {
 function reviewValidationError(reason, message, details = {}) {
   return Object.assign(Error(message), { reviewValidation: { reason, ...details } });
 }
+function jsonDiagnosticDetails(response, error) {
+  const trimmed = typeof response === 'string' ? response.trim() : '';
+  const startsWith = !trimmed
+    ? 'empty'
+    : trimmed[0] === '{'
+      ? 'brace'
+      : trimmed[0] === '['
+        ? 'bracket'
+        : trimmed.startsWith('```')
+          ? 'fence'
+          : 'other';
+  const msg = String(error?.message || '');
+  const syntaxErrorKind = /unexpected end|end of json/i.test(msg)
+    ? 'unexpected_end'
+    : /unterminated string/i.test(msg)
+      ? 'unterminated_string'
+      : /bad.*escape|unicode escape/i.test(msg)
+        ? 'bad_escape'
+        : /unexpected/i.test(msg)
+          ? 'unexpected_token'
+          : 'other';
+  const posMatch = msg.match(/position\s+(\d+)/i);
+  const parseOffset = posMatch ? Number(posMatch[1]) : undefined;
+  return {
+    reason: 'invalid_json',
+    responseChars: typeof response === 'string' ? response.length : 0,
+    startsWith,
+    endsWithBrace: trimmed.endsWith('}') ? 1 : 0,
+    syntaxErrorKind,
+    ...(Number.isSafeInteger(parseOffset) && parseOffset >= 0 && { parseOffset }),
+  };
+}
 function reviewResult(response, context) {
   if (typeof response !== 'string') throw reviewValidationError('response_not_text', 'The AI returned an unreadable review.');
   let value;
   try { value = parseReviewJson(response); }
-  catch (error) { error.reviewValidation = { reason: 'invalid_json' }; throw error; }
+  catch (error) { error.reviewValidation = jsonDiagnosticDetails(response, error); throw error; }
   if (!value || !Array.isArray(value.edits))
     throw reviewValidationError('edits_not_array', 'The AI returned an incomplete review.');
   if (value.edits.length > context.segments.length)
@@ -527,4 +685,4 @@ function writingReviewPrompt(context) {
   catch (error) { throw new Error('Invalid writing review source: ' + error.message); }
   return value ? reviewPrompt(value) : null;
 }
-module.exports = { reviewContext, reviewResult, reviewPrompt, writingStyle, writingReviewPrompt, validateReviewPages, reviewBatches, parseReviewJson, isSplitContinuation, sameFlowBoundary };
+module.exports = { reviewContext, reviewResult, reviewPrompt, writingStyle, writingReviewPrompt, validateReviewPages, reviewBatches, parseReviewJson, reviewJsonSchema, isSplitContinuation, sameFlowBoundary };

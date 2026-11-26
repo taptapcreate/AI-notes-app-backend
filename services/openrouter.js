@@ -66,9 +66,9 @@ function measuredUsage(value) {
 function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => undefined,
     isSmartNote = () => false, attachmentCache = createAttachmentCache() } = {}) {
     return {
-        async complete(content, maxTokens, signal, onDelta, { json = false } = {}) {
+        async complete(content, maxTokens, signal, onDelta, { json = false, schema = null } = {}) {
             const started = performance.now();
-            let firstTextMs, success = false, usage;
+            let firstTextMs, finishReason, outputChars, success = false, usage;
             const guardedNote = isSmartNote();
             try {
                 signal?.throwIfAborted();
@@ -89,7 +89,12 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                 const pdfKey = files.length === 1 && prompts.length ? pdfKeys[0] : null;
                 const cached = attachmentCache.get(pdfKey);
                 let emitted = false;
-                const request = async annotations => {
+                const initialFormat = schema
+                    ? { type: 'json_schema', json_schema: schema }
+                    : json
+                      ? { type: 'json_object' }
+                      : undefined;
+                const request = async (annotations, responseFormat = initialFormat) => {
                     let parsed, conflicting = false;
                     const collect = items => {
                         const value = reusablePdfAnnotations(items);
@@ -108,13 +113,14 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                         ] : [{ role: 'user', content: parts }],
                         max_completion_tokens: maxTokens,
                         reasoning: { effort: 'none' },
-                        ...(json && { response_format: { type: 'json_object' } }),
+                        ...(responseFormat && { response_format: responseFormat }),
                         ...(guardedNote && { provider: { max_price: { prompt: 0.10, completion: 0.50 }, allow_fallbacks: false } }),
                         ...(onDelta && { stream: true }),
                         ...(hasPdf && { plugins: [{ id: 'file-parser', pdf: { engine: PDF_ENGINE } }] }),
                     }, { signal });
                     if (onDelta) {
-                        let text = '', finishReason;
+                        let text = '';
+                        finishReason = undefined;
                         for await (const chunk of response) {
                             usage = measuredUsage(chunk.usage) || usage;
                             const choice = chunk.choices?.[0];
@@ -140,6 +146,7 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                             err.status = 502;
                             throw err;
                         }
+                        outputChars = text.length;
                         signal?.throwIfAborted();
                         if (parsed && !conflicting) attachmentCache.set(pdfKey, parsed);
                         success = true;
@@ -147,29 +154,49 @@ function createOpenRouter(client, { onTiming = () => {}, getCacheScope = () => u
                     }
                     usage = measuredUsage(response.usage);
                     const choice = response.choices?.[0];
+                    finishReason = choice?.finish_reason;
                     const text = choice?.message?.content;
                     if (typeof text !== 'string' || !text.trim()) {
                         const err = new Error('Empty AI completion');
                         err.status = 502;
                         throw err;
                     }
+                    outputChars = text.length;
                     collect(choice?.message?.annotations);
                     signal?.throwIfAborted();
                     if (parsed && !conflicting && ['stop', 'length'].includes(choice.finish_reason)) attachmentCache.set(pdfKey, parsed);
                     success = true;
                     return { text, finishReason: choice.finish_reason, ...(usage && { usage }) };
                 };
-                try { return await request(cached); }
+                const runWithAnnotationRetry = async responseFormat => {
+                    try { return await request(cached, responseFormat); }
+                    catch (error) {
+                        // A stale/unusable annotation gets one normal parse retry, before any preview.
+                        if (!cached || emitted || ![400, 422].includes(error.status) || signal?.aborted) throw error;
+                        attachmentCache.delete(pdfKey);
+                        if (guardedNote) throw error;
+                        return await request(undefined, responseFormat);
+                    }
+                };
+                try { return await runWithAnnotationRetry(initialFormat); }
                 catch (error) {
-                    // A stale/unusable annotation gets one normal parse retry, before any preview.
-                    if (!cached || emitted || ![400, 422].includes(error.status) || signal?.aborted) throw error;
-                    attachmentCache.delete(pdfKey);
-                    if (guardedNote) throw error;
-                    return await request();
+                    const status = Number(error?.status ?? error?.response?.status);
+                    if (
+                        !schema ||
+                        emitted ||
+                        signal?.aborted ||
+                        ![400, 422].includes(status) ||
+                        !/response_format|json_schema|schema|structured/i.test(error?.message || '')
+                    ) {
+                        throw error;
+                    }
+                    return await runWithAnnotationRetry({ type: 'json_object' });
                 }
             } finally {
                 try { onTiming({ model: MODEL, durationMs: Math.round(performance.now() - started),
                     ...(firstTextMs === undefined ? {} : { firstTextMs: Math.round(firstTextMs) }),
+                    ...(finishReason ? { finishReason } : {}),
+                    ...(outputChars === undefined ? {} : { outputChars }),
                     streamed: Boolean(onDelta), success, ...(usage && { usage }) }); } catch { /* Observability cannot lose a paid result. */ }
             }
         },
