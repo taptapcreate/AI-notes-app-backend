@@ -185,18 +185,19 @@ function checkPairBoundary(origA, origB, outA, outB, editedA, editedB) {
   const outAW = boundaryTokens(outA);
   const outBW = boundaryTokens(outB);
   const closesSentence = text => /[.!?…]["”’)\]]*\s*$/u.test(text.trim());
-  for (let k = 1; k <= Math.min(5, outAW.length, outBW.length); k++) {
-    if (k === 1 && closesSentence(outA)) continue;
-    const tail = outAW.slice(-k).join(' ');
-    const head = outBW.slice(0, k).join(' ');
-    if (tail && tail === head) {
-      const baseAlreadyRepeated =
-        origAW.length >= k &&
-        origBW.length >= k &&
-        origAW.slice(-k).join(' ') === tail &&
-        origBW.slice(0, k).join(' ') === head;
-      if (!baseAlreadyRepeated) {
-        throw Error('The AI review duplicated words across an adjacent boundary. Your text is unchanged.');
+  if (!closesSentence(outA)) {
+    for (let k = 1; k <= Math.min(5, outAW.length, outBW.length); k++) {
+      const tail = outAW.slice(-k).join(' ');
+      const head = outBW.slice(0, k).join(' ');
+      if (tail && tail === head) {
+        const baseAlreadyRepeated =
+          origAW.length >= k &&
+          origBW.length >= k &&
+          origAW.slice(-k).join(' ') === tail &&
+          origBW.slice(0, k).join(' ') === head;
+        if (!baseAlreadyRepeated) {
+          throw Error('The AI review duplicated words across an adjacent boundary. Your text is unchanged.');
+        }
       }
     }
   }
