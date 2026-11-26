@@ -101,18 +101,24 @@ test('improve, revise, and grammar prompts are meaningfully distinct from each o
  const grammarPrompt = reviewPrompt(reviewBatches(makeCtx('writing-review-grammar'))[0]);
  const improvePrompt = reviewPrompt(reviewBatches(makeCtx('writing-review-improve'))[0]);
  const revisePrompt  = reviewPrompt(reviewBatches(makeCtx('writing-review-revise'))[0]);
- // Grammar: targeted proofreading with minimal change.
+ // Grammar: targeted proofreading with minimal change and restrained fluency polish.
  assert.match(grammarPrompt, /light, targeted polish/);
  assert.match(grammarPrompt, /smallest useful change/);
+ assert.match(grammarPrompt, /do not force edits/i);
+ assert.match(grammarPrompt, /synonym swaps/i);
  assert.doesNotMatch(grammarPrompt, /line editor/);
- // Improve: meaningful prose enhancement beyond grammar, with short-segment awareness.
+ // Improve: meaningful prose enhancement beyond grammar, with meaning/object/action/certainty preservation.
  assert.match(improvePrompt, /line editor/);
  assert.match(improvePrompt, /descriptive and expressive quality/);
+ assert.match(improvePrompt, /concrete objects and their identities/);
+ assert.match(improvePrompt, /without summarizing or dropping sentences/);
+ assert.match(improvePrompt, /degrees of certainty or uncertainty/);
  assert.doesNotMatch(improvePrompt, /light, targeted polish/);
  assert.doesNotMatch(improvePrompt, /smallest useful change/);
- // Revise: chapter-level structural focus.
+ // Revise: chapter-level structural and narrative flow focus without acting as grammar-only.
  assert.match(revisePrompt, /developmental and narrative chapter editor/);
  assert.match(revisePrompt, /coherence.*pacing.*scene transitions/);
+ assert.match(revisePrompt, /vivid narrative flow/);
  assert.doesNotMatch(revisePrompt, /line editor/);
  // All three differ from each other in their primary instruction.
  assert.notEqual(grammarPrompt, improvePrompt);
