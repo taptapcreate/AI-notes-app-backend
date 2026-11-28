@@ -98,7 +98,7 @@ async function generationUnits(endpoint, body, config) {
     const desktop = body.desktopMediaBilling !== undefined;
     const mobile = body.mobileMediaBilling !== undefined;
     if (body.additionalImages !== undefined &&
-        (body.desktopMediaBilling !== 1 || mobile || body.mediaCreditQuote === undefined))
+        (!((body.desktopMediaBilling === 1 && !mobile) || (body.mobileMediaBilling === 1 && !desktop)) || body.mediaCreditQuote === undefined))
         throw new CreditError(426, 'Update AI Notes to use image-batch credit pricing.');
     const pcmDuration = body.type === 'voice'
         ? await require('./media-preflight').audioDuration(body.content, desktop ? 300 : 180) : null;

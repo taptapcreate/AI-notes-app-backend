@@ -79,3 +79,18 @@ test('all five selected images reach the provider in one ordered request', async
     assert.equal(content.length, 6);
     assert.deepEqual(content.slice(1).map(part => part.image_url.url.split(',')[1]), [body.content, ...body.additionalImages]);
 });
+
+
+test('mobile image batches use the same count pricing without allowing ambiguous billing flags', async () => {
+    for (const count of [2, 3, 4, 5]) {
+        const body = { ...batch(count), desktopMediaBilling: undefined, mobileMediaBilling: 1, appFeature: 'image' };
+        validateInput('/notes', body);
+        assert.equal(await generationUnits('/notes', body), 1 + Math.floor(count / 2));
+        await assert.rejects(generationUnits('/notes', { ...body, mediaCreditQuote: 1 }), { status: 409 });
+        for (const invalid of [
+            { ...body, mediaCreditQuote: undefined }, { ...body, mobileMediaBilling: 2 },
+            { ...body, desktopMediaBilling: 1 }, { ...body, mobileMediaBilling: undefined },
+        ]) await assert.rejects(generationUnits('/notes', invalid), { status: 426 });
+    }
+    assert.throws(() => validateImageBatch({ ...batch(5), sourceKind: undefined }), /incompatible/);
+});

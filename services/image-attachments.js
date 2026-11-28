@@ -25,8 +25,9 @@ function jpegDimensions(data) {
 
 function validateImageBatch(body) {
     if (body.additionalImages === undefined) return;
-    if (body.type !== 'image' || body.sourceKind !== 'image' || body.narration !== undefined ||
-        !Array.isArray(body.additionalImages) || body.additionalImages.length < 1 || body.additionalImages.length > 4)
+    if (body.type !== 'image' || body.sourceKind !== 'image' || body.narration !== undefined)
+        throw new CreditError(400, 'This image-batch request is incompatible. Update AI Notes and try again.', { code: 'INVALID_IMAGE_BATCH_SOURCE' });
+    if (!Array.isArray(body.additionalImages) || body.additionalImages.length < 1 || body.additionalImages.length > 4)
         throw new CreditError(400, 'Choose between one and five images for an image note.');
     let total = 0;
     for (const image of [body.content, ...body.additionalImages]) {

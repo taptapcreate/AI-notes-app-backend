@@ -1216,3 +1216,22 @@ test('invalid review diagnostics accompany settled full-refund telemetry without
  assert.doesNotMatch(JSON.stringify(telemetry),/private|Page prose/);
  assert.equal((await credits.byCode(code)).dailyRequestCount,0);
 });
+
+
+test('mobile five-image note debits three once and replays without double charging', async t => {
+    const code = await account(), request = await api(t);
+    const body = { ...fiveImages(), desktopMediaBilling: undefined, mobileMediaBilling: 1, appFeature: 'image' };
+    const before = (await credits.balance(code)).totalAvailable;
+    const rejected = await request(code, randomUUID(), { ...body, mediaCreditQuote: 1 });
+    assert.equal(rejected.status, 409);
+    assert.equal(calls, 0);
+    assert.equal((await credits.balance(code)).totalAvailable, before);
+    const id = randomUUID();
+    const first = await request(code, id, body);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.billing.creditCost, 3);
+    assert.equal((await credits.balance(code)).totalAvailable, before - 3);
+    assert.equal((await request(code, id, body)).status, 200);
+    assert.equal((await credits.balance(code)).totalAvailable, before - 3);
+    assert.equal(calls, 1);
+});
